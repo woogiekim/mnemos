@@ -256,6 +256,207 @@ class TestIngestAgentScannerResults:
 
 
 # ---------------------------------------------------------------------------
+# ClaudeMdScanner.discover_memory_files() unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeMdScannerDiscoverMemoryFiles:
+    def test_discovers_memory_files_under_projects(self, tmp_path: Path) -> None:
+        """discover_memory_files() returns ScanResults for all *.md under */memory/."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        projects_root = tmp_path / ".claude" / "projects"
+        proj_a = projects_root / "project-a" / "memory"
+        proj_b = projects_root / "project-b" / "memory"
+        proj_a.mkdir(parents=True)
+        proj_b.mkdir(parents=True)
+
+        file_a = proj_a / "notes.md"
+        file_b = proj_b / "feedback.md"
+        file_a.write_text("# Notes\nSome notes.\n")
+        file_b.write_text("# Feedback\nSome feedback.\n")
+
+        with patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            scanner = ClaudeMdScanner()
+            results = scanner.discover_memory_files()
+
+        assert len(results) == 2
+        paths = [r[0] for r in results]
+        layers = [r[1] for r in results]
+        scopes = [r[2] for r in results]
+
+        assert file_a.resolve() in paths
+        assert file_b.resolve() in paths
+        assert all(layer == "global" for layer in layers)
+        assert all(scope == "claude_memory" for scope in scopes)
+
+    def test_returns_empty_when_projects_dir_missing(self, tmp_path: Path) -> None:
+        """discover_memory_files() returns [] silently when ~/.claude/projects/ is absent."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        missing_projects = tmp_path / ".claude" / "nonexistent-projects"
+
+        with patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", missing_projects):
+            scanner = ClaudeMdScanner()
+            results = scanner.discover_memory_files()
+
+        assert results == []
+
+    def test_returns_empty_when_no_memory_dirs(self, tmp_path: Path) -> None:
+        """discover_memory_files() returns [] when projects/ exists but has no memory/*.md."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        projects_root = tmp_path / ".claude" / "projects"
+        (projects_root / "project-a").mkdir(parents=True)  # no memory/ subdir
+
+        with patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            scanner = ClaudeMdScanner()
+            results = scanner.discover_memory_files()
+
+        assert results == []
+
+    def test_source_path_is_full_absolute_path(self, tmp_path: Path) -> None:
+        """discover_memory_files() dedup key (path) is a full absolute path."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        projects_root = tmp_path / ".claude" / "projects"
+        memory_dir = projects_root / "my-project" / "memory"
+        memory_dir.mkdir(parents=True)
+        md_file = memory_dir / "thoughts.md"
+        md_file.write_text("# Thoughts\n")
+
+        with patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            scanner = ClaudeMdScanner()
+            results = scanner.discover_memory_files()
+
+        assert len(results) == 1
+        result_path = results[0][0]
+        assert result_path.is_absolute()
+        assert result_path == md_file.resolve()
+
+    def test_skips_non_md_files(self, tmp_path: Path) -> None:
+        """discover_memory_files() only returns *.md files, ignoring other extensions."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        projects_root = tmp_path / ".claude" / "projects"
+        memory_dir = projects_root / "proj" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "notes.md").write_text("# md file\n")
+        (memory_dir / "notes.txt").write_text("txt file\n")
+        (memory_dir / "notes.json").write_text("{}\n")
+
+        with patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            scanner = ClaudeMdScanner()
+            results = scanner.discover_memory_files()
+
+        assert len(results) == 1
+        assert results[0][0].suffix == ".md"
+
+
+# ---------------------------------------------------------------------------
+# IngestAgent.run_scanner_results_dedup() unit tests (memory files)
+# ---------------------------------------------------------------------------
+
+
+class TestIngestAgentDedupMemoryFiles:
+    def test_creates_new_memory_file_entry(self, tmp_path: Path, repo_root: Path) -> None:
+        """run_scanner_results_dedup() creates a new item for an unseen memory file."""
+        from core.gateway import MemoryGateway
+        from agents.ingest import IngestAgent
+
+        memory_file = tmp_path / "feedback.md"
+        memory_file.write_text("# Feedback\nThis is feedback.\n")
+
+        gw = MemoryGateway(repo_root=str(repo_root))
+        agent = IngestAgent(gateway=gw)
+
+        scan_results = [(memory_file.resolve(), "global", "claude_memory")]
+        result = agent.run_scanner_results_dedup(scan_results, run_id="test-dedup")
+
+        assert len(result["created"]) == 1
+        assert len(result["updated"]) == 0
+        assert len(result["skipped"]) == 0
+
+    def test_skips_unchanged_memory_file(self, tmp_path: Path, repo_root: Path) -> None:
+        """run_scanner_results_dedup() skips a file when content hash is unchanged."""
+        from core.gateway import MemoryGateway
+        from agents.ingest import IngestAgent
+
+        memory_file = tmp_path / "notes.md"
+        memory_file.write_text("# Notes\nUnchanged content.\n")
+
+        gw = MemoryGateway(repo_root=str(repo_root))
+        agent = IngestAgent(gateway=gw)
+
+        scan_results = [(memory_file.resolve(), "global", "claude_memory")]
+
+        # First ingest — creates
+        result1 = agent.run_scanner_results_dedup(scan_results, run_id="test-dedup")
+        assert len(result1["created"]) == 1
+
+        # Second ingest — same content, should skip
+        result2 = agent.run_scanner_results_dedup(scan_results, run_id="test-dedup")
+        assert len(result2["created"]) == 0
+        assert len(result2["updated"]) == 0
+        assert len(result2["skipped"]) == 1
+
+    def test_updates_changed_memory_file(self, tmp_path: Path, repo_root: Path) -> None:
+        """run_scanner_results_dedup() updates an item when content changes."""
+        from core.gateway import MemoryGateway
+        from agents.ingest import IngestAgent
+
+        memory_file = tmp_path / "evolving.md"
+        memory_file.write_text("# Version 1\nOriginal content.\n")
+
+        gw = MemoryGateway(repo_root=str(repo_root))
+        agent = IngestAgent(gateway=gw)
+
+        scan_results = [(memory_file.resolve(), "global", "claude_memory")]
+
+        # First ingest — creates
+        result1 = agent.run_scanner_results_dedup(scan_results, run_id="test-dedup")
+        assert len(result1["created"]) == 1
+
+        # Change the file content
+        memory_file.write_text("# Version 2\nUpdated content.\n")
+
+        # Second ingest — different content, should update
+        result2 = agent.run_scanner_results_dedup(scan_results, run_id="test-dedup")
+        assert len(result2["created"]) == 0
+        assert len(result2["updated"]) == 1
+        assert len(result2["skipped"]) == 0
+
+    def test_dedup_key_is_full_absolute_path(self, tmp_path: Path, repo_root: Path) -> None:
+        """source_file stored in metadata is the full absolute path string."""
+        import frontmatter
+        from core.gateway import MemoryGateway
+        from agents.ingest import IngestAgent
+
+        memory_file = tmp_path / "path-test.md"
+        memory_file.write_text("# Path Test\n")
+
+        gw = MemoryGateway(repo_root=str(repo_root))
+        agent = IngestAgent(gateway=gw)
+
+        scan_results = [(memory_file.resolve(), "global", "claude_memory")]
+        result = agent.run_scanner_results_dedup(scan_results, run_id="test-dedup")
+
+        assert len(result["created"]) == 1
+
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert matches
+        post = frontmatter.load(str(matches[0]))
+        stored_path = post.get("source_file", "")
+        assert Path(stored_path).is_absolute()
+        assert stored_path == str(memory_file.resolve())
+
+
+# ---------------------------------------------------------------------------
 # CLI command tests
 # ---------------------------------------------------------------------------
 
@@ -366,3 +567,98 @@ class TestMemoryIngestClaudeMdCommand:
 
         assert result.exit_code == 0, result.output
         assert "claude-md: 1 created" in result.output
+
+    def test_memory_files_ingested_by_default(
+        self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
+    ) -> None:
+        """memory-ingest-claude-md syncs ~/.claude/projects/*/memory/*.md by default."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        # Set up a memory file under a fake ~/.claude/projects/ root
+        projects_root = tmp_path / ".claude" / "projects"
+        memory_dir = projects_root / "my-project" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "notes.md").write_text("# Notes\nSome notes.\n")
+
+        # No CLAUDE.md files
+        missing_global = tmp_path / ".claude" / "CLAUDE.md"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        cli = self._make_cli(monkeypatch, repo_root)
+
+        with patch.object(ClaudeMdScanner, "GLOBAL_CLAUDE_MD", missing_global), \
+             patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            result = runner.invoke(
+                cli,
+                ["memory-ingest-claude-md", "--project-root", str(project_dir)],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "memory created:" in result.output
+        assert "memory-sync: 1 created" in result.output
+
+    def test_skip_memory_files_flag_omits_memory_sync(
+        self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
+    ) -> None:
+        """--skip-memory-files suppresses ~/.claude/projects/*/memory/*.md ingestion."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        projects_root = tmp_path / ".claude" / "projects"
+        memory_dir = projects_root / "proj" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "data.md").write_text("# Data\n")
+
+        missing_global = tmp_path / ".claude" / "CLAUDE.md"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        (project_dir / "CLAUDE.md").write_text("# Project\n")
+
+        cli = self._make_cli(monkeypatch, repo_root)
+
+        with patch.object(ClaudeMdScanner, "GLOBAL_CLAUDE_MD", missing_global), \
+             patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            result = runner.invoke(
+                cli,
+                [
+                    "memory-ingest-claude-md",
+                    "--project-root", str(project_dir),
+                    "--skip-memory-files",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        # Memory sync output must NOT appear
+        assert "memory-sync:" not in result.output
+        assert "memory created:" not in result.output
+        # CLAUDE.md ingestion still ran
+        assert "claude-md: 1 created" in result.output
+
+    def test_no_memory_files_found_message(
+        self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
+    ) -> None:
+        """CLI prints 'no project memory files found' when projects/ is empty."""
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        # Empty projects dir (no memory subdirs)
+        projects_root = tmp_path / ".claude" / "projects"
+        projects_root.mkdir(parents=True)
+
+        missing_global = tmp_path / ".claude" / "CLAUDE.md"
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        cli = self._make_cli(monkeypatch, repo_root)
+
+        with patch.object(ClaudeMdScanner, "GLOBAL_CLAUDE_MD", missing_global), \
+             patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            result = runner.invoke(
+                cli,
+                ["memory-ingest-claude-md", "--project-root", str(project_dir)],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "no project memory files found" in result.output
