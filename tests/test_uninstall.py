@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from core.uninstaller import (
+    _read_pipx_metadata,
+    purge_mnemos_artifacts,
     remove_claude_md_block,
     remove_cursor_rules_block,
     remove_settings_json_hooks,
@@ -424,6 +428,173 @@ class TestRemoveZshrcLine:
 
 
 # ---------------------------------------------------------------------------
+# _read_pipx_metadata
+# ---------------------------------------------------------------------------
+
+class TestReadPipxMetadata:
+    def test_reads_valid_metadata(self, tmp_path):
+        venvs_dir = tmp_path / "pipx" / "venvs"
+        mnemos_venv = venvs_dir / "mnemos"
+        mnemos_venv.mkdir(parents=True)
+        metadata = {"main_package": {"package": "mnemos", "package_version": "0.1.0"}}
+        (mnemos_venv / "pipx_metadata.json").write_text(json.dumps(metadata))
+
+        result = _read_pipx_metadata(venvs_dir)
+
+        assert result == metadata
+
+    def test_returns_none_when_file_absent(self, tmp_path):
+        venvs_dir = tmp_path / "pipx" / "venvs"
+        venvs_dir.mkdir(parents=True)
+
+        result = _read_pipx_metadata(venvs_dir)
+
+        assert result is None
+
+    def test_returns_none_on_invalid_json(self, tmp_path):
+        venvs_dir = tmp_path / "pipx" / "venvs"
+        mnemos_venv = venvs_dir / "mnemos"
+        mnemos_venv.mkdir(parents=True)
+        (mnemos_venv / "pipx_metadata.json").write_text("not valid json {{{")
+
+        result = _read_pipx_metadata(venvs_dir)
+
+        assert result is None
+
+    def test_returns_none_when_venvs_dir_absent(self, tmp_path):
+        venvs_dir = tmp_path / "pipx" / "venvs_nonexistent"
+
+        result = _read_pipx_metadata(venvs_dir)
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# purge_mnemos_artifacts
+# ---------------------------------------------------------------------------
+
+class TestPurgeMnemosArtifacts:
+    def _make_dirs(self, tmp_path: Path):
+        """Create fake bin_dir and venvs_dir with mnemos artifacts."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(parents=True)
+        venvs_dir = tmp_path / "pipx" / "venvs"
+        mnemos_venv = venvs_dir / "mnemos"
+        mnemos_venv.mkdir(parents=True)
+
+        # Fake binary
+        binary = bin_dir / "mnemos"
+        binary.write_text("#!/bin/sh\necho mnemos\n")
+
+        # Fake metadata
+        metadata = {"main_package": {"package": "mnemos"}}
+        (mnemos_venv / "pipx_metadata.json").write_text(json.dumps(metadata))
+
+        return bin_dir, venvs_dir
+
+    def test_pipx_success_no_fallback_needed(self, tmp_path):
+        """When pipx uninstall succeeds and removes artifacts, no fallback fires."""
+        bin_dir, venvs_dir = self._make_dirs(tmp_path)
+        binary = bin_dir / "mnemos"
+        venv = venvs_dir / "mnemos"
+
+        def fake_pipx_run(cmd, **kwargs):
+            # Simulate pipx removing the binary and venv
+            binary.unlink(missing_ok=True)
+            shutil.rmtree(venv, ignore_errors=True)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_pipx_run):
+            with patch("shutil.which", return_value=None):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["pipx_ok"] is True
+        # Fallback not needed because artifacts were already gone
+        assert result["binary_removed"] is None
+        assert result["venv_removed"] is None
+        assert result["still_present"] is False
+
+    def test_fallback_removes_binary_when_pipx_fails(self, tmp_path):
+        """When pipx uninstall fails, binary and venv are removed by fallback."""
+        bin_dir, venvs_dir = self._make_dirs(tmp_path)
+
+        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "pipx")):
+            with patch("shutil.which", return_value=None):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["pipx_ok"] is False
+        assert result["binary_removed"] == bin_dir / "mnemos"
+        assert result["venv_removed"] == venvs_dir / "mnemos"
+        assert not (bin_dir / "mnemos").exists()
+        assert not (venvs_dir / "mnemos").exists()
+        assert result["still_present"] is False
+
+    def test_fallback_removes_binary_when_pipx_not_found(self, tmp_path):
+        """When pipx command is not found, fallback still cleans up artifacts."""
+        bin_dir, venvs_dir = self._make_dirs(tmp_path)
+
+        with patch("subprocess.run", side_effect=FileNotFoundError("pipx not found")):
+            with patch("shutil.which", return_value=None):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["pipx_ok"] is False
+        assert result["binary_removed"] == bin_dir / "mnemos"
+        assert result["venv_removed"] == venvs_dir / "mnemos"
+
+    def test_reports_still_present_when_which_finds_binary(self, tmp_path):
+        """still_present is True when shutil.which finds the binary after cleanup."""
+        bin_dir, venvs_dir = self._make_dirs(tmp_path)
+
+        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "pipx")):
+            with patch("shutil.which", return_value="/some/other/mnemos"):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["still_present"] is True
+
+    def test_includes_metadata_in_result(self, tmp_path):
+        """metadata key is populated when pipx_metadata.json exists."""
+        bin_dir, venvs_dir = self._make_dirs(tmp_path)
+
+        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "pipx")):
+            with patch("shutil.which", return_value=None):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["metadata"] is not None
+        assert result["metadata"]["main_package"]["package"] == "mnemos"
+
+    def test_no_artifacts_nothing_removed(self, tmp_path):
+        """When binary and venv are absent, fallback reports nothing removed."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        venvs_dir = tmp_path / "pipx" / "venvs"
+        venvs_dir.mkdir(parents=True)
+
+        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "pipx")):
+            with patch("shutil.which", return_value=None):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["binary_removed"] is None
+        assert result["venv_removed"] is None
+        assert result["metadata"] is None
+
+    def test_pipx_success_but_artifacts_remain_triggers_fallback(self, tmp_path):
+        """Even when pipx reports success but leaves artifacts, fallback cleans them up."""
+        bin_dir, venvs_dir = self._make_dirs(tmp_path)
+
+        # pipx succeeds but does NOT remove files
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            with patch("shutil.which", return_value=None):
+                result = purge_mnemos_artifacts(bin_dir=bin_dir, venvs_dir=venvs_dir)
+
+        assert result["pipx_ok"] is True
+        # Fallback should still catch leftover artifacts
+        assert result["binary_removed"] == bin_dir / "mnemos"
+        assert result["venv_removed"] == venvs_dir / "mnemos"
+        assert not (bin_dir / "mnemos").exists()
+        assert not (venvs_dir / "mnemos").exists()
+
+
+# ---------------------------------------------------------------------------
 # run_uninstall (integration)
 # ---------------------------------------------------------------------------
 
@@ -526,23 +697,45 @@ class TestRunUninstall:
         result = json.loads(settings.read_text())
         assert "hooks" not in result
 
-    def test_purge_calls_pipx_uninstall(self, tmp_path):
+    def test_purge_calls_purge_artifacts(self, tmp_path):
         home = self._setup_home(tmp_path)
 
-        with patch("core.uninstaller.pipx_uninstall") as mock_pipx:
+        purge_result = {
+            "pipx_ok": True,
+            "binary_removed": None,
+            "venv_removed": None,
+            "metadata": None,
+            "still_present": False,
+        }
+        with patch("core.uninstaller.purge_mnemos_artifacts", return_value=purge_result) as mock_purge:
             exit_code = run_uninstall(yes=True, purge=True, home=home)
 
         assert exit_code == 0
-        mock_pipx.assert_called_once()
+        mock_purge.assert_called_once()
 
     def test_purge_not_called_without_flag(self, tmp_path):
         home = self._setup_home(tmp_path)
 
-        with patch("core.uninstaller.pipx_uninstall") as mock_pipx:
+        with patch("core.uninstaller.purge_mnemos_artifacts") as mock_purge:
             exit_code = run_uninstall(yes=True, purge=False, home=home)
 
         assert exit_code == 0
-        mock_pipx.assert_not_called()
+        mock_purge.assert_not_called()
+
+    def test_purge_returns_one_when_binary_still_present(self, tmp_path):
+        home = self._setup_home(tmp_path)
+
+        purge_result = {
+            "pipx_ok": False,
+            "binary_removed": None,
+            "venv_removed": None,
+            "metadata": None,
+            "still_present": True,  # binary still in PATH
+        }
+        with patch("core.uninstaller.purge_mnemos_artifacts", return_value=purge_result):
+            exit_code = run_uninstall(yes=True, purge=True, home=home)
+
+        assert exit_code == 1
 
     def test_eof_on_confirmation_returns_one(self, tmp_path):
         home = self._setup_home(tmp_path)
