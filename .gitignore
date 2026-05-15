@@ -9,3 +9,7 @@ build/
 .venv/
 venv/
 *.db
+# mnemos
+.agent/runs/
+.agent/sessions/
+.agent/state/
