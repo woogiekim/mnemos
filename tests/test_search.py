@@ -6,7 +6,7 @@ from pathlib import Path
 @pytest.fixture
 def fts_index(tmp_path):
     """Return an FTSIndex backed by a temp directory."""
-    from mnemos.core.fts import FTSIndex
+    from core.fts import FTSIndex
     db_path = str(tmp_path / "fts.db")
     return FTSIndex(db_path=db_path)
 
@@ -14,8 +14,8 @@ def fts_index(tmp_path):
 @pytest.fixture
 def search_middleware(tmp_path):
     """Return a SearchMiddleware backed by a temp directory."""
-    from mnemos.core.search import SearchMiddleware
-    from mnemos.core.fts import FTSIndex
+    from core.search import SearchMiddleware
+    from core.fts import FTSIndex
     db_path = str(tmp_path / "fts.db")
     fts = FTSIndex(db_path=db_path)
     return SearchMiddleware(repo_root=str(tmp_path), fts_index=fts)
@@ -73,7 +73,7 @@ class TestVectorFallback:
         """VectorBackend with backend=none returns empty list gracefully."""
         import os
         os.environ["MNEMOS_VECTOR_BACKEND"] = "none"
-        from mnemos.core.vector import VectorBackend
+        from core.vector import VectorBackend
         backend = VectorBackend()
         results = backend.search("some query")
         assert results == []
@@ -82,7 +82,7 @@ class TestVectorFallback:
         """VectorBackend with unknown backend returns empty list gracefully."""
         import os
         os.environ["MNEMOS_VECTOR_BACKEND"] = "invalid_backend"
-        from mnemos.core.vector import VectorBackend
+        from core.vector import VectorBackend
         backend = VectorBackend()
         results = backend.search("some query")
         assert results == []
@@ -91,8 +91,8 @@ class TestVectorFallback:
 class TestSearchMiddleware:
     def test_search_middleware_uses_fts_first(self, tmp_path):
         """SearchMiddleware returns FTS results when items are indexed."""
-        from mnemos.core.fts import FTSIndex
-        from mnemos.core.search import SearchMiddleware
+        from core.fts import FTSIndex
+        from core.search import SearchMiddleware
 
         db_path = str(tmp_path / "fts.db")
         fts = FTSIndex(db_path=db_path)
@@ -109,8 +109,8 @@ class TestSearchMiddleware:
 
     def test_search_middleware_deduplicates(self, tmp_path):
         """SearchMiddleware deduplicates results from multiple sources."""
-        from mnemos.core.fts import FTSIndex
-        from mnemos.core.search import SearchMiddleware
+        from core.fts import FTSIndex
+        from core.search import SearchMiddleware
 
         db_path = str(tmp_path / "fts.db")
         fts = FTSIndex(db_path=db_path)
@@ -133,8 +133,8 @@ class TestSearchMiddleware:
 
     def test_search_middleware_layer_filter(self, tmp_path):
         """SearchMiddleware filters results by layer when specified."""
-        from mnemos.core.fts import FTSIndex
-        from mnemos.core.search import SearchMiddleware
+        from core.fts import FTSIndex
+        from core.search import SearchMiddleware
 
         db_path = str(tmp_path / "fts.db")
         fts = FTSIndex(db_path=db_path)

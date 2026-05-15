@@ -7,12 +7,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from mnemos.core.policy import PolicyEngine, PolicyViolationError
-from mnemos.core.store import MemoryStore
-from mnemos.core.log import AuditLogger
-from mnemos.core.hooks import HookDispatcher
-from mnemos.core.fts import FTSIndex
-from mnemos.core.search import SearchMiddleware
+from core.policy import PolicyEngine, PolicyViolationError
+from core.store import MemoryStore
+from core.log import AuditLogger
+from core.hooks import HookDispatcher
+from core.fts import FTSIndex
+from core.search import SearchMiddleware
 
 
 DEFAULT_QUALITY_SCORE = 0.8

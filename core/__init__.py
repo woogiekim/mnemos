@@ -1,6 +1,6 @@
 """mnemos — LLM Wiki Memory OS."""
-from mnemos.core.gateway import MemoryGateway
-from mnemos.core.policy import PolicyEngine, PolicyViolationError
+from core.gateway import MemoryGateway
+from core.policy import PolicyEngine, PolicyViolationError
 
 __version__ = "0.1.0"
 

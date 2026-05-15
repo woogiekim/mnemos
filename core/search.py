@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from mnemos.core.fts import FTSIndex
-from mnemos.core.layers import LAYER_STATIC_PATHS
-from mnemos.core.vector import VectorBackend
+from core.fts import FTSIndex
+from core.layers import LAYER_STATIC_PATHS
+from core.vector import VectorBackend
 
 
 class SearchMiddleware:

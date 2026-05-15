@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mnemos.core.hooks import HookDispatcher, VALID_EVENTS
+from core.hooks import HookDispatcher, VALID_EVENTS
 
 
 # ---------------------------------------------------------------------------

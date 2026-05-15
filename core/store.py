@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 import frontmatter
 
-from mnemos.core.layers import LAYER_STATIC_PATHS
+from core.layers import LAYER_STATIC_PATHS
 
 
 class MemoryStore:

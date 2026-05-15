@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import frontmatter
 
 if TYPE_CHECKING:
-    from mnemos.core.gateway import MemoryGateway
+    from core.gateway import MemoryGateway
 
 logger = logging.getLogger(__name__)
 
