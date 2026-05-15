@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from mnemos.install import install, _WIKI_DIRS, _AGENT_DIRS, _GITIGNORE_BLOCK
-from mnemos.cli import cli
+from mnemos.core.install import install, _WIKI_DIRS, _AGENT_DIRS, _GITIGNORE_BLOCK
+from mnemos.core.cli import cli
 
 
 def test_install_creates_wiki_dirs(tmp_path):

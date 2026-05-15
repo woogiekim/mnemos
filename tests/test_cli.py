@@ -65,7 +65,7 @@ def runner():
 def cli_with_repo(repo_root, monkeypatch):
     """Return CLI runner and the cli function, with MNEMOS_REPO_ROOT set."""
     monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
-    from mnemos.cli import cli
+    from mnemos.core.cli import cli
     return cli
 
 
