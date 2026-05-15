@@ -1,0 +1,53 @@
+# mnemos Promotion Policy Configuration
+# Controls lifecycle transitions between memory layers.
+
+layers:
+  ephemeral:
+    path_template: ".agent/runs/{run_id}/scratch/"
+    promotes_to: working
+    promotion:
+      age_hours: 0.1
+      access_count: 1
+      quality_score: 0.3
+
+  working:
+    path_template: ".agent/runs/{run_id}/working/"
+    promotes_to: session
+    promotion:
+      age_hours: 1.0
+      access_count: 2
+      quality_score: 0.5
+
+  session:
+    path_template: ".agent/sessions/{session_id}/"
+    promotes_to: project
+    promotion:
+      age_hours: 4.0
+      access_count: 3
+      quality_score: 0.6
+
+  project:
+    path_template: "wiki/projects/"
+    promotes_to: global
+    promotion:
+      age_hours: 24.0
+      access_count: 5
+      quality_score: 0.7
+
+  global:
+    path_template: "wiki/global/"
+    promotes_to: null
+    promotion:
+      age_hours: 0
+      access_count: 0
+      quality_score: 0.0
+
+forget:
+  requires_archived: true
+
+archive:
+  allowed_stages:
+    - stored
+    - retrieved
+    - used
+    - validated
