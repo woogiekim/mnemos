@@ -455,7 +455,7 @@ def memory_extract_insight(dry_run: bool) -> None:
 )
 @click.option("--run-id", "run_id", default="claude-md-ingest", help="Run ID for layer scoping.")
 @click.option(
-    "--skip-memory-files",
+    "--skip-files",
     "skip_memory_files",
     is_flag=True,
     default=False,
@@ -477,7 +477,7 @@ def memory_ingest_claude_md(
                                                    (dedup: skip/update/create by content hash)
 
     Missing files and directories are silently skipped.
-    Pass --skip-memory-files to omit the ~/.claude/projects memory sync.
+    Pass --skip-files to omit the ~/.claude/projects memory sync.
     """
     from agents.scanner import ClaudeMdScanner
     from agents.ingest import IngestAgent
