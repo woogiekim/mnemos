@@ -125,7 +125,7 @@ def memory_use(item_id: str) -> None:
         sys.exit(1)
 
 
-@cli.command("item-update")
+@cli.command("edit")
 @click.argument("item_id")
 @click.option("--content", required=True, help="New content.")
 def memory_update(item_id: str, content: str) -> None:
