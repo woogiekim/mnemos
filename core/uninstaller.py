@@ -44,7 +44,7 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
     """Return True if this hook-list entry contains a mnemos command."""
     for h in entry.get("hooks", []):
         cmd = h.get("command", "")
-        if "mnemos ingest-claude-md" in cmd or "mnemos search" in cmd:
+        if "mnemos" in cmd:
             return True
     return False
 
@@ -70,7 +70,7 @@ def remove_settings_json_hooks(settings_path: Path) -> tuple[bool, str]:
     hooks = data.get("hooks", {})
     changed = False
 
-    for hook_type in ("PostToolUse", "UserPromptSubmit"):
+    for hook_type in ("PostToolUse", "UserPromptSubmit", "Stop"):
         hook_list = hooks.get(hook_type, [])
         cleaned = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
         if cleaned != hook_list:
@@ -459,7 +459,7 @@ def _preview_settings_json(settings_path: Path) -> str:
     hooks = data.get("hooks", {})
     changed = False
 
-    for hook_type in ("PostToolUse", "UserPromptSubmit"):
+    for hook_type in ("PostToolUse", "UserPromptSubmit", "Stop"):
         hook_list = hooks.get(hook_type, [])
         cleaned = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
         if cleaned != hook_list:

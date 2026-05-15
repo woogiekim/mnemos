@@ -179,6 +179,24 @@ def update_settings_json(settings_path: Path) -> tuple[bool, str]:
         if repo_root:
             break
 
+    # Remove legacy Stop hook (mnemos extract-insight was removed in Issue #4 fix)
+    if "Stop" in hooks:
+        stop_list = hooks["Stop"]
+        has_mnemos_stop = any(
+            any("mnemos" in h.get("command", "") for h in entry.get("hooks", []))
+            for entry in stop_list
+        )
+        if has_mnemos_stop:
+            cleaned_stop = [
+                e for e in stop_list
+                if not any("mnemos" in h.get("command", "") for h in e.get("hooks", []))
+            ]
+            changed = True
+            if cleaned_stop:
+                hooks["Stop"] = cleaned_stop
+            else:
+                del hooks["Stop"]
+
     # Remove all existing mnemos hook entries and replace with canonical ones
     for hook_type, template in [
         ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
