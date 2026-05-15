@@ -11,11 +11,11 @@ that agents use instead of accessing the filesystem directly.
 
 ```bash
 curl -s https://raw.githubusercontent.com/woogiekim/mnemos/main/install.sh | bash
-source ~/.mnemos/.venv/bin/activate
 ```
 
-This clones the repository to `~/.mnemos`, creates a virtual environment there,
-installs the package, and scaffolds the wiki directory structure.
+This clones the repository to `~/.mnemos`, installs the package via pipx, and
+scaffolds the wiki directory structure. `mnemos` is available in every new
+terminal with no activation step required.
 
 ### Option B — Local clone
 
@@ -23,12 +23,11 @@ installs the package, and scaffolds the wiki directory structure.
 git clone https://github.com/woogiekim/mnemos.git
 cd mnemos
 ./install.sh
-source .venv/bin/activate
 ```
 
-`install.sh` handles everything: it auto-creates `.venv/`, upgrades pip, runs
-`pip install -e .`, and scaffolds the wiki directory structure. No manual
-`pip install` or venv setup is needed.
+`install.sh` handles everything: it installs pipx if needed, runs
+`pipx install -e .`, and scaffolds the wiki directory structure. No manual
+`pip install`, venv creation, or activation is needed.
 
 Once installed, the `mnemos` CLI is available:
 
