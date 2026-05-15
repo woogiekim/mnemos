@@ -232,7 +232,57 @@ print('  UserPromptSubmit hook written to settings.json.')
     fi
 
     # -------------------------------------------------------------------------
-    # 6c. Inject mnemos context section into ~/.claude/CLAUDE.md
+    # 6c. Wire Stop hook in ~/.claude/settings.json
+    #     Automatically extracts insights from each conversation turn.
+    #     Idempotent: skips if "mnemos memory-extract-insight" already present.
+    # -------------------------------------------------------------------------
+    if [ -f "$SETTINGS_FILE" ] && python3 -c "
+import sys, json
+data = json.load(open('$SETTINGS_FILE'))
+text = json.dumps(data)
+sys.exit(0 if 'mnemos memory-extract-insight' in text else 1)
+" 2>/dev/null; then
+        echo "  mnemos Stop hook already present in settings.json — skipping."
+    else
+        echo "  Wiring Stop hook in $SETTINGS_FILE ..."
+        python3 -c "
+import json, os, sys
+
+settings_file = '$SETTINGS_FILE'
+
+if os.path.exists(settings_file):
+    with open(settings_file, 'r') as f:
+        data = json.load(f)
+else:
+    data = {}
+
+hooks = data.setdefault('hooks', {})
+stop_hooks = hooks.setdefault('Stop', [])
+
+new_hook = {
+    'matcher': '',
+    'hooks': [
+        {
+            'type': 'command',
+            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos memory-extract-insight'
+        }
+    ]
+}
+
+stop_hooks.append(new_hook)
+
+with open(settings_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+
+print('  Stop hook written to settings.json.')
+" || {
+            echo "  warning: Could not update $SETTINGS_FILE — skipping Stop hook." >&2
+        }
+    fi
+
+    # -------------------------------------------------------------------------
+    # 6d. Inject mnemos context section into ~/.claude/CLAUDE.md
     #     Idempotent: skips if <!-- mnemos-start --> already present.
     # -------------------------------------------------------------------------
     if [ -f "$CLAUDE_MD_FILE" ] && grep -q '<!-- mnemos-start -->' "$CLAUDE_MD_FILE" 2>/dev/null; then
