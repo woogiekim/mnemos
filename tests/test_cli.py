@@ -105,6 +105,44 @@ class TestMemoryCaptureCommand:
         )
         assert result.exit_code != 0 or "error" in result.output.lower()
 
+    def test_memory_capture_notification_short_content(self, runner, cli_with_repo):
+        """capture notification must not add '...' when content <= 60 chars."""
+        content = "Short insight"
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", content],
+        )
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] Captured:" in result.output
+        assert f'"{content}"' in result.output
+        assert "..." not in result.output
+        assert "→ global layer" in result.output
+
+    def test_memory_capture_notification_long_content(self, runner, cli_with_repo):
+        """capture notification must truncate content > 60 chars with '...'."""
+        content = "A" * 80  # 80 chars, more than 60
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", content],
+        )
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] Captured:" in result.output
+        preview = content[:60]
+        assert f'"{preview}..."' in result.output
+        assert "→ global layer" in result.output
+
+    def test_memory_capture_notification_exactly_60_chars(self, runner, cli_with_repo):
+        """capture notification must not add '...' when content is exactly 60 chars."""
+        content = "B" * 60  # exactly 60 chars
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", content],
+        )
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] Captured:" in result.output
+        assert f'"{content}"' in result.output
+        assert "..." not in result.output
+
 
 class TestMemorySearchCommand:
     def test_memory_search_command(self, runner, cli_with_repo, repo_root):
@@ -127,6 +165,55 @@ class TestMemorySearchCommand:
             ["search", "nonexistent-xyzzy"],
         )
         assert result.exit_code == 0
+
+    def test_memory_search_notification_with_results(self, runner, cli_with_repo):
+        """search must print '[mnemos] Retrieved N memories' after results."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "notification test about dolphins"],
+        )
+        result = runner.invoke(
+            cli_with_repo,
+            ["search", "dolphins"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] Retrieved" in result.output
+        assert "memories" in result.output
+        # Notification must appear at the end
+        lines = result.output.strip().splitlines()
+        assert lines[-1].startswith("[mnemos] Retrieved")
+
+    def test_memory_search_notification_no_results(self, runner, cli_with_repo):
+        """search must print '[mnemos] Retrieved 0 memories' when no results."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["search", "zzz-no-match-xyzzy-999"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] Retrieved 0 memories" in result.output
+
+    def test_memory_search_notification_count_matches(self, runner, cli_with_repo):
+        """search notification N must match the number of results returned."""
+        content = "unique-kiwi-memory-for-count-test"
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", content],
+        )
+        result = runner.invoke(
+            cli_with_repo,
+            ["search", "kiwi-memory-for-count"],
+        )
+        assert result.exit_code == 0, result.output
+        # Extract N from "[mnemos] Retrieved N memories"
+        import re
+        match = re.search(r"\[mnemos\] Retrieved (\d+) memories", result.output)
+        assert match is not None, f"Notification not found in: {result.output}"
+        n = int(match.group(1))
+        # Count result lines (lines starting with "  [")
+        result_lines = [l for l in result.output.splitlines() if l.startswith("  [")]
+        assert n == len(result_lines), (
+            f"Notification said {n} but found {len(result_lines)} result lines"
+        )
 
 
 class TestMemoryPromoteCommand:
