@@ -1,4 +1,4 @@
-"""Tests for ClaudeMdScanner and memory-ingest-claude-md CLI command."""
+"""Tests for ClaudeMdScanner and ingest-claude-md CLI command."""
 from __future__ import annotations
 
 import pytest
@@ -475,7 +475,7 @@ class TestMemoryIngestClaudeMdCommand:
     def test_ingests_global_and_project_files(
         self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
     ) -> None:
-        """memory-ingest-claude-md ingests both files and prints captured IDs."""
+        """ingest-claude-md ingests both files and prints captured IDs."""
         from agents.scanner import ClaudeMdScanner
 
         global_dir = tmp_path / ".claude"
@@ -492,7 +492,7 @@ class TestMemoryIngestClaudeMdCommand:
         with patch.object(ClaudeMdScanner, "GLOBAL_CLAUDE_MD", global_md):
             result = runner.invoke(
                 cli,
-                ["memory-ingest-claude-md", "--project-root", str(project_dir)],
+                ["ingest-claude-md", "--project-root", str(project_dir)],
             )
 
         assert result.exit_code == 0, result.output
@@ -514,7 +514,7 @@ class TestMemoryIngestClaudeMdCommand:
         with patch.object(ClaudeMdScanner, "GLOBAL_CLAUDE_MD", missing_global):
             result = runner.invoke(
                 cli,
-                ["memory-ingest-claude-md", "--project-root", str(empty_project)],
+                ["ingest-claude-md", "--project-root", str(empty_project)],
             )
 
         assert result.exit_code == 0, result.output
@@ -536,7 +536,7 @@ class TestMemoryIngestClaudeMdCommand:
         with patch.object(ClaudeMdScanner, "GLOBAL_CLAUDE_MD", missing_global):
             result = runner.invoke(
                 cli,
-                ["memory-ingest-claude-md", "--project-root", str(project_dir)],
+                ["ingest-claude-md", "--project-root", str(project_dir)],
             )
 
         assert result.exit_code == 0, result.output
@@ -559,7 +559,7 @@ class TestMemoryIngestClaudeMdCommand:
             result = runner.invoke(
                 cli,
                 [
-                    "memory-ingest-claude-md",
+                    "ingest-claude-md",
                     "--project-root", str(project_dir),
                     "--run-id", "custom-run-123",
                 ],
@@ -571,7 +571,7 @@ class TestMemoryIngestClaudeMdCommand:
     def test_memory_files_ingested_by_default(
         self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
     ) -> None:
-        """memory-ingest-claude-md syncs ~/.claude/projects/*/memory/*.md by default."""
+        """ingest-claude-md syncs ~/.claude/projects/*/memory/*.md by default."""
         import agents.scanner as scanner_mod
         from agents.scanner import ClaudeMdScanner
 
@@ -592,7 +592,7 @@ class TestMemoryIngestClaudeMdCommand:
              patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
             result = runner.invoke(
                 cli,
-                ["memory-ingest-claude-md", "--project-root", str(project_dir)],
+                ["ingest-claude-md", "--project-root", str(project_dir)],
             )
 
         assert result.exit_code == 0, result.output
@@ -623,7 +623,7 @@ class TestMemoryIngestClaudeMdCommand:
             result = runner.invoke(
                 cli,
                 [
-                    "memory-ingest-claude-md",
+                    "ingest-claude-md",
                     "--project-root", str(project_dir),
                     "--skip-memory-files",
                 ],
@@ -657,7 +657,7 @@ class TestMemoryIngestClaudeMdCommand:
              patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
             result = runner.invoke(
                 cli,
-                ["memory-ingest-claude-md", "--project-root", str(project_dir)],
+                ["ingest-claude-md", "--project-root", str(project_dir)],
             )
 
         assert result.exit_code == 0, result.output

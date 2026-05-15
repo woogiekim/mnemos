@@ -33,13 +33,13 @@ Once installed, the `mnemos` CLI is available:
 
 ```bash
 # Capture a memory
-mnemos memory-capture --layer global --content "The capital of France is Paris." --tag fact
+mnemos capture --layer global --content "The capital of France is Paris." --tag fact
 
 # Ingest CLAUDE.md files (global and project-scoped)
-mnemos memory-ingest-claude-md --project-root .
+mnemos ingest-claude-md --project-root .
 
 # Search memories
-mnemos memory-search "capital France"
+mnemos search "capital France"
 
 # Read a specific item
 mnemos memory-read <item-id>
@@ -93,16 +93,16 @@ mnemos/
 | `agents/linker.py` | LinkerAgent — detects `[[wikilink]]` cross-references and adds backlinks |
 | `agents/contradiction.py` | ContradictionAgent — detects conflicting claims in `wiki/claims/`, writes `.agent/reports/contradictions.md` |
 | `agents/lint.py` | LintAgent — validates YAML front-matter and detects broken wikilinks and orphan pages |
-| `agents/query.py` | QueryAgent — answers questions using memory-search + memory-read |
+| `agents/query.py` | QueryAgent — answers questions using search + memory-read |
 
 ## CLI Reference
 
 | Command | Description |
 |---|---|
 | `mnemos install [PATH]` | Scaffold a wiki repo structure at PATH (default: current directory) |
-| `mnemos memory-capture` | Capture a new memory item into a target layer |
+| `mnemos capture` | Capture a new memory item into a target layer |
 | `mnemos memory-classify` | Classify/tag a captured item |
-| `mnemos memory-search` | Search across memory layers |
+| `mnemos search` | Search across memory layers |
 | `mnemos memory-read` | Read a specific item by ID |
 | `mnemos memory-use` | Mark an item as "in use" |
 | `mnemos memory-update` | Update item content |
@@ -111,7 +111,7 @@ mnemos/
 | `mnemos memory-archive` | Soft-delete (retain content) |
 | `mnemos memory-forget` | Hard-delete (requires archived state; use `--force` to skip prompt) |
 | `mnemos memory-log` | Manually append an entry to the audit log |
-| `mnemos memory-ingest-claude-md` | Discover and ingest CLAUDE.md files into memory |
+| `mnemos ingest-claude-md` | Discover and ingest CLAUDE.md files into memory |
 
 ## Memory Lifecycle
 

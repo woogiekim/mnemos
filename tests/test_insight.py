@@ -1,4 +1,4 @@
-"""Tests for InsightExtractor agent and memory-extract-insight CLI command."""
+"""Tests for InsightExtractor agent and extract-insight CLI command."""
 from __future__ import annotations
 
 import json
@@ -228,7 +228,7 @@ class TestMemoryExtractInsightCommand:
             )
             result = runner.invoke(
                 cli_with_repo,
-                ["memory-extract-insight", "--dry-run"],
+                ["extract-insight", "--dry-run"],
                 input=hook_input,
             )
 
@@ -254,7 +254,7 @@ class TestMemoryExtractInsightCommand:
             )
             result = runner.invoke(
                 cli_with_repo,
-                ["memory-extract-insight"],
+                ["extract-insight"],
                 input=hook_input,
             )
 
@@ -270,7 +270,7 @@ class TestMemoryExtractInsightCommand:
         })
         result = runner.invoke(
             cli_with_repo,
-            ["memory-extract-insight"],
+            ["extract-insight"],
             input=hook_input,
         )
         assert result.exit_code == 0
@@ -284,7 +284,7 @@ class TestMemoryExtractInsightCommand:
             hook_input = self._make_hook_input(last_assistant_message="ok sure")
             result = runner.invoke(
                 cli_with_repo,
-                ["memory-extract-insight"],
+                ["extract-insight"],
                 input=hook_input,
             )
 
@@ -294,7 +294,7 @@ class TestMemoryExtractInsightCommand:
         """Invalid JSON on stdin must exit nonzero with an error message."""
         result = runner.invoke(
             cli_with_repo,
-            ["memory-extract-insight"],
+            ["extract-insight"],
             input="not valid json !!!",
         )
         assert result.exit_code != 0
@@ -320,7 +320,7 @@ class TestMemoryExtractInsightCommand:
             })
             result = runner.invoke(
                 cli_with_repo,
-                ["memory-extract-insight", "--dry-run"],
+                ["extract-insight", "--dry-run"],
                 input=hook_input,
             )
 

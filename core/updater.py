@@ -7,8 +7,8 @@ Sequence:
 
 Managed block sentinels
 -----------------------
-settings.json  : hook entries containing "mnemos memory-ingest-claude-md"
-                 or "mnemos memory-search" (PostToolUse / UserPromptSubmit)
+settings.json  : hook entries containing "mnemos ingest-claude-md"
+                 or "mnemos search" (PostToolUse / UserPromptSubmit)
 CLAUDE.md      : <!-- mnemos-start --> … <!-- mnemos-end -->
 cursor rules   : <!-- mnemos:start --> … <!-- mnemos:end -->
 """
@@ -54,7 +54,7 @@ _POST_TOOL_USE_HOOK_TEMPLATE = {
     "hooks": [
         {
             "type": "command",
-            "command": "MNEMOS_REPO_ROOT=\"{repo_root}\" mnemos memory-ingest-claude-md",
+            "command": "MNEMOS_REPO_ROOT=\"{repo_root}\" mnemos ingest-claude-md",
         }
     ],
 }
@@ -65,7 +65,7 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
         {
             "type": "command",
             "command": (
-                'MNEMOS_REPO_ROOT="{repo_root}" mnemos memory-search '
+                'MNEMOS_REPO_ROOT="{repo_root}" mnemos search '
                 '"${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true'
             ),
         }
@@ -119,7 +119,7 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
     """Return True if this hook-list entry contains any mnemos command."""
     for h in entry.get("hooks", []):
         cmd = h.get("command", "")
-        if "mnemos memory-ingest-claude-md" in cmd or "mnemos memory-search" in cmd:
+        if "mnemos ingest-claude-md" in cmd or "mnemos search" in cmd:
             return True
     return False
 

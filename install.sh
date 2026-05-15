@@ -129,13 +129,13 @@ setup_claude_code() {
     # -------------------------------------------------------------------------
     # 6a. Wire PostToolUse hook in ~/.claude/settings.json
     #     Uses python3 stdlib json — no jq dependency required.
-    #     Idempotent: skips if "mnemos memory-ingest-claude-md" already present.
+    #     Idempotent: skips if "mnemos ingest-claude-md" already present.
     # -------------------------------------------------------------------------
     if [ -f "$SETTINGS_FILE" ] && python3 -c "
 import sys, json
 data = json.load(open('$SETTINGS_FILE'))
 text = json.dumps(data)
-sys.exit(0 if 'mnemos memory-ingest-claude-md' in text else 1)
+sys.exit(0 if 'mnemos ingest-claude-md' in text else 1)
 " 2>/dev/null; then
         echo "  mnemos PostToolUse hook already present in settings.json — skipping."
     else
@@ -162,7 +162,7 @@ new_hook = {
     'hooks': [
         {
             'type': 'command',
-            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos memory-ingest-claude-md'
+            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos ingest-claude-md'
         }
     ]
 }
@@ -190,7 +190,7 @@ print('  Hook written to settings.json.')
 import sys, json
 data = json.load(open('$SETTINGS_FILE'))
 text = json.dumps(data)
-sys.exit(0 if 'mnemos memory-search' in text else 1)
+sys.exit(0 if 'mnemos search' in text else 1)
 " 2>/dev/null; then
         echo "  mnemos UserPromptSubmit hook already present in settings.json — skipping."
     else
@@ -214,7 +214,7 @@ new_hook = {
     'hooks': [
         {
             'type': 'command',
-            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos memory-search \"\${CLAUDE_PROMPT:0:200}\" 2>/dev/null | head -30 || true'
+            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos search \"\${CLAUDE_PROMPT:0:200}\" 2>/dev/null | head -30 || true'
         }
     ]
 }
@@ -234,13 +234,13 @@ print('  UserPromptSubmit hook written to settings.json.')
     # -------------------------------------------------------------------------
     # 6c. Wire Stop hook in ~/.claude/settings.json
     #     Automatically extracts insights from each conversation turn.
-    #     Idempotent: skips if "mnemos memory-extract-insight" already present.
+    #     Idempotent: skips if "mnemos extract-insight" already present.
     # -------------------------------------------------------------------------
     if [ -f "$SETTINGS_FILE" ] && python3 -c "
 import sys, json
 data = json.load(open('$SETTINGS_FILE'))
 text = json.dumps(data)
-sys.exit(0 if 'mnemos memory-extract-insight' in text else 1)
+sys.exit(0 if 'mnemos extract-insight' in text else 1)
 " 2>/dev/null; then
         echo "  mnemos Stop hook already present in settings.json — skipping."
     else
@@ -264,7 +264,7 @@ new_hook = {
     'hooks': [
         {
             'type': 'command',
-            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos memory-extract-insight'
+            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos extract-insight'
         }
     ]
 }
@@ -467,7 +467,7 @@ setup_cursor
 # ---------------------------------------------------------------------------
 echo ""
 echo "Seeding memory store from CLAUDE.md files..."
-if mnemos memory-ingest-claude-md 2>&1; then
+if mnemos ingest-claude-md 2>&1; then
     echo "Memory seeding complete."
 else
     echo "Warning: memory seeding failed (this is non-fatal)." >&2

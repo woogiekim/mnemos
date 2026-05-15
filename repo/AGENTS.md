@@ -6,12 +6,12 @@ This file describes all agents registered in the mnemos memory operating system.
 
 | Agent | Module | Role |
 |---|---|---|
-| Ingest | mnemos.agents.ingest | Reads raw/sources/, runs memory-capture for each document |
+| Ingest | mnemos.agents.ingest | Reads raw/sources/, runs capture for each document |
 | Writer | mnemos.agents.writer | Generates/rewrites wiki entries from captured memories |
 | Linker | mnemos.agents.linker | Detects cross-references between wiki pages, writes backlinks |
 | Contradiction | mnemos.agents.contradiction | Detects conflicting claims in wiki/claims/ |
 | Lint | mnemos.agents.lint | Validates YAML front-matter and Markdown formatting |
-| Query | mnemos.agents.query | Answers questions using memory-search + memory-read |
+| Query | mnemos.agents.query | Answers questions using search + memory-read |
 
 ## Agent Interfaces
 

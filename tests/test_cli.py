@@ -71,10 +71,10 @@ def cli_with_repo(repo_root, monkeypatch):
 
 class TestMemoryCaptureCommand:
     def test_memory_capture_command(self, runner, cli_with_repo, repo_root):
-        """memory-capture must store an item and print its ID."""
+        """capture must store an item and print its ID."""
         result = runner.invoke(
             cli_with_repo,
-            ["memory-capture", "--layer", "global", "--content", "CLI test content"],
+            ["capture", "--layer", "global", "--content", "CLI test content"],
         )
         assert result.exit_code == 0, result.output
         assert "captured" in result.output.lower() or len(result.output.strip()) > 0
@@ -84,11 +84,11 @@ class TestMemoryCaptureCommand:
         assert len(matches) >= 1
 
     def test_memory_capture_with_id(self, runner, cli_with_repo, repo_root):
-        """memory-capture with --id must use the provided ID."""
+        """capture with --id must use the provided ID."""
         result = runner.invoke(
             cli_with_repo,
             [
-                "memory-capture",
+                "capture",
                 "--layer", "global",
                 "--content", "Item with custom ID",
                 "--id", "custom-cli-001",
@@ -98,33 +98,33 @@ class TestMemoryCaptureCommand:
         assert "custom-cli-001" in result.output
 
     def test_memory_capture_invalid_layer_exits_nonzero(self, runner, cli_with_repo):
-        """memory-capture with invalid layer must exit with error."""
+        """capture with invalid layer must exit with error."""
         result = runner.invoke(
             cli_with_repo,
-            ["memory-capture", "--layer", "invalid", "--content", "x"],
+            ["capture", "--layer", "invalid", "--content", "x"],
         )
         assert result.exit_code != 0 or "error" in result.output.lower()
 
 
 class TestMemorySearchCommand:
     def test_memory_search_command(self, runner, cli_with_repo, repo_root):
-        """memory-search must return results for indexed content."""
+        """search must return results for indexed content."""
         # First capture something
         runner.invoke(
             cli_with_repo,
-            ["memory-capture", "--layer", "global", "--content", "searchable content about pandas"],
+            ["capture", "--layer", "global", "--content", "searchable content about pandas"],
         )
         result = runner.invoke(
             cli_with_repo,
-            ["memory-search", "pandas"],
+            ["search", "pandas"],
         )
         assert result.exit_code == 0, result.output
 
     def test_memory_search_empty_returns_zero(self, runner, cli_with_repo):
-        """memory-search on empty store must exit 0 with empty output."""
+        """search on empty store must exit 0 with empty output."""
         result = runner.invoke(
             cli_with_repo,
-            ["memory-search", "nonexistent-xyzzy"],
+            ["search", "nonexistent-xyzzy"],
         )
         assert result.exit_code == 0
 
@@ -136,7 +136,7 @@ class TestMemoryPromoteCommand:
         cap_result = runner.invoke(
             cli_with_repo,
             [
-                "memory-capture",
+                "capture",
                 "--layer", "project",
                 "--content", "Item to promote",
                 "--id", "promote-001",
@@ -157,7 +157,7 @@ class TestMemoryForgetCommand:
         """memory-forget on non-archived item must fail with error."""
         runner.invoke(
             cli_with_repo,
-            ["memory-capture", "--layer", "global", "--content", "forget-me", "--id", "forget-001"],
+            ["capture", "--layer", "global", "--content", "forget-me", "--id", "forget-001"],
         )
         result = runner.invoke(
             cli_with_repo,
@@ -170,7 +170,7 @@ class TestMemoryForgetCommand:
         """memory-forget after archive must succeed."""
         runner.invoke(
             cli_with_repo,
-            ["memory-capture", "--layer", "global", "--content", "archive then forget", "--id", "forget-002"],
+            ["capture", "--layer", "global", "--content", "archive then forget", "--id", "forget-002"],
         )
         runner.invoke(
             cli_with_repo,

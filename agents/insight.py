@@ -121,12 +121,12 @@ class InsightExtractor:
         dry_run: bool = False,
     ) -> bool:
         """
-        Call ``mnemos memory-capture --layer session`` for a single insight.
+        Call ``mnemos capture --layer session`` for a single insight.
 
         Args:
             insight: Dict with ``"content"`` and ``"category"`` keys.
             session_id: Optional Claude Code session ID for scoping.
-            dry_run: When True, print instead of calling memory-capture.
+            dry_run: When True, print instead of calling capture.
 
         Returns:
             True on success, False on failure.
@@ -141,7 +141,7 @@ class InsightExtractor:
 
         cmd = [
             sys.executable, "-m", "core.cli",
-            "memory-capture",
+            "capture",
             "--layer", "session",
             "--content", content,
         ]
@@ -159,15 +159,15 @@ class InsightExtractor:
             )
             if result.returncode != 0:
                 logger.warning(
-                    "memory-capture failed (exit %d): %s",
+                    "capture failed (exit %d): %s",
                     result.returncode,
                     result.stderr.strip(),
                 )
                 return False
             return True
         except subprocess.TimeoutExpired:
-            logger.warning("memory-capture timed out")
+            logger.warning("capture timed out")
             return False
         except Exception as exc:
-            logger.warning("memory-capture subprocess error: %s", exc)
+            logger.warning("capture subprocess error: %s", exc)
             return False
