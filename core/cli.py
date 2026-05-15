@@ -284,6 +284,39 @@ def update_cmd(repo_root: str | None, skip_git_pull: bool, skip_pipx: bool) -> N
     sys.exit(exit_code)
 
 
+@cli.command("uninstall")
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation prompt (non-interactive mode).",
+)
+@click.option(
+    "--purge",
+    is_flag=True,
+    default=False,
+    help="Also run 'pipx uninstall mnemos' after config cleanup.",
+)
+def uninstall_cmd(yes: bool, purge: bool) -> None:
+    """Remove all mnemos-managed entries from host config files.
+
+    \b
+    Removes managed sections from:
+      ~/.claude/settings.json       (PostToolUse / UserPromptSubmit hook entries)
+      ~/.claude/CLAUDE.md           (<!-- mnemos-start --> ... <!-- mnemos-end --> block)
+      ~/.cursor/rules[.md]          (<!-- mnemos:start --> ... <!-- mnemos:end --> block)
+      ~/.zshrc                      (export MNEMOS_REPO_ROOT=... line)
+
+    Shows a unified diff of what will be removed, then prompts for confirmation
+    unless --yes is given.  Use --purge to also uninstall the pipx package.
+    """
+    from core.uninstaller import run_uninstall
+
+    exit_code = run_uninstall(yes=yes, purge=purge)
+    sys.exit(exit_code)
+
+
 @cli.command("memory-log")
 @click.option("--op", required=True, help="Operation name.")
 @click.option("--id", "item_id", required=True, help="Item ID.")
