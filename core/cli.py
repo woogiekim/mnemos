@@ -241,6 +241,49 @@ def install_cmd(path: str) -> None:
     click.echo(f"mnemos installed at {path}")
 
 
+@cli.command("update")
+@click.option(
+    "--repo-root",
+    "repo_root",
+    default=None,
+    envvar="MNEMOS_REPO_ROOT",
+    help="Path to the mnemos source repo (default: MNEMOS_REPO_ROOT env var).",
+)
+@click.option(
+    "--skip-git-pull",
+    is_flag=True,
+    default=False,
+    help="Skip 'git pull origin main'.",
+)
+@click.option(
+    "--skip-pipx",
+    is_flag=True,
+    default=False,
+    help="Skip 'pipx reinstall mnemos'.",
+)
+def update_cmd(repo_root: str | None, skip_git_pull: bool, skip_pipx: bool) -> None:
+    """Self-update mnemos: pull latest source, reinstall, and refresh managed config blocks.
+
+    \b
+    Steps performed:
+      1. git pull origin main            (in the mnemos source repo)
+      2. pipx reinstall mnemos
+      3. Replace managed blocks in:
+           ~/.claude/settings.json       (hook entries)
+           ~/.claude/CLAUDE.md           (<!-- mnemos-start --> block)
+           ~/.cursor/rules               (<!-- mnemos:start --> block)
+      4. Print a unified diff of each changed block.
+    """
+    from core.updater import run_update
+
+    exit_code = run_update(
+        repo_root=repo_root,
+        skip_git_pull=skip_git_pull,
+        skip_pipx=skip_pipx,
+    )
+    sys.exit(exit_code)
+
+
 @cli.command("memory-log")
 @click.option("--op", required=True, help="Operation name.")
 @click.option("--id", "item_id", required=True, help="Item ID.")
