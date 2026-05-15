@@ -25,4 +25,4 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mnemos*"]
+include = ["mnemos*", "agents*"]
