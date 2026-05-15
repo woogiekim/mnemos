@@ -96,6 +96,14 @@ echo "Scaffolding mnemos wiki structure at $REPO_ROOT ..."
 mnemos install "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
+# 5b. Tip: running mnemos from any directory
+# ---------------------------------------------------------------------------
+echo ""
+echo "Tip: To run mnemos from any directory, add to your shell profile:"
+echo "  export MNEMOS_REPO_ROOT=\"$REPO_ROOT\""
+echo ""
+
+# ---------------------------------------------------------------------------
 # 6. Claude Code integration (auto-detected, silent skip if not installed)
 # ---------------------------------------------------------------------------
 setup_claude_code() {
