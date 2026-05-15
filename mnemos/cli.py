@@ -258,3 +258,50 @@ def memory_log(op: str, item_id: str, layer: str, meta: str | None) -> None:
             sys.exit(1)
     gw.log(operation=op, item_id=item_id, layer=layer, metadata=metadata)
     click.echo(f"logged: {op} {item_id} ({layer})")
+
+
+@cli.command("memory-ingest-claude-md")
+@click.option(
+    "--project-root",
+    "project_root",
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True),
+    help="Project root directory to scan for CLAUDE.md (default: current directory).",
+)
+@click.option("--run-id", "run_id", default="claude-md-ingest", help="Run ID for layer scoping.")
+def memory_ingest_claude_md(project_root: str | None, run_id: str) -> None:
+    """Discover and ingest CLAUDE.md files into memory.
+
+    Scans two locations:
+
+    \b
+      ~/.claude/CLAUDE.md      → layer "global",  source_scope "global"
+      <project-root>/CLAUDE.md → layer "project", source_scope "project"
+
+    Missing files are silently skipped.
+    """
+    from agents.scanner import ClaudeMdScanner
+    from agents.ingest import IngestAgent
+
+    root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
+    gw = _get_gateway()
+    scanner = ClaudeMdScanner(project_root=root)
+    agent = IngestAgent(gateway=gw)
+
+    scan_results = scanner.discover()
+    if not scan_results:
+        click.echo("no CLAUDE.md files found — nothing ingested")
+        return
+
+    try:
+        captured_ids = agent.run_scanner_results(scan_results, run_id=run_id)
+    except PolicyViolationError as exc:
+        click.echo(f"error: policy violation — {exc}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    for item_id in captured_ids:
+        click.echo(f"ingested: {item_id}")
+    click.echo(f"done: {len(captured_ids)} item(s) ingested")
