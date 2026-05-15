@@ -602,7 +602,7 @@ class TestMemoryIngestClaudeMdCommand:
     def test_skip_memory_files_flag_omits_memory_sync(
         self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
     ) -> None:
-        """--skip-memory-files suppresses ~/.claude/projects/*/memory/*.md ingestion."""
+        """--skip-files suppresses ~/.claude/projects/*/memory/*.md ingestion."""
         import agents.scanner as scanner_mod
         from agents.scanner import ClaudeMdScanner
 
@@ -625,7 +625,7 @@ class TestMemoryIngestClaudeMdCommand:
                 [
                     "ingest-claude-md",
                     "--project-root", str(project_dir),
-                    "--skip-memory-files",
+                    "--skip-files",
                 ],
             )
 
