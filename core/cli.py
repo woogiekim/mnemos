@@ -269,16 +269,30 @@ def memory_log(op: str, item_id: str, layer: str, meta: str | None) -> None:
     help="Project root directory to scan for CLAUDE.md (default: current directory).",
 )
 @click.option("--run-id", "run_id", default="claude-md-ingest", help="Run ID for layer scoping.")
-def memory_ingest_claude_md(project_root: str | None, run_id: str) -> None:
-    """Discover and ingest CLAUDE.md files into memory.
+@click.option(
+    "--skip-memory-files",
+    "skip_memory_files",
+    is_flag=True,
+    default=False,
+    help="Skip syncing ~/.claude/projects/*/memory/*.md files.",
+)
+def memory_ingest_claude_md(
+    project_root: str | None,
+    run_id: str,
+    skip_memory_files: bool,
+) -> None:
+    """Discover and ingest CLAUDE.md files and project memory files into memory.
 
-    Scans two locations:
+    Scans the following locations:
 
     \b
-      ~/.claude/CLAUDE.md      → layer "global",  source_scope "global"
-      <project-root>/CLAUDE.md → layer "project", source_scope "project"
+      ~/.claude/CLAUDE.md                        → layer "global",  source_scope "global"
+      <project-root>/CLAUDE.md                   → layer "project", source_scope "project"
+      ~/.claude/projects/*/memory/*.md           → layer "global",  source_scope "claude_memory"
+                                                   (dedup: skip/update/create by content hash)
 
-    Missing files are silently skipped.
+    Missing files and directories are silently skipped.
+    Pass --skip-memory-files to omit the ~/.claude/projects memory sync.
     """
     from agents.scanner import ClaudeMdScanner
     from agents.ingest import IngestAgent
@@ -288,20 +302,49 @@ def memory_ingest_claude_md(project_root: str | None, run_id: str) -> None:
     scanner = ClaudeMdScanner(project_root=root)
     agent = IngestAgent(gateway=gw)
 
+    # ── CLAUDE.md ingestion (global + project) ──────────────────────────
     scan_results = scanner.discover()
     if not scan_results:
-        click.echo("no CLAUDE.md files found — nothing ingested")
-        return
+        click.echo("no CLAUDE.md files found — skipping CLAUDE.md ingestion")
+    else:
+        try:
+            captured_ids = agent.run_scanner_results(scan_results, run_id=run_id)
+        except PolicyViolationError as exc:
+            click.echo(f"error: policy violation — {exc}", err=True)
+            sys.exit(1)
+        except Exception as exc:
+            click.echo(f"error: {exc}", err=True)
+            sys.exit(1)
 
-    try:
-        captured_ids = agent.run_scanner_results(scan_results, run_id=run_id)
-    except PolicyViolationError as exc:
-        click.echo(f"error: policy violation — {exc}", err=True)
-        sys.exit(1)
-    except Exception as exc:
-        click.echo(f"error: {exc}", err=True)
-        sys.exit(1)
+        for item_id in captured_ids:
+            click.echo(f"ingested: {item_id}")
+        click.echo(f"claude-md: {len(captured_ids)} item(s) ingested")
 
-    for item_id in captured_ids:
-        click.echo(f"ingested: {item_id}")
-    click.echo(f"done: {len(captured_ids)} item(s) ingested")
+    # ── ~/.claude/projects/*/memory/*.md sync (with dedup) ──────────────
+    if not skip_memory_files:
+        memory_results = scanner.discover_memory_files()
+        if not memory_results:
+            click.echo("no project memory files found — skipping memory sync")
+        else:
+            try:
+                dedup = agent.run_scanner_results_dedup(memory_results, run_id=run_id)
+            except PolicyViolationError as exc:
+                click.echo(f"error: policy violation — {exc}", err=True)
+                sys.exit(1)
+            except Exception as exc:
+                click.echo(f"error: {exc}", err=True)
+                sys.exit(1)
+
+            for item_id in dedup["created"]:
+                click.echo(f"memory created: {item_id}")
+            for item_id in dedup["updated"]:
+                click.echo(f"memory updated: {item_id}")
+            for item_id in dedup["skipped"]:
+                click.echo(f"memory skipped (unchanged): {item_id}")
+            total = sum(len(v) for v in dedup.values())
+            click.echo(
+                f"memory-sync: {len(dedup['created'])} created, "
+                f"{len(dedup['updated'])} updated, "
+                f"{len(dedup['skipped'])} skipped "
+                f"({total} file(s) processed)"
+            )
