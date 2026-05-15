@@ -2,7 +2,7 @@
 
 mnemos is a Global Memory Operating System (MemoryOS) that controls the complete
 memory lifecycle for all AI agents. It provides a single Memory Gateway entry point,
-a Policy Engine that enforces lifecycle transitions, five memory layers, and a set
+a Policy Engine that enforces lifecycle transitions, memory layers, and a set
 of CLI tools that agents use instead of accessing the filesystem directly.
 
 ## Install
@@ -16,8 +16,14 @@ pip install -e ".[vector]"
 ## Quick Start
 
 ```bash
+# Scaffold a mnemos wiki repo structure in the current directory
+mnemos install .
+
 # Capture a memory
 mnemos memory-capture --layer global --content "The capital of France is Paris." --tag fact
+
+# Ingest CLAUDE.md files (global and project-scoped)
+mnemos memory-ingest-claude-md --project-root .
 
 # Search memories
 mnemos memory-search "capital France"
@@ -43,10 +49,19 @@ mnemos memory-forget <item-id>
 | Project | `wiki/projects/` | Indefinite | Global |
 | Global | `wiki/global/` | Permanent | — |
 
+In addition, the following static wiki layers hold structured knowledge:
+
+| Layer | Path | Purpose |
+|---|---|---|
+| Entities | `wiki/entities/` | Named entities (people, places, things) |
+| Claims | `wiki/claims/` | Factual claims for contradiction detection |
+| Topics | `wiki/topics/` | Topic-level summaries |
+
 ## CLI Reference
 
 | Command | Description |
 |---|---|
+| `mnemos install` | Scaffold a wiki repo structure at PATH |
 | `mnemos memory-capture` | Capture a new memory item |
 | `mnemos memory-classify` | Classify/tag a captured item |
 | `mnemos memory-search` | Search across layers |
@@ -56,8 +71,9 @@ mnemos memory-forget <item-id>
 | `mnemos memory-promote` | Promote to next layer |
 | `mnemos memory-demote` | Demote to lower layer |
 | `mnemos memory-archive` | Soft-delete (retain content) |
-| `mnemos memory-forget` | Hard-delete (requires archived) |
+| `mnemos memory-forget` | Hard-delete (requires archived; use `--force` to skip prompt) |
 | `mnemos memory-log` | Append to audit log |
+| `mnemos memory-ingest-claude-md` | Discover and ingest CLAUDE.md files into memory |
 
 ## Memory Item Format
 
@@ -86,13 +102,56 @@ Optional vector backend:
 
 ## Architecture
 
-- `mnemos/gateway.py` — Memory Gateway (single entry point)
-- `mnemos/policy.py` — Policy Engine (lifecycle validation)
-- `mnemos/store.py` — Filesystem Store (read/write memory items)
-- `mnemos/search.py` — Search Middleware (FTS → vector → grep)
-- `mnemos/fts.py` — SQLite FTS5 index
-- `mnemos/vector.py` — Vector search stub (graceful fallback)
-- `mnemos/hooks.py` — Hook dispatcher
-- `mnemos/log.py` — Audit logger
-- `mnemos/cli.py` — Click CLI
-- `mnemos/agents/` — Ingest, Writer, Linker, Contradiction, Lint, Query agents
+### Core (`mnemos/`)
+
+| Module | Role |
+|---|---|
+| `mnemos/gateway.py` | Memory Gateway — single entry point for all memory lifecycle operations |
+| `mnemos/policy.py` | Policy Engine — enforces lifecycle transitions and promotion eligibility |
+| `mnemos/store.py` | Filesystem Store — read/write memory items as Markdown with YAML front-matter |
+| `mnemos/search.py` | Search Middleware — three-stage pipeline: FTS5 → vector → pathlib grep |
+| `mnemos/fts.py` | SQLite FTS5 index for full-text search |
+| `mnemos/vector.py` | Optional vector search backend (Qdrant / Chroma; graceful fallback) |
+| `mnemos/layers.py` | Shared layer-to-path mapping used by store and search modules |
+| `mnemos/hooks.py` | Hook Dispatcher — fires shell scripts on post-capture, post-promote, post-archive, post-forget |
+| `mnemos/log.py` | Audit Logger — append-only log written to `wiki/log.md` and `wiki/log.jsonl` |
+| `mnemos/install.py` | Repo scaffolder — creates wiki dirs, `.agent/` dirs, `mnemos.yml`, and `wiki/policy.yaml` |
+| `mnemos/cli.py` | Click CLI — all `memory-*` subcommands |
+
+### Agents (`agents/`)
+
+| Module | Role |
+|---|---|
+| `agents/scanner.py` | ClaudeMdScanner — discovers `~/.claude/CLAUDE.md` and `<project>/CLAUDE.md` for ingestion |
+| `agents/ingest.py` | IngestAgent — reads raw/sources/ (or explicit file list) and captures each document into memory |
+| `agents/writer.py` | WriterAgent — generates or rewrites wiki entries from captured memories |
+| `agents/linker.py` | LinkerAgent — detects `[[wikilink]]` cross-references and adds backlinks |
+| `agents/contradiction.py` | ContradictionAgent — detects conflicting claims in `wiki/claims/`, writes `.agent/reports/contradictions.md` |
+| `agents/lint.py` | LintAgent — validates YAML front-matter and detects broken wikilinks and orphan pages |
+| `agents/query.py` | QueryAgent — answers questions using memory-search + memory-read |
+
+## Wiki Repo Structure
+
+After running `mnemos install .`:
+
+```
+wiki/
+  global/          ← permanent global memories
+  projects/        ← project-scoped memories
+  entities/        ← named entities
+  claims/          ← factual claims
+  topics/          ← topic summaries
+  log.md           ← human-readable audit log
+  log.jsonl        ← machine-readable audit log (one JSON object per line)
+  policy.yaml      ← lifecycle policy configuration
+
+.agent/
+  runs/            ← ephemeral and working memory (scoped by run ID)
+  sessions/        ← session memory (scoped by session ID)
+  state/           ← FTS index (fts.db) and other runtime state
+  reports/         ← agent output reports (contradictions.md, lint.md)
+  workflows/hooks/ ← hook scripts fired after memory mutations
+
+mnemos.yml         ← main configuration file
+AGENTS.md          ← agent manifest
+```
