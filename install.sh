@@ -358,7 +358,18 @@ print('  mnemos block updated.')
 setup_cursor
 
 # ---------------------------------------------------------------------------
-# 9. Done
+# 9. Seed memory store from CLAUDE.md files
+# ---------------------------------------------------------------------------
+echo ""
+echo "Seeding memory store from CLAUDE.md files..."
+if mnemos memory-ingest-claude-md 2>&1; then
+    echo "Memory seeding complete."
+else
+    echo "Warning: memory seeding failed (this is non-fatal)." >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 10. Done
 # ---------------------------------------------------------------------------
 echo ""
 echo "mnemos is now available. Try: mnemos --help"
