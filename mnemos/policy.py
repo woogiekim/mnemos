@@ -81,8 +81,10 @@ class PolicyEngine:
         created_at_str = item.get("created_at", "")
         if created_at_str:
             created_at_str_clean = created_at_str.rstrip("Z")
-            created_at = datetime.datetime.fromisoformat(created_at_str_clean)
-            now = datetime.datetime.utcnow()
+            created_at = datetime.datetime.fromisoformat(created_at_str_clean).replace(
+                tzinfo=datetime.timezone.utc
+            )
+            now = datetime.datetime.now(datetime.timezone.utc)
             actual_age_hours = (now - created_at).total_seconds() / 3600.0
             if actual_age_hours < required_age:
                 raise PolicyViolationError(
@@ -106,6 +108,35 @@ class PolicyEngine:
             raise PolicyViolationError(
                 f"quality_score {actual_quality} is below required {required_quality} "
                 f"for promotion from '{current_layer}'."
+            )
+
+    def validate_demote(self, item: dict[str, Any], target_layer: str) -> None:
+        """
+        Raise PolicyViolationError if demotion is not permitted.
+
+        Checks:
+        - target_layer must be a known layer
+        - target_layer must differ from the item's current layer
+        """
+        layers = self._layers()
+
+        if target_layer not in layers:
+            raise PolicyViolationError(
+                f"Unknown target layer '{target_layer}'. Valid layers: {list(layers.keys())}"
+            )
+
+        current_layer = item.get("layer")
+        if target_layer == current_layer:
+            raise PolicyViolationError(
+                f"Cannot demote item to its current layer '{current_layer}'."
+            )
+
+        # If the policy config specifies an explicit demotes_to field, honour it.
+        demotes_to = layers.get(current_layer, {}).get("demotes_to")
+        if demotes_to is not None and target_layer != demotes_to:
+            raise PolicyViolationError(
+                f"Layer '{current_layer}' demotes to '{demotes_to}', "
+                f"not '{target_layer}'."
             )
 
     def validate_forget(self, item: dict[str, Any]) -> None:
