@@ -61,7 +61,7 @@ class MemoryGateway:
         self._policy.validate_capture(layer=layer, item={"content": content})
 
         item_id = item_id or str(uuid.uuid4())
-        now = datetime.datetime.utcnow().isoformat() + "Z"
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
 
         metadata: dict[str, Any] = {
             "id": item_id,
@@ -245,6 +245,8 @@ class MemoryGateway:
         """Demote a memory item to a lower layer."""
         item = self._store.read(item_id)
         current_layer = item.get("layer", "")
+
+        self._policy.validate_demote(item=item, target_layer=target_layer)
 
         content = item["content"]
         new_metadata = {

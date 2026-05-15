@@ -34,7 +34,7 @@ class AuditLogger:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Append an audit log entry to both log.md and log.jsonl."""
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         ts = now.isoformat() + "Z"
         meta = metadata or {}
 

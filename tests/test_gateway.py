@@ -163,6 +163,43 @@ class TestPromote:
         assert len(matches) >= 1
 
 
+class TestDemote:
+    def test_demote_moves_item_to_lower_layer(self, gateway, repo_root):
+        """Demote should move item from project to ephemeral layer."""
+        item_id = gateway.capture(
+            layer="project",
+            content="Will be demoted",
+            run_id="run-demote",
+        )
+        result_id = gateway.demote(item_id=item_id, target_layer="ephemeral", run_id="run-demote")
+        assert result_id == item_id
+        # Old location should be gone; new location should exist
+        matches = list((repo_root / "wiki" / "projects").glob("*.md"))
+        assert not any(item_id in m.name for m in matches)
+
+    def test_demote_raises_on_invalid_target_layer(self, gateway):
+        """Demote to unknown layer must raise PolicyViolationError."""
+        from mnemos.policy import PolicyViolationError
+        item_id = gateway.capture(
+            layer="global",
+            content="Demote to unknown",
+            run_id="run-test",
+        )
+        with pytest.raises(PolicyViolationError):
+            gateway.demote(item_id=item_id, target_layer="nonexistent_layer")
+
+    def test_demote_raises_on_same_layer(self, gateway):
+        """Demote to current layer must raise PolicyViolationError."""
+        from mnemos.policy import PolicyViolationError
+        item_id = gateway.capture(
+            layer="global",
+            content="Demote to same layer",
+            run_id="run-test",
+        )
+        with pytest.raises(PolicyViolationError):
+            gateway.demote(item_id=item_id, target_layer="global")
+
+
 class TestForget:
     def test_forget_requires_archived_state(self, gateway):
         """Forget on non-archived item must raise PolicyViolationError."""

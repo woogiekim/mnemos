@@ -77,7 +77,7 @@ def make_item(layer="ephemeral", stage="stored", age_hours=1.0,
               access_count=5, quality_score=0.9):
     """Helper: build an item dict."""
     import datetime
-    created = datetime.datetime.utcnow() - datetime.timedelta(hours=age_hours)
+    created = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=age_hours)
     return {
         "id": "test-item-001",
         "layer": layer,
@@ -120,7 +120,7 @@ class TestValidatePromote:
         import datetime
         item = make_item(layer="ephemeral", age_hours=0, access_count=5, quality_score=0.9)
         # Override with a future-ish created_at to ensure it's truly too young
-        item["created_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        item["created_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
         with pytest.raises(PolicyViolationError, match="age"):
             engine.validate_promote(item=item, target_layer="working")
 
@@ -158,6 +158,32 @@ class TestValidateForget:
         """Forgetting an archived item must not raise."""
         item = make_item(stage="archived")
         engine.validate_forget(item=item)
+
+
+class TestValidateDemote:
+    def test_validate_demote_valid_target_layer(self, engine):
+        """Demoting to a known, different layer must not raise."""
+        item = make_item(layer="working")
+        engine.validate_demote(item=item, target_layer="ephemeral")
+
+    def test_validate_demote_unknown_target_layer(self, engine):
+        """Demoting to an unknown layer must raise PolicyViolationError."""
+        from mnemos.policy import PolicyViolationError
+        item = make_item(layer="working")
+        with pytest.raises(PolicyViolationError, match="Unknown target layer"):
+            engine.validate_demote(item=item, target_layer="nonexistent")
+
+    def test_validate_demote_same_layer_raises(self, engine):
+        """Demoting to the same layer must raise PolicyViolationError."""
+        from mnemos.policy import PolicyViolationError
+        item = make_item(layer="working")
+        with pytest.raises(PolicyViolationError, match="current layer"):
+            engine.validate_demote(item=item, target_layer="working")
+
+    def test_validate_demote_any_known_layer_allowed(self, engine):
+        """Demoting from global to ephemeral (arbitrary known layer) must succeed."""
+        item = make_item(layer="global")
+        engine.validate_demote(item=item, target_layer="ephemeral")
 
 
 class TestCheckLifecycleStage:
