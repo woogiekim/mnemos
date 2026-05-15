@@ -1,10 +1,34 @@
 #!/usr/bin/env bash
 # install.sh — one-touch mnemos installer
-# Usage: ./install.sh
+# Usage (local):  ./install.sh
+# Usage (remote): curl -s https://raw.githubusercontent.com/woogiekim/mnemos/main/install.sh | bash
 # No manual venv activation or pip install required.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# ---------------------------------------------------------------------------
+# 0. Detect execution mode
+#    When piped via curl, BASH_SOURCE[0] is empty or equals "bash".
+#    When run locally,  BASH_SOURCE[0] is the real path to this file.
+# ---------------------------------------------------------------------------
+_src="${BASH_SOURCE[0]:-}"
+if [ -z "$_src" ] || [ "$_src" = "bash" ]; then
+    # ---- Mode 1: curl | bash -----------------------------------------------
+    MNEMOS_REMOTE="https://github.com/woogiekim/mnemos.git"
+    MNEMOS_DIR="$HOME/.mnemos"
+
+    if [ -d "$MNEMOS_DIR/.git" ]; then
+        echo "Updating existing mnemos clone at $MNEMOS_DIR ..."
+        git -C "$MNEMOS_DIR" pull origin main
+    else
+        echo "Cloning mnemos into $MNEMOS_DIR ..."
+        git clone "$MNEMOS_REMOTE" "$MNEMOS_DIR"
+    fi
+
+    REPO_ROOT="$MNEMOS_DIR"
+else
+    # ---- Mode 2: ./install.sh (local) --------------------------------------
+    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Find a suitable Python interpreter (>= 3.11)
