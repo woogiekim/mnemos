@@ -18,6 +18,45 @@ from core.search import SearchMiddleware
 DEFAULT_QUALITY_SCORE = 0.8
 
 
+def _resolve_repo_root() -> Path:
+    """Locate the mnemos repo root by checking, in order:
+
+    1. The ``MNEMOS_REPO_ROOT`` environment variable (validated).
+    2. Walking up from the current working directory.
+    3. Walking up from this source file's location.
+
+    Raises ``FileNotFoundError`` with a human-readable message if none of
+    the strategies succeed.
+    """
+    # 1. Check MNEMOS_REPO_ROOT env var
+    env_val = os.environ.get("MNEMOS_REPO_ROOT")
+    if env_val:
+        p = Path(env_val).expanduser().resolve()
+        if (p / "wiki" / "policy.yaml").exists():
+            return p
+        # env var is set but does not point at a valid repo — fail immediately
+        raise FileNotFoundError(
+            f"MNEMOS_REPO_ROOT={env_val!r} does not contain wiki/policy.yaml"
+        )
+
+    # 2. Walk up from CWD
+    cwd = Path.cwd()
+    for parent in [cwd, *cwd.parents]:
+        if (parent / "wiki" / "policy.yaml").exists():
+            return parent
+
+    # 3. Walk up from __file__
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "wiki" / "policy.yaml").exists():
+            return parent
+
+    raise FileNotFoundError(
+        "Cannot find mnemos repo root. "
+        "Set the MNEMOS_REPO_ROOT environment variable to the repo path."
+    )
+
+
 class MemoryGateway:
     """
     Single entry point for all memory lifecycle operations.
@@ -27,7 +66,7 @@ class MemoryGateway:
     """
 
     def __init__(self, repo_root: str | None = None) -> None:
-        self._root = repo_root or os.environ.get("MNEMOS_REPO_ROOT", ".")
+        self._root = str(repo_root) if repo_root else str(_resolve_repo_root())
         policy_path = str(Path(self._root) / "wiki" / "policy.yaml")
         self._policy = PolicyEngine(policy_path=policy_path)
         self._store = MemoryStore(repo_root=self._root)
