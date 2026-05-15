@@ -272,7 +272,85 @@ print('  mnemos block updated.')
 setup_codex
 
 # ---------------------------------------------------------------------------
-# 8. Done
+# 8. Cursor integration (auto-detected, silent skip if not installed)
+# ---------------------------------------------------------------------------
+setup_cursor() {
+    # Detect Cursor IDE: check for ~/.cursor directory or cursor binary
+    if [ ! -d "$HOME/.cursor" ] && ! command -v cursor &>/dev/null; then
+        return 0  # Cursor not installed — skip silently
+    fi
+
+    echo "Cursor detected — configuring mnemos integration..."
+
+    CURSOR_DIR="$HOME/.cursor"
+    mkdir -p "$CURSOR_DIR"
+
+    # -------------------------------------------------------------------------
+    # 8a. Auto-detect rules file: prefer rules (no ext), fallback rules.md,
+    #     create rules if neither exists.
+    # -------------------------------------------------------------------------
+    if [ -f "$CURSOR_DIR/rules" ]; then
+        RULES_FILE="$CURSOR_DIR/rules"
+    elif [ -f "$CURSOR_DIR/rules.md" ]; then
+        RULES_FILE="$CURSOR_DIR/rules.md"
+    else
+        RULES_FILE="$CURSOR_DIR/rules"
+        touch "$RULES_FILE"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 8b. Inject/update managed mnemos block (idempotent).
+    # -------------------------------------------------------------------------
+    MNEMOS_BLOCK='<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+`mnemos search <query>`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'
+
+    if grep -q '<!-- mnemos:start -->' "$RULES_FILE" 2>/dev/null; then
+        echo "  Updating existing mnemos block in $RULES_FILE ..."
+        python3 -c "
+import re
+
+rules_file = '$RULES_FILE'
+with open(rules_file, 'r') as f:
+    content = f.read()
+
+block = '''<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+\`mnemos search <query>\`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'''
+
+new_content = re.sub(
+    r'<!-- mnemos:start -->.*?<!-- mnemos:end -->',
+    block,
+    content,
+    flags=re.DOTALL
+)
+
+with open(rules_file, 'w') as f:
+    f.write(new_content)
+
+print('  mnemos block updated.')
+" || echo "  warning: Could not update $RULES_FILE — skipping." >&2
+    else
+        echo "  Injecting mnemos block into $RULES_FILE ..."
+        printf '\n%s\n' "$MNEMOS_BLOCK" >> "$RULES_FILE"
+        echo "  mnemos block injected."
+    fi
+
+    echo "Cursor integration complete."
+}
+
+setup_cursor
+
+# ---------------------------------------------------------------------------
+# 9. Done
 # ---------------------------------------------------------------------------
 echo ""
 echo "mnemos is now available. Try: mnemos --help"
