@@ -58,8 +58,6 @@ class VectorBackend:
             # Network failure, schema mismatch, etc. — degrade gracefully
             return []
 
-        return []
-
     def _search_qdrant(self, query: str, limit: int) -> list[dict[str, Any]]:
         """Qdrant vector search (requires qdrant-client and a running server)."""
         # In a production implementation this would embed the query and search.

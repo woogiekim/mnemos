@@ -4,8 +4,6 @@ from pathlib import Path
 
 import yaml
 
-_LAYERS = ["ephemeral", "working", "session", "project", "global"]
-
 _WIKI_DIRS = [
     "wiki/global",
     "wiki/projects",
