@@ -8,8 +8,8 @@ from pathlib import Path
 
 import click
 
-from mnemos.gateway import MemoryGateway
-from mnemos.policy import PolicyViolationError
+from mnemos.core.gateway import MemoryGateway
+from mnemos.core.policy import PolicyViolationError
 
 
 def _get_gateway() -> MemoryGateway:
@@ -236,7 +236,7 @@ def memory_forget(item_id: str, force: bool) -> None:
 @click.argument("path", default=".", type=click.Path())
 def install_cmd(path: str) -> None:
     """Scaffold a mnemos wiki repo structure at PATH (default: current directory)."""
-    from mnemos.install import install
+    from mnemos.core.install import install
     install(Path(path))
     click.echo(f"mnemos installed at {path}")
 

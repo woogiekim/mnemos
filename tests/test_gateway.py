@@ -84,7 +84,7 @@ def repo_root(tmp_path):
 @pytest.fixture
 def gateway(repo_root):
     """Return a MemoryGateway pointed at tmp repo."""
-    from mnemos.gateway import MemoryGateway
+    from mnemos.core.gateway import MemoryGateway
     return MemoryGateway(repo_root=str(repo_root))
 
 
@@ -104,7 +104,7 @@ class TestCapture:
 
     def test_capture_raises_on_invalid_layer(self, gateway):
         """Capture with unknown layer must raise PolicyViolationError."""
-        from mnemos.policy import PolicyViolationError
+        from mnemos.core.policy import PolicyViolationError
         with pytest.raises(PolicyViolationError):
             gateway.capture(layer="invalid_layer", content="test")
 
@@ -179,7 +179,7 @@ class TestDemote:
 
     def test_demote_raises_on_invalid_target_layer(self, gateway):
         """Demote to unknown layer must raise PolicyViolationError."""
-        from mnemos.policy import PolicyViolationError
+        from mnemos.core.policy import PolicyViolationError
         item_id = gateway.capture(
             layer="global",
             content="Demote to unknown",
@@ -190,7 +190,7 @@ class TestDemote:
 
     def test_demote_raises_on_same_layer(self, gateway):
         """Demote to current layer must raise PolicyViolationError."""
-        from mnemos.policy import PolicyViolationError
+        from mnemos.core.policy import PolicyViolationError
         item_id = gateway.capture(
             layer="global",
             content="Demote to same layer",
@@ -203,7 +203,7 @@ class TestDemote:
 class TestForget:
     def test_forget_requires_archived_state(self, gateway):
         """Forget on non-archived item must raise PolicyViolationError."""
-        from mnemos.policy import PolicyViolationError
+        from mnemos.core.policy import PolicyViolationError
         item_id = gateway.capture(
             layer="global",
             content="Should not be forgotten directly",

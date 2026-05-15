@@ -5,7 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from mnemos.gateway import MemoryGateway
+    from mnemos.core.gateway import MemoryGateway
 
 logger = logging.getLogger(__name__)
 

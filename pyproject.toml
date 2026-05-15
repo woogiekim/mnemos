@@ -18,7 +18,7 @@ vector = ["qdrant-client>=1.7", "chromadb>=0.4"]
 search = ["opensearch-py>=2.4"]
 
 [project.scripts]
-mnemos = "mnemos.cli:cli"
+mnemos = "mnemos.core.cli:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
