@@ -2,7 +2,7 @@
 
 Removal targets:
   1. ~/.claude/settings.json  — PostToolUse and UserPromptSubmit hook entries
-                                 containing mnemos commands
+                                 containing mnemos commands (PostToolUse, UserPromptSubmit)
   2. ~/.claude/CLAUDE.md      — <!-- mnemos-start --> … <!-- mnemos-end --> block
   3. ~/.cursor/rules or rules.md — <!-- mnemos:start --> … <!-- mnemos:end --> block
   4. ~/.zshrc                 — export MNEMOS_REPO_ROOT=... line (+ optional comment)
@@ -70,7 +70,7 @@ def remove_settings_json_hooks(settings_path: Path) -> tuple[bool, str]:
     hooks = data.get("hooks", {})
     changed = False
 
-    for hook_type in ("PostToolUse", "UserPromptSubmit", "Stop"):
+    for hook_type in ("PostToolUse", "UserPromptSubmit"):
         hook_list = hooks.get(hook_type, [])
         cleaned = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
         if cleaned != hook_list:
@@ -459,7 +459,7 @@ def _preview_settings_json(settings_path: Path) -> str:
     hooks = data.get("hooks", {})
     changed = False
 
-    for hook_type in ("PostToolUse", "UserPromptSubmit", "Stop"):
+    for hook_type in ("PostToolUse", "UserPromptSubmit"):
         hook_list = hooks.get(hook_type, [])
         cleaned = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
         if cleaned != hook_list:

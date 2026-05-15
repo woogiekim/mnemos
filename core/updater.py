@@ -8,7 +8,7 @@ Sequence:
 Managed block sentinels
 -----------------------
 settings.json  : hook entries containing "mnemos ingest-claude-md"
-                 or "mnemos search" (PostToolUse / UserPromptSubmit)
+                 or "mnemos search" (PostToolUse / UserPromptSubmit hooks)
 CLAUDE.md      : <!-- mnemos-start --> … <!-- mnemos-end -->
 cursor rules   : <!-- mnemos:start --> … <!-- mnemos:end -->
 """
@@ -34,6 +34,22 @@ CLAUDE_MD_BLOCK = """\
 When asked about past context, notes, or decisions, run:
 `mnemos search <query>`
 This searches your personal memory store managed by mnemos.
+
+### Capturing knowledge
+Use `mnemos capture "<insight>"` when you identify:
+- Stable project decisions
+- Architecture constraints
+- User preferences
+- Reusable workflows
+- Important operational knowledge
+- Persistent project context
+
+Do NOT capture:
+- Temporary debugging, speculative reasoning, incomplete thoughts
+- Transient conversation, low-confidence assumptions, scratch work
+
+All captured insights begin in the session layer.
+Promotion to project or global layer happens through mnemos promotion rules only.
 <!-- mnemos-end -->"""
 
 CURSOR_RULES_BLOCK = """\
