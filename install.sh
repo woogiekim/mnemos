@@ -96,12 +96,17 @@ echo "Scaffolding mnemos wiki structure at $REPO_ROOT ..."
 mnemos install "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# 5b. Tip: running mnemos from any directory
+# 5b. Export MNEMOS_REPO_ROOT to ~/.zshrc (idempotent)
 # ---------------------------------------------------------------------------
-echo ""
-echo "Tip: To run mnemos from any directory, add to your shell profile:"
-echo "  export MNEMOS_REPO_ROOT=\"$REPO_ROOT\""
-echo ""
+ZSHRC="$HOME/.zshrc"
+if grep -q "MNEMOS_REPO_ROOT" "$ZSHRC" 2>/dev/null; then
+    echo "MNEMOS_REPO_ROOT already present in $ZSHRC — skipping."
+else
+    echo "" >> "$ZSHRC"
+    echo "# mnemos — repository root (added by install.sh)" >> "$ZSHRC"
+    echo "export MNEMOS_REPO_ROOT=\"$REPO_ROOT\"" >> "$ZSHRC"
+    echo "Exported MNEMOS_REPO_ROOT=\"$REPO_ROOT\" to $ZSHRC"
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Claude Code integration (auto-detected, silent skip if not installed)
@@ -157,7 +162,7 @@ new_hook = {
     'hooks': [
         {
             'type': 'command',
-            'command': 'mnemos memory-ingest-claude-md'
+            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos memory-ingest-claude-md'
         }
     ]
 }
@@ -209,7 +214,7 @@ new_hook = {
     'hooks': [
         {
             'type': 'command',
-            'command': 'mnemos memory-search \"\${CLAUDE_PROMPT:0:200}\" 2>/dev/null | head -30 || true'
+            'command': 'MNEMOS_REPO_ROOT=\"$REPO_ROOT\" mnemos memory-search \"\${CLAUDE_PROMPT:0:200}\" 2>/dev/null | head -30 || true'
         }
     ]
 }
