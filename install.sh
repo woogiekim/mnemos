@@ -194,7 +194,85 @@ MNEMOS_SECTION
 setup_claude_code
 
 # ---------------------------------------------------------------------------
-# 7. Done
+# 7. Codex integration (auto-detected, silent skip if not installed)
+# ---------------------------------------------------------------------------
+setup_codex() {
+    # Detect Codex CLI: check for ~/.codex directory or codex binary
+    if [ ! -d "$HOME/.codex" ] && ! command -v codex &>/dev/null; then
+        return 0  # Codex not installed — skip silently
+    fi
+
+    echo "Codex detected — configuring mnemos integration..."
+
+    CODEX_DIR="$HOME/.codex"
+    INSTRUCTIONS_FILE="$CODEX_DIR/instructions.md"
+
+    # Ensure ~/.codex directory exists
+    mkdir -p "$CODEX_DIR"
+
+    # -------------------------------------------------------------------------
+    # 7a. Inject/update managed mnemos block in ~/.codex/instructions.md
+    #     Idempotent: replaces existing <!-- mnemos:start --> block or appends.
+    #     Never touches content outside the managed block.
+    # -------------------------------------------------------------------------
+    MNEMOS_BLOCK='<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+`mnemos search <query>`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'
+
+    if [ -f "$INSTRUCTIONS_FILE" ] && grep -q '<!-- mnemos:start -->' "$INSTRUCTIONS_FILE" 2>/dev/null; then
+        echo "  Updating existing mnemos block in $INSTRUCTIONS_FILE ..."
+        python3 -c "
+import re, sys
+
+instructions_file = '$INSTRUCTIONS_FILE'
+with open(instructions_file, 'r') as f:
+    content = f.read()
+
+block = '''<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+\`mnemos search <query>\`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'''
+
+# Replace existing managed block
+new_content = re.sub(
+    r'<!-- mnemos:start -->.*?<!-- mnemos:end -->',
+    block,
+    content,
+    flags=re.DOTALL
+)
+
+with open(instructions_file, 'w') as f:
+    f.write(new_content)
+
+print('  mnemos block updated.')
+" || echo "  warning: Could not update $INSTRUCTIONS_FILE — skipping." >&2
+    else
+        echo "  Injecting mnemos block into $INSTRUCTIONS_FILE ..."
+        # Append block (create file if needed)
+        printf '\n%s\n' "$MNEMOS_BLOCK" >> "$INSTRUCTIONS_FILE"
+        echo "  mnemos block injected."
+    fi
+
+    # -------------------------------------------------------------------------
+    # 7b. Hook integration (optional, best-effort)
+    #     Codex CLI does not expose a hooks API; this is a no-op placeholder.
+    #     If a future Codex version adds hook support, extend here.
+    # -------------------------------------------------------------------------
+
+    echo "Codex integration complete."
+}
+
+setup_codex
+
+# ---------------------------------------------------------------------------
+# 8. Done
 # ---------------------------------------------------------------------------
 echo ""
 echo "mnemos is now available. Try: mnemos --help"
