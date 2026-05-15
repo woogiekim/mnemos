@@ -1,13 +1,10 @@
 """Filesystem Store — read/write memory items as Markdown with YAML front-matter."""
 from __future__ import annotations
 
-import uuid
-import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
 import frontmatter
-import yaml
 
 from mnemos.layers import LAYER_STATIC_PATHS
 
@@ -90,13 +87,7 @@ class MemoryStore:
 
     def _find_by_id(self, item_id: str) -> Iterator[Path]:
         """Search all known layer directories for a file matching item_id."""
-        search_dirs = [
-            self._root / "wiki" / "global",
-            self._root / "wiki" / "projects",
-            self._root / "wiki" / "entities",
-            self._root / "wiki" / "claims",
-            self._root / "wiki" / "topics",
-        ]
+        search_dirs = [self._root / path for path in LAYER_STATIC_PATHS.values()]
         # Search only known .agent subdirs (avoids scanning state/, reports/, tools/, etc.)
         agent_runs = self._root / ".agent" / "runs"
         agent_sessions = self._root / ".agent" / "sessions"
