@@ -202,7 +202,7 @@ class MemoryGateway:
         new_metadata["layer"] = target_layer
         new_metadata["stage"] = "promoted"
 
-        new_path = self._store.write(
+        self._store.write(
             layer=target_layer,
             item_id=item_id,
             content=content,
