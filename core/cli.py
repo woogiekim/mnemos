@@ -61,7 +61,7 @@ def memory_capture(
         sys.exit(1)
 
 
-@cli.command("memory-classify")
+@cli.command("classify")
 @click.argument("item_id")
 @click.option("--tag", required=True, help="Tag to apply.")
 @click.option("--layer", default=None, help="Layer hint (optional).")
@@ -99,7 +99,7 @@ def memory_search(query: str, layers: str | None, limit: int) -> None:
         click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {r['content'][:80]}")
 
 
-@cli.command("memory-read")
+@cli.command("read")
 @click.argument("item_id")
 def memory_read(item_id: str) -> None:
     """Read a specific memory item by ID or path."""
@@ -112,7 +112,7 @@ def memory_read(item_id: str) -> None:
         sys.exit(1)
 
 
-@cli.command("memory-use")
+@cli.command("use")
 @click.argument("item_id")
 def memory_use(item_id: str) -> None:
     """Mark a memory item as 'in use'."""
@@ -125,7 +125,7 @@ def memory_use(item_id: str) -> None:
         sys.exit(1)
 
 
-@cli.command("memory-update")
+@cli.command("item-update")
 @click.argument("item_id")
 @click.option("--content", required=True, help="New content.")
 def memory_update(item_id: str, content: str) -> None:
@@ -139,7 +139,7 @@ def memory_update(item_id: str, content: str) -> None:
         sys.exit(1)
 
 
-@cli.command("memory-promote")
+@cli.command("promote")
 @click.argument("item_id")
 @click.option("--target-layer", default=None, help="Target layer (default: next layer).")
 @click.option("--run-id", default=None, help="Run ID.")
@@ -168,7 +168,7 @@ def memory_promote(
         sys.exit(1)
 
 
-@cli.command("memory-demote")
+@cli.command("demote")
 @click.argument("item_id")
 @click.option("--target-layer", required=True, help="Target layer.")
 @click.option("--run-id", default=None, help="Run ID.")
@@ -197,7 +197,7 @@ def memory_demote(
         sys.exit(1)
 
 
-@cli.command("memory-archive")
+@cli.command("archive")
 @click.argument("item_id")
 def memory_archive(item_id: str) -> None:
     """Archive a memory item (soft-delete, retain content)."""
@@ -213,7 +213,7 @@ def memory_archive(item_id: str) -> None:
         sys.exit(1)
 
 
-@cli.command("memory-forget")
+@cli.command("forget")
 @click.argument("item_id")
 @click.option("--force", is_flag=True, default=False, help="Skip confirmation prompt.")
 def memory_forget(item_id: str, force: bool) -> None:
@@ -317,7 +317,7 @@ def uninstall_cmd(yes: bool, purge: bool) -> None:
     sys.exit(exit_code)
 
 
-@cli.command("memory-log")
+@cli.command("log")
 @click.option("--op", required=True, help="Operation name.")
 @click.option("--id", "item_id", required=True, help="Item ID.")
 @click.option("--layer", required=True, help="Layer name.")

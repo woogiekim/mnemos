@@ -131,7 +131,7 @@ class TestMemorySearchCommand:
 
 class TestMemoryPromoteCommand:
     def test_memory_promote_command(self, runner, cli_with_repo, repo_root):
-        """memory-promote must move item to next layer."""
+        """promote must move item to next layer."""
         # Capture in project layer
         cap_result = runner.invoke(
             cli_with_repo,
@@ -147,37 +147,37 @@ class TestMemoryPromoteCommand:
         # Promote it
         result = runner.invoke(
             cli_with_repo,
-            ["memory-promote", "promote-001"],
+            ["promote", "promote-001"],
         )
         assert result.exit_code == 0, result.output
 
 
 class TestMemoryForgetCommand:
     def test_memory_forget_requires_archived(self, runner, cli_with_repo, repo_root):
-        """memory-forget on non-archived item must fail with error."""
+        """forget on non-archived item must fail with error."""
         runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "forget-me", "--id", "forget-001"],
         )
         result = runner.invoke(
             cli_with_repo,
-            ["memory-forget", "--force", "forget-001"],
+            ["forget", "--force", "forget-001"],
         )
         # Should fail because item is not archived
         assert result.exit_code != 0 or "error" in result.output.lower() or "policy" in result.output.lower()
 
     def test_memory_forget_after_archive_succeeds(self, runner, cli_with_repo, repo_root):
-        """memory-forget after archive must succeed."""
+        """forget after archive must succeed."""
         runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "archive then forget", "--id", "forget-002"],
         )
         runner.invoke(
             cli_with_repo,
-            ["memory-archive", "forget-002"],
+            ["archive", "forget-002"],
         )
         result = runner.invoke(
             cli_with_repo,
-            ["memory-forget", "--force", "forget-002"],
+            ["forget", "--force", "forget-002"],
         )
         assert result.exit_code == 0, result.output
