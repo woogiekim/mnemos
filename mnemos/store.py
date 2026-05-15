@@ -9,14 +9,7 @@ from typing import Any, Iterator
 import frontmatter
 import yaml
 
-
-LAYER_STATIC_PATHS: dict[str, str] = {
-    "project": "wiki/projects",
-    "global": "wiki/global",
-    "entities": "wiki/entities",
-    "claims": "wiki/claims",
-    "topics": "wiki/topics",
-}
+from mnemos.layers import LAYER_STATIC_PATHS
 
 
 class MemoryStore:
@@ -104,10 +97,12 @@ class MemoryStore:
             self._root / "wiki" / "claims",
             self._root / "wiki" / "topics",
         ]
-        # Also search .agent directories
-        agent_dir = self._root / ".agent"
-        if agent_dir.exists():
-            search_dirs.extend(agent_dir.rglob("*"))
+        # Search only known .agent subdirs (avoids scanning state/, reports/, tools/, etc.)
+        agent_runs = self._root / ".agent" / "runs"
+        agent_sessions = self._root / ".agent" / "sessions"
+        for agent_sub in (agent_runs, agent_sessions):
+            if agent_sub.exists():
+                search_dirs.extend(d for d in agent_sub.rglob("*") if d.is_dir())
 
         for d in search_dirs:
             d = Path(d)

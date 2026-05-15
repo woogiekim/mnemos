@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from mnemos.fts import FTSIndex
+from mnemos.layers import LAYER_STATIC_PATHS
 from mnemos.vector import VectorBackend
 
 
@@ -113,13 +114,7 @@ class SearchMiddleware:
 
     def _get_search_dirs(self, layers: list[str] | None) -> list[Path]:
         """Return directories to search based on layer filter."""
-        all_dirs = {
-            "global": self._root / "wiki" / "global",
-            "project": self._root / "wiki" / "projects",
-            "entities": self._root / "wiki" / "entities",
-            "claims": self._root / "wiki" / "claims",
-            "topics": self._root / "wiki" / "topics",
-        }
+        all_dirs = {layer: self._root / path for layer, path in LAYER_STATIC_PATHS.items()}
         if layers is None:
             return list(all_dirs.values())
         return [all_dirs[l] for l in layers if l in all_dirs]
