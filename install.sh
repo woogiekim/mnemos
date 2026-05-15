@@ -96,7 +96,105 @@ echo "Scaffolding mnemos wiki structure at $REPO_ROOT ..."
 mnemos install "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# 6. Done
+# 6. Claude Code integration (auto-detected, silent skip if not installed)
+# ---------------------------------------------------------------------------
+setup_claude_code() {
+    # Detect Claude Code: check for ~/.claude directory or claude binary
+    if [ ! -d "$HOME/.claude" ] && ! command -v claude &>/dev/null; then
+        return 0  # Claude Code not installed — skip silently
+    fi
+
+    echo "Claude Code detected — configuring mnemos integration..."
+
+    CLAUDE_DIR="$HOME/.claude"
+    SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+    CLAUDE_MD_FILE="$CLAUDE_DIR/CLAUDE.md"
+
+    # Ensure ~/.claude directory exists
+    mkdir -p "$CLAUDE_DIR"
+
+    # -------------------------------------------------------------------------
+    # 6a. Wire PostToolUse hook in ~/.claude/settings.json
+    #     Uses python3 stdlib json — no jq dependency required.
+    #     Idempotent: skips if "mnemos memory-ingest-claude-md" already present.
+    # -------------------------------------------------------------------------
+    if [ -f "$SETTINGS_FILE" ] && python3 -c "
+import sys, json
+data = json.load(open('$SETTINGS_FILE'))
+text = json.dumps(data)
+sys.exit(0 if 'mnemos memory-ingest-claude-md' in text else 1)
+" 2>/dev/null; then
+        echo "  mnemos PostToolUse hook already present in settings.json — skipping."
+    else
+        echo "  Wiring PostToolUse hook in $SETTINGS_FILE ..."
+        python3 -c "
+import json, os, sys
+
+settings_file = '$SETTINGS_FILE'
+
+# Load existing settings or start fresh
+if os.path.exists(settings_file):
+    with open(settings_file, 'r') as f:
+        data = json.load(f)
+else:
+    data = {}
+
+# Ensure hooks structure exists
+hooks = data.setdefault('hooks', {})
+post_tool_use = hooks.setdefault('PostToolUse', [])
+
+# Build the new hook entry
+new_hook = {
+    'matcher': 'Write|Edit',
+    'hooks': [
+        {
+            'type': 'command',
+            'command': 'mnemos memory-ingest-claude-md'
+        }
+    ]
+}
+
+# Append the new hook entry
+post_tool_use.append(new_hook)
+
+# Write back with consistent formatting
+with open(settings_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+
+print('  Hook written to settings.json.')
+" || {
+            echo "  warning: Could not update $SETTINGS_FILE — skipping hook wiring." >&2
+        }
+    fi
+
+    # -------------------------------------------------------------------------
+    # 6b. Inject mnemos context section into ~/.claude/CLAUDE.md
+    #     Idempotent: skips if <!-- mnemos-start --> already present.
+    # -------------------------------------------------------------------------
+    if [ -f "$CLAUDE_MD_FILE" ] && grep -q '<!-- mnemos-start -->' "$CLAUDE_MD_FILE" 2>/dev/null; then
+        echo "  mnemos section already present in CLAUDE.md — skipping."
+    else
+        echo "  Injecting mnemos context section into $CLAUDE_MD_FILE ..."
+        cat >> "$CLAUDE_MD_FILE" <<'MNEMOS_SECTION'
+
+<!-- mnemos-start -->
+## Memory (mnemos)
+When asked about past context, notes, or decisions, run:
+`mnemos search <query>`
+This searches your personal memory store managed by mnemos.
+<!-- mnemos-end -->
+MNEMOS_SECTION
+        echo "  mnemos section injected into CLAUDE.md."
+    fi
+
+    echo "Claude Code integration complete."
+}
+
+setup_claude_code
+
+# ---------------------------------------------------------------------------
+# 7. Done
 # ---------------------------------------------------------------------------
 echo ""
 echo "mnemos is now available. Try: mnemos --help"
