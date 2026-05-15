@@ -96,7 +96,261 @@ echo "Scaffolding mnemos wiki structure at $REPO_ROOT ..."
 mnemos install "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# 6. Done
+# 6. Claude Code integration (auto-detected, silent skip if not installed)
+# ---------------------------------------------------------------------------
+setup_claude_code() {
+    # Detect Claude Code: check for ~/.claude directory or claude binary
+    if [ ! -d "$HOME/.claude" ] && ! command -v claude &>/dev/null; then
+        return 0  # Claude Code not installed — skip silently
+    fi
+
+    echo "Claude Code detected — configuring mnemos integration..."
+
+    CLAUDE_DIR="$HOME/.claude"
+    SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+    CLAUDE_MD_FILE="$CLAUDE_DIR/CLAUDE.md"
+
+    # Ensure ~/.claude directory exists
+    mkdir -p "$CLAUDE_DIR"
+
+    # -------------------------------------------------------------------------
+    # 6a. Wire PostToolUse hook in ~/.claude/settings.json
+    #     Uses python3 stdlib json — no jq dependency required.
+    #     Idempotent: skips if "mnemos memory-ingest-claude-md" already present.
+    # -------------------------------------------------------------------------
+    if [ -f "$SETTINGS_FILE" ] && python3 -c "
+import sys, json
+data = json.load(open('$SETTINGS_FILE'))
+text = json.dumps(data)
+sys.exit(0 if 'mnemos memory-ingest-claude-md' in text else 1)
+" 2>/dev/null; then
+        echo "  mnemos PostToolUse hook already present in settings.json — skipping."
+    else
+        echo "  Wiring PostToolUse hook in $SETTINGS_FILE ..."
+        python3 -c "
+import json, os, sys
+
+settings_file = '$SETTINGS_FILE'
+
+# Load existing settings or start fresh
+if os.path.exists(settings_file):
+    with open(settings_file, 'r') as f:
+        data = json.load(f)
+else:
+    data = {}
+
+# Ensure hooks structure exists
+hooks = data.setdefault('hooks', {})
+post_tool_use = hooks.setdefault('PostToolUse', [])
+
+# Build the new hook entry
+new_hook = {
+    'matcher': 'Write|Edit',
+    'hooks': [
+        {
+            'type': 'command',
+            'command': 'mnemos memory-ingest-claude-md'
+        }
+    ]
+}
+
+# Append the new hook entry
+post_tool_use.append(new_hook)
+
+# Write back with consistent formatting
+with open(settings_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+
+print('  Hook written to settings.json.')
+" || {
+            echo "  warning: Could not update $SETTINGS_FILE — skipping hook wiring." >&2
+        }
+    fi
+
+    # -------------------------------------------------------------------------
+    # 6b. Inject mnemos context section into ~/.claude/CLAUDE.md
+    #     Idempotent: skips if <!-- mnemos-start --> already present.
+    # -------------------------------------------------------------------------
+    if [ -f "$CLAUDE_MD_FILE" ] && grep -q '<!-- mnemos-start -->' "$CLAUDE_MD_FILE" 2>/dev/null; then
+        echo "  mnemos section already present in CLAUDE.md — skipping."
+    else
+        echo "  Injecting mnemos context section into $CLAUDE_MD_FILE ..."
+        cat >> "$CLAUDE_MD_FILE" <<'MNEMOS_SECTION'
+
+<!-- mnemos-start -->
+## Memory (mnemos)
+When asked about past context, notes, or decisions, run:
+`mnemos search <query>`
+This searches your personal memory store managed by mnemos.
+<!-- mnemos-end -->
+MNEMOS_SECTION
+        echo "  mnemos section injected into CLAUDE.md."
+    fi
+
+    echo "Claude Code integration complete."
+}
+
+setup_claude_code
+
+# ---------------------------------------------------------------------------
+# 7. Codex integration (auto-detected, silent skip if not installed)
+# ---------------------------------------------------------------------------
+setup_codex() {
+    # Detect Codex CLI: check for ~/.codex directory or codex binary
+    if [ ! -d "$HOME/.codex" ] && ! command -v codex &>/dev/null; then
+        return 0  # Codex not installed — skip silently
+    fi
+
+    echo "Codex detected — configuring mnemos integration..."
+
+    CODEX_DIR="$HOME/.codex"
+    INSTRUCTIONS_FILE="$CODEX_DIR/instructions.md"
+
+    # Ensure ~/.codex directory exists
+    mkdir -p "$CODEX_DIR"
+
+    # -------------------------------------------------------------------------
+    # 7a. Inject/update managed mnemos block in ~/.codex/instructions.md
+    #     Idempotent: replaces existing <!-- mnemos:start --> block or appends.
+    #     Never touches content outside the managed block.
+    # -------------------------------------------------------------------------
+    MNEMOS_BLOCK='<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+`mnemos search <query>`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'
+
+    if [ -f "$INSTRUCTIONS_FILE" ] && grep -q '<!-- mnemos:start -->' "$INSTRUCTIONS_FILE" 2>/dev/null; then
+        echo "  Updating existing mnemos block in $INSTRUCTIONS_FILE ..."
+        python3 -c "
+import re, sys
+
+instructions_file = '$INSTRUCTIONS_FILE'
+with open(instructions_file, 'r') as f:
+    content = f.read()
+
+block = '''<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+\`mnemos search <query>\`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'''
+
+# Replace existing managed block
+new_content = re.sub(
+    r'<!-- mnemos:start -->.*?<!-- mnemos:end -->',
+    block,
+    content,
+    flags=re.DOTALL
+)
+
+with open(instructions_file, 'w') as f:
+    f.write(new_content)
+
+print('  mnemos block updated.')
+" || echo "  warning: Could not update $INSTRUCTIONS_FILE — skipping." >&2
+    else
+        echo "  Injecting mnemos block into $INSTRUCTIONS_FILE ..."
+        # Append block (create file if needed)
+        printf '\n%s\n' "$MNEMOS_BLOCK" >> "$INSTRUCTIONS_FILE"
+        echo "  mnemos block injected."
+    fi
+
+    # -------------------------------------------------------------------------
+    # 7b. Hook integration (optional, best-effort)
+    #     Codex CLI does not expose a hooks API; this is a no-op placeholder.
+    #     If a future Codex version adds hook support, extend here.
+    # -------------------------------------------------------------------------
+
+    echo "Codex integration complete."
+}
+
+setup_codex
+
+# ---------------------------------------------------------------------------
+# 8. Cursor integration (auto-detected, silent skip if not installed)
+# ---------------------------------------------------------------------------
+setup_cursor() {
+    # Detect Cursor IDE: check for ~/.cursor directory or cursor binary
+    if [ ! -d "$HOME/.cursor" ] && ! command -v cursor &>/dev/null; then
+        return 0  # Cursor not installed — skip silently
+    fi
+
+    echo "Cursor detected — configuring mnemos integration..."
+
+    CURSOR_DIR="$HOME/.cursor"
+    mkdir -p "$CURSOR_DIR"
+
+    # -------------------------------------------------------------------------
+    # 8a. Auto-detect rules file: prefer rules (no ext), fallback rules.md,
+    #     create rules if neither exists.
+    # -------------------------------------------------------------------------
+    if [ -f "$CURSOR_DIR/rules" ]; then
+        RULES_FILE="$CURSOR_DIR/rules"
+    elif [ -f "$CURSOR_DIR/rules.md" ]; then
+        RULES_FILE="$CURSOR_DIR/rules.md"
+    else
+        RULES_FILE="$CURSOR_DIR/rules"
+        touch "$RULES_FILE"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 8b. Inject/update managed mnemos block (idempotent).
+    # -------------------------------------------------------------------------
+    MNEMOS_BLOCK='<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+`mnemos search <query>`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'
+
+    if grep -q '<!-- mnemos:start -->' "$RULES_FILE" 2>/dev/null; then
+        echo "  Updating existing mnemos block in $RULES_FILE ..."
+        python3 -c "
+import re
+
+rules_file = '$RULES_FILE'
+with open(rules_file, 'r') as f:
+    content = f.read()
+
+block = '''<!-- mnemos:start -->
+## Memory (mnemos)
+For memory-related, project-history, architecture-history, or prior-decision questions, run:
+\`mnemos search <query>\`
+before answering. Do not assume the current conversation contains complete context.
+Use mnemos as the persistent memory retrieval system.
+<!-- mnemos:end -->'''
+
+new_content = re.sub(
+    r'<!-- mnemos:start -->.*?<!-- mnemos:end -->',
+    block,
+    content,
+    flags=re.DOTALL
+)
+
+with open(rules_file, 'w') as f:
+    f.write(new_content)
+
+print('  mnemos block updated.')
+" || echo "  warning: Could not update $RULES_FILE — skipping." >&2
+    else
+        echo "  Injecting mnemos block into $RULES_FILE ..."
+        printf '\n%s\n' "$MNEMOS_BLOCK" >> "$RULES_FILE"
+        echo "  mnemos block injected."
+    fi
+
+    echo "Cursor integration complete."
+}
+
+setup_cursor
+
+# ---------------------------------------------------------------------------
+# 9. Done
 # ---------------------------------------------------------------------------
 echo ""
 echo "mnemos is now available. Try: mnemos --help"
