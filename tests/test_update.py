@@ -31,7 +31,7 @@ class TestUpdateSettingsJson:
                 "PostToolUse": [
                     {
                         "matcher": "Write|Edit",
-                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/old/path" mnemos memory-ingest-claude-md'}],
+                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/old/path" mnemos ingest-claude-md'}],
                     }
                 ]
             }
@@ -46,7 +46,7 @@ class TestUpdateSettingsJson:
         hooks = result["hooks"]["PostToolUse"]
         assert len(hooks) == 1
         cmd = hooks[0]["hooks"][0]["command"]
-        assert "mnemos memory-ingest-claude-md" in cmd
+        assert "mnemos ingest-claude-md" in cmd
         assert hooks[0]["matcher"] == "Write|Edit"
 
     def test_replaces_user_prompt_submit_hook(self, tmp_path):
@@ -56,7 +56,7 @@ class TestUpdateSettingsJson:
                 "UserPromptSubmit": [
                     {
                         "matcher": "",
-                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/old/path" mnemos memory-search "${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true'}],
+                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/old/path" mnemos search "${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true'}],
                     }
                 ]
             }
@@ -70,7 +70,7 @@ class TestUpdateSettingsJson:
         hooks = result["hooks"]["UserPromptSubmit"]
         assert len(hooks) == 1
         cmd = hooks[0]["hooks"][0]["command"]
-        assert "mnemos memory-search" in cmd
+        assert "mnemos search" in cmd
 
     def test_preserves_non_mnemos_hooks(self, tmp_path):
         settings = tmp_path / "settings.json"
@@ -84,7 +84,7 @@ class TestUpdateSettingsJson:
                     other_hook,
                     {
                         "matcher": "Write|Edit",
-                        "hooks": [{"type": "command", "command": "mnemos memory-ingest-claude-md"}],
+                        "hooks": [{"type": "command", "command": "mnemos ingest-claude-md"}],
                     },
                 ]
             }
@@ -125,7 +125,7 @@ class TestUpdateSettingsJson:
                 "PostToolUse": [
                     {
                         "matcher": "OldMatcher",
-                        "hooks": [{"type": "command", "command": "mnemos memory-ingest-claude-md"}],
+                        "hooks": [{"type": "command", "command": "mnemos ingest-claude-md"}],
                     }
                 ]
             }

@@ -1,4 +1,4 @@
-"""Query Agent — answers questions using memory-search + memory-read."""
+"""Query Agent — answers questions using search + memory-read."""
 from __future__ import annotations
 
 import logging
@@ -23,7 +23,7 @@ class QueryAgent:
         search_limit: int = 5,
     ) -> dict[str, Any]:
         """
-        Answer a question using memory-search and memory-read.
+        Answer a question using search and memory-read.
 
         Args:
             question: The question to answer.

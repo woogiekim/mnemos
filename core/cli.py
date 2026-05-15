@@ -1,4 +1,4 @@
-"""Click CLI — memory-* subcommands."""
+"""Click CLI — mnemos subcommands."""
 from __future__ import annotations
 
 import json
@@ -23,7 +23,7 @@ def cli() -> None:
     """mnemos — LLM Wiki Memory OS CLI."""
 
 
-@cli.command("memory-capture")
+@cli.command("capture")
 @click.option("--layer", required=True, help="Target memory layer.")
 @click.option("--content", required=True, help="Content to capture.")
 @click.option("--id", "item_id", default=None, help="Optional item ID.")
@@ -79,7 +79,7 @@ def memory_classify(item_id: str, tag: str, layer: str | None) -> None:
         sys.exit(1)
 
 
-@cli.command("memory-search")
+@cli.command("search")
 @click.argument("query")
 @click.option(
     "--layers",
@@ -303,13 +303,13 @@ def memory_log(op: str, item_id: str, layer: str, meta: str | None) -> None:
     click.echo(f"logged: {op} {item_id} ({layer})")
 
 
-@cli.command("memory-extract-insight")
+@cli.command("extract-insight")
 @click.option(
     "--dry-run",
     "dry_run",
     is_flag=True,
     default=False,
-    help="Print extracted insights without calling memory-capture.",
+    help="Print extracted insights without calling capture.",
 )
 def memory_extract_insight(dry_run: bool) -> None:
     """Extract worth-capturing insights from a Claude Code Stop hook turn.
@@ -317,7 +317,7 @@ def memory_extract_insight(dry_run: bool) -> None:
     Reads the Stop hook JSON payload from stdin (fields: session_id,
     transcript_path, last_assistant_message, reason, …), calls
     claude-haiku-4-5 to judge whether the turn contains an insight, and
-    captures each extracted insight via ``memory-capture --layer session``.
+    captures each extracted insight via ``capture --layer session``.
 
     \b
     Insight categories that are captured:
@@ -327,7 +327,7 @@ def memory_extract_insight(dry_run: bool) -> None:
       pattern         — reusable convention specific to this project
       pitfall         — warning about something that will mislead or break
 
-    With --dry-run the insights are printed but memory-capture is not called.
+    With --dry-run the insights are printed but capture is not called.
     """
     from agents.insight import InsightExtractor
 
@@ -412,7 +412,7 @@ def memory_extract_insight(dry_run: bool) -> None:
         sys.exit(1)
 
 
-@cli.command("memory-ingest-claude-md")
+@cli.command("ingest-claude-md")
 @click.option(
     "--project-root",
     "project_root",

@@ -18,7 +18,7 @@ def _sha256(text: str) -> str:
 
 
 class IngestAgent:
-    """Reads files from raw/sources/ and calls memory-capture for each."""
+    """Reads files from raw/sources/ and calls capture for each."""
 
     def __init__(self, gateway: "MemoryGateway") -> None:
         self._gw = gateway
