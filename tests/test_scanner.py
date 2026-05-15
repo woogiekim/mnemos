@@ -296,7 +296,7 @@ class TestMemoryIngestClaudeMdCommand:
 
         assert result.exit_code == 0, result.output
         assert "ingested:" in result.output
-        assert "done: 2 item(s) ingested" in result.output
+        assert "claude-md: 2 item(s) ingested" in result.output
 
     def test_skips_missing_files_gracefully(
         self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
@@ -339,7 +339,7 @@ class TestMemoryIngestClaudeMdCommand:
             )
 
         assert result.exit_code == 0, result.output
-        assert "done: 1 item(s) ingested" in result.output
+        assert "claude-md: 1 item(s) ingested" in result.output
 
     def test_custom_run_id_is_accepted(
         self, tmp_path: Path, repo_root: Path, runner: CliRunner, monkeypatch
@@ -365,4 +365,4 @@ class TestMemoryIngestClaudeMdCommand:
             )
 
         assert result.exit_code == 0, result.output
-        assert "done: 1 item(s) ingested" in result.output
+        assert "claude-md: 1 item(s) ingested" in result.output
