@@ -135,6 +135,62 @@ class TestUpdateSettingsJson:
         assert "---" in diff
         assert "+++" in diff
 
+    def test_removes_stop_hook_with_mnemos_extract_insight(self, tmp_path):
+        """update must remove legacy Stop hook containing any mnemos command."""
+        settings = tmp_path / "settings.json"
+        data = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/repo" mnemos extract-insight'}],
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": "Write|Edit",
+                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/repo" mnemos ingest-claude-md'}],
+                    }
+                ],
+            }
+        }
+        self._write(settings, data)
+
+        changed, diff = update_settings_json(settings)
+
+        assert changed is True
+        result = json.loads(settings.read_text())
+        hooks = result.get("hooks", {})
+        assert "Stop" not in hooks, "Stop hook must be removed after update"
+
+    def test_stop_hook_removal_leaves_non_mnemos_stop_entries(self, tmp_path):
+        """update must only remove mnemos entries from Stop, preserving others."""
+        settings = tmp_path / "settings.json"
+        data = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [{"type": "command", "command": "mnemos extract-insight"}],
+                    },
+                    {
+                        "matcher": "",
+                        "hooks": [{"type": "command", "command": "echo done"}],
+                    },
+                ],
+            }
+        }
+        self._write(settings, data)
+
+        changed, diff = update_settings_json(settings)
+
+        assert changed is True
+        result = json.loads(settings.read_text())
+        stop_hooks = result.get("hooks", {}).get("Stop", [])
+        cmds = [h["hooks"][0]["command"] for h in stop_hooks]
+        assert any("echo done" in c for c in cmds), "non-mnemos Stop entry must be preserved"
+        assert all("mnemos" not in c for c in cmds), "mnemos Stop entry must be removed"
+
 
 # ---------------------------------------------------------------------------
 # update_claude_md

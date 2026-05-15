@@ -174,6 +174,53 @@ class TestRemoveSettingsJsonHooks:
         result = json.loads(settings.read_text())
         assert "hooks" not in result
 
+    def test_removes_stop_hook_with_mnemos_command(self, tmp_path):
+        """uninstall must remove legacy Stop hook containing any mnemos command."""
+        settings = tmp_path / "settings.json"
+        data = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="/repo" mnemos extract-insight'}],
+                    }
+                ]
+            }
+        }
+        self._write(settings, data)
+
+        changed, diff = remove_settings_json_hooks(settings)
+
+        assert changed is True
+        assert diff != ""
+        result = json.loads(settings.read_text())
+        hooks = result.get("hooks", {})
+        assert "Stop" not in hooks, "Stop hook must be removed by uninstall"
+
+    def test_removes_all_hook_types_including_stop(self, tmp_path):
+        """uninstall removes PostToolUse, UserPromptSubmit, and Stop in one pass."""
+        settings = tmp_path / "settings.json"
+        data = {
+            "hooks": {
+                "PostToolUse": [
+                    {"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "mnemos ingest-claude-md"}]}
+                ],
+                "UserPromptSubmit": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": 'mnemos search "${CLAUDE_PROMPT:0:200}"'}]}
+                ],
+                "Stop": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "mnemos extract-insight"}]}
+                ],
+            }
+        }
+        self._write(settings, data)
+
+        changed, diff = remove_settings_json_hooks(settings)
+
+        assert changed is True
+        result = json.loads(settings.read_text())
+        assert "hooks" not in result, "all hook types must be removed, leaving no hooks key"
+
 
 # ---------------------------------------------------------------------------
 # remove_claude_md_block

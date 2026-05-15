@@ -179,6 +179,24 @@ def update_settings_json(settings_path: Path) -> tuple[bool, str]:
         if repo_root:
             break
 
+    # Remove legacy Stop hook (mnemos extract-insight was removed in Issue #4 fix)
+    if "Stop" in hooks:
+        stop_list = hooks["Stop"]
+        has_mnemos_stop = any(
+            any("mnemos" in h.get("command", "") for h in entry.get("hooks", []))
+            for entry in stop_list
+        )
+        if has_mnemos_stop:
+            cleaned_stop = [
+                e for e in stop_list
+                if not any("mnemos" in h.get("command", "") for h in e.get("hooks", []))
+            ]
+            changed = True
+            if cleaned_stop:
+                hooks["Stop"] = cleaned_stop
+            else:
+                del hooks["Stop"]
+
     # Remove all existing mnemos hook entries and replace with canonical ones
     for hook_type, template in [
         ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
@@ -291,6 +309,8 @@ def run_update(
     home: Optional[Path] = None,
 ) -> int:
     """Run the full update sequence.  Returns exit code (0 = success)."""
+    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+
     if home is None:
         home = Path.home()
 
@@ -321,37 +341,23 @@ def run_update(
             print(f"warning: pipx reinstall failed — {exc}", file=sys.stderr)
             exit_code = 1
 
-    # -- 3. Replace managed blocks ------------------------------------------
+    # -- 3. Replace managed blocks via adapters (run ALL — not filtered by is_present) --
     print("\n── updating managed config blocks ───────────────────────────────")
 
-    settings_path = home / ".claude" / "settings.json"
-    changed, diff = update_settings_json(settings_path)
-    if changed:
-        print(f"\n[updated] {settings_path}")
-        if diff:
-            print(diff)
-    else:
-        print(f"[unchanged] {settings_path}")
-
-    claude_md_path = home / ".claude" / "CLAUDE.md"
-    changed, diff = update_claude_md(claude_md_path)
-    if changed:
-        print(f"\n[updated] {claude_md_path}")
-        if diff:
-            print(diff)
-    else:
-        print(f"[unchanged] {claude_md_path}")
-
-    cursor_dir = home / ".cursor"
-    changed, diff = update_cursor_rules(cursor_dir)
-    if changed:
-        rules_path = _find_cursor_rules(cursor_dir)
-        label = str(rules_path) if rules_path else str(cursor_dir / "rules")
-        print(f"\n[updated] {label}")
-        if diff:
-            print(diff)
-    else:
-        print(f"[unchanged] {cursor_dir / 'rules'}")
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    for adapter in adapter_list:
+        try:
+            messages = adapter.update(home)
+            for msg in messages:
+                if msg.startswith("[updated]"):
+                    print(f"\n{msg}")
+                else:
+                    print(msg)
+        except Exception as exc:
+            print(
+                f"warning: {adapter.name} adapter update failed — {exc}",
+                file=sys.stderr,
+            )
 
     print("\n── update complete ───────────────────────────────────────────────")
     return exit_code

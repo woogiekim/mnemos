@@ -52,7 +52,14 @@ def memory_capture(
             run_id=run_id,
             session_id=session_id,
         )
-        click.echo(f"captured: {captured_id}")
+        if captured_id is None:
+            preview = content[:60]
+            click.echo(f"[mnemos] Skipped (duplicate): \"{preview}\"")
+        else:
+            click.echo(f"captured: {captured_id}")
+            preview = content[:60]
+            suffix = "..." if len(content) > 60 else ""
+            click.echo(f"[mnemos] Captured: \"{preview}{suffix}\" → {layer} layer")
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)
@@ -94,9 +101,10 @@ def memory_search(query: str, layers: str | None, limit: int) -> None:
     results = gw.search(query=query, layers=layer_list, limit=limit)
     if not results:
         click.echo("no results found")
-        return
-    for r in results:
-        click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {r['content'][:80]}")
+    else:
+        for r in results:
+            click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {r['content'][:80]}")
+    click.echo(f"[mnemos] Retrieved {len(results)} memories")
 
 
 @cli.command("read")

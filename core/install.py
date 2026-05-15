@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -96,9 +98,22 @@ parameter to scope ephemeral/working memory.
 """
 
 
-def install(path: Path) -> None:
-    path = path.resolve()
+def install(path: Path, home: Optional[Path] = None) -> None:
+    """Scaffold a mnemos wiki repo at *path* and configure detected host adapters.
 
+    Args:
+        path: The wiki repository root to scaffold.
+        home: The user's home directory.  Defaults to Path.home().
+              Adapters are only run when their host is detected via
+              ``adapter.is_present(home)``.
+    """
+    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+
+    path = path.resolve()
+    if home is None:
+        home = Path.home()
+
+    # -- Wiki repo scaffold -----------------------------------------------
     for rel in _WIKI_DIRS + _AGENT_DIRS:
         (path / rel).mkdir(parents=True, exist_ok=True)
 
@@ -128,3 +143,27 @@ def install(path: Path) -> None:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write(_GITIGNORE_BLOCK)
+
+    # -- Shared: write MNEMOS_REPO_ROOT to ~/.zshrc -----------------------
+    _install_zshrc(home, repo_root=str(path))
+
+    # -- Host adapters (only run if host is present) ----------------------
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    for adapter in adapter_list:
+        if adapter.is_present(home):
+            messages = adapter.install(home)
+            for msg in messages:
+                print(msg)
+
+
+def _install_zshrc(home: Path, repo_root: str) -> None:
+    """Write export MNEMOS_REPO_ROOT=... to ~/.zshrc if not already present."""
+    zshrc_path = home / ".zshrc"
+    export_line = f'export MNEMOS_REPO_ROOT="{repo_root}"\n'
+    existing = zshrc_path.read_text(encoding="utf-8") if zshrc_path.exists() else ""
+    if "MNEMOS_REPO_ROOT" not in existing:
+        with zshrc_path.open("a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"# mnemos — repository root (added by install.py)\n")
+            f.write(export_line)
