@@ -177,7 +177,57 @@ print('  Hook written to settings.json.')
     fi
 
     # -------------------------------------------------------------------------
-    # 6b. Inject mnemos context section into ~/.claude/CLAUDE.md
+    # 6b. Wire UserPromptSubmit hook in ~/.claude/settings.json
+    #     Automatically injects relevant mnemos memories into Claude's context
+    #     before each response. Idempotent: skips if already present.
+    # -------------------------------------------------------------------------
+    if [ -f "$SETTINGS_FILE" ] && python3 -c "
+import sys, json
+data = json.load(open('$SETTINGS_FILE'))
+text = json.dumps(data)
+sys.exit(0 if 'mnemos memory-search' in text else 1)
+" 2>/dev/null; then
+        echo "  mnemos UserPromptSubmit hook already present in settings.json — skipping."
+    else
+        echo "  Wiring UserPromptSubmit hook in $SETTINGS_FILE ..."
+        python3 -c "
+import json, os, sys
+
+settings_file = '$SETTINGS_FILE'
+
+if os.path.exists(settings_file):
+    with open(settings_file, 'r') as f:
+        data = json.load(f)
+else:
+    data = {}
+
+hooks = data.setdefault('hooks', {})
+user_prompt_submit = hooks.setdefault('UserPromptSubmit', [])
+
+new_hook = {
+    'matcher': '',
+    'hooks': [
+        {
+            'type': 'command',
+            'command': 'mnemos memory-search \"\${CLAUDE_PROMPT:0:200}\" 2>/dev/null | head -30 || true'
+        }
+    ]
+}
+
+user_prompt_submit.append(new_hook)
+
+with open(settings_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+
+print('  UserPromptSubmit hook written to settings.json.')
+" || {
+            echo "  warning: Could not update $SETTINGS_FILE — skipping UserPromptSubmit hook." >&2
+        }
+    fi
+
+    # -------------------------------------------------------------------------
+    # 6c. Inject mnemos context section into ~/.claude/CLAUDE.md
     #     Idempotent: skips if <!-- mnemos-start --> already present.
     # -------------------------------------------------------------------------
     if [ -f "$CLAUDE_MD_FILE" ] && grep -q '<!-- mnemos-start -->' "$CLAUDE_MD_FILE" 2>/dev/null; then
