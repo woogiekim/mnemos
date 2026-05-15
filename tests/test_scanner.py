@@ -171,7 +171,7 @@ class TestIngestAgentScannerResults:
     ) -> None:
         """run_scanner_results routes global scope to layer 'global'."""
         import frontmatter
-        from mnemos.core.gateway import MemoryGateway
+        from core.gateway import MemoryGateway
         from agents.ingest import IngestAgent
 
         global_md = tmp_path / "global_CLAUDE.md"
@@ -198,7 +198,7 @@ class TestIngestAgentScannerResults:
     ) -> None:
         """run_scanner_results routes project scope to layer 'project'."""
         import frontmatter
-        from mnemos.core.gateway import MemoryGateway
+        from core.gateway import MemoryGateway
         from agents.ingest import IngestAgent
 
         project_md = tmp_path / "project_CLAUDE.md"
@@ -219,7 +219,7 @@ class TestIngestAgentScannerResults:
 
     def test_skips_missing_file_silently(self, repo_root: Path) -> None:
         """run_scanner_results skips a non-existent path without raising."""
-        from mnemos.core.gateway import MemoryGateway
+        from core.gateway import MemoryGateway
         from agents.ingest import IngestAgent
 
         missing = Path("/nonexistent/path/CLAUDE.md")
@@ -234,7 +234,7 @@ class TestIngestAgentScannerResults:
     ) -> None:
         """source_file in extra_metadata must be an absolute path string."""
         import frontmatter
-        from mnemos.core.gateway import MemoryGateway
+        from core.gateway import MemoryGateway
         from agents.ingest import IngestAgent
 
         md_file = tmp_path / "CLAUDE.md"
@@ -268,7 +268,7 @@ def runner() -> CliRunner:
 class TestMemoryIngestClaudeMdCommand:
     def _make_cli(self, monkeypatch, repo_root: Path):
         monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
-        from mnemos.core.cli import cli
+        from core.cli import cli
         return cli
 
     def test_ingests_global_and_project_files(
