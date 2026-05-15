@@ -309,6 +309,8 @@ def run_update(
     home: Optional[Path] = None,
 ) -> int:
     """Run the full update sequence.  Returns exit code (0 = success)."""
+    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+
     if home is None:
         home = Path.home()
 
@@ -339,37 +341,23 @@ def run_update(
             print(f"warning: pipx reinstall failed — {exc}", file=sys.stderr)
             exit_code = 1
 
-    # -- 3. Replace managed blocks ------------------------------------------
+    # -- 3. Replace managed blocks via adapters (run ALL — not filtered by is_present) --
     print("\n── updating managed config blocks ───────────────────────────────")
 
-    settings_path = home / ".claude" / "settings.json"
-    changed, diff = update_settings_json(settings_path)
-    if changed:
-        print(f"\n[updated] {settings_path}")
-        if diff:
-            print(diff)
-    else:
-        print(f"[unchanged] {settings_path}")
-
-    claude_md_path = home / ".claude" / "CLAUDE.md"
-    changed, diff = update_claude_md(claude_md_path)
-    if changed:
-        print(f"\n[updated] {claude_md_path}")
-        if diff:
-            print(diff)
-    else:
-        print(f"[unchanged] {claude_md_path}")
-
-    cursor_dir = home / ".cursor"
-    changed, diff = update_cursor_rules(cursor_dir)
-    if changed:
-        rules_path = _find_cursor_rules(cursor_dir)
-        label = str(rules_path) if rules_path else str(cursor_dir / "rules")
-        print(f"\n[updated] {label}")
-        if diff:
-            print(diff)
-    else:
-        print(f"[unchanged] {cursor_dir / 'rules'}")
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    for adapter in adapter_list:
+        try:
+            messages = adapter.update(home)
+            for msg in messages:
+                if msg.startswith("[updated]"):
+                    print(f"\n{msg}")
+                else:
+                    print(msg)
+        except Exception as exc:
+            print(
+                f"warning: {adapter.name} adapter update failed — {exc}",
+                file=sys.stderr,
+            )
 
     print("\n── update complete ───────────────────────────────────────────────")
     return exit_code

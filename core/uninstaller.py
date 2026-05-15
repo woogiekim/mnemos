@@ -330,34 +330,21 @@ def run_uninstall(
 
     Returns exit code (0 = success, 1 = aborted or error).
     """
+    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+
     if home is None:
         home = Path.home()
 
-    settings_path = home / ".claude" / "settings.json"
-    claude_md_path = home / ".claude" / "CLAUDE.md"
-    cursor_dir = home / ".cursor"
     zshrc_path = home / ".zshrc"
 
-    # Collect diffs (dry-run pass — do NOT write yet)
-    plans: list[tuple[str, callable]] = [
-        (str(settings_path), lambda: remove_settings_json_hooks(settings_path)),
-        (str(claude_md_path), lambda: remove_claude_md_block(claude_md_path)),
-        (str(cursor_dir), lambda: remove_cursor_rules_block(cursor_dir)),
-        (str(zshrc_path), lambda: remove_zshrc_line(zshrc_path)),
-    ]
-
-    # Preview what would change
+    # Read-only diff preview (adapters + zshrc)
     print("── mnemos uninstall — preview ────────────────────────────────────")
-    pending: list[tuple[str, str]] = []
 
-    for label, fn in plans:
-        # We need to run the function to get the diff, but since these functions
-        # write to disk we use a read-only preview approach below.
-        pass
-
-    # Read-only diff preview
     diffs_preview = _collect_diffs_preview(
-        settings_path, claude_md_path, cursor_dir, zshrc_path
+        home / ".claude" / "settings.json",
+        home / ".claude" / "CLAUDE.md",
+        home / ".cursor",
+        zshrc_path,
     )
 
     any_change = False
@@ -384,20 +371,22 @@ def run_uninstall(
             print("Aborted.")
             return 1
 
-    # Apply changes
+    # Apply changes via adapters (run ALL — not filtered by is_present)
     print("\n── applying changes ──────────────────────────────────────────────")
 
-    changed_settings, _ = remove_settings_json_hooks(settings_path)
-    print(f"[{'removed' if changed_settings else 'unchanged'}] {settings_path}")
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    for adapter in adapter_list:
+        try:
+            messages = adapter.uninstall(home)
+            for msg in messages:
+                print(msg)
+        except Exception as exc:
+            print(
+                f"warning: {adapter.name} adapter uninstall failed — {exc}",
+                file=sys.stderr,
+            )
 
-    changed_claude_md, _ = remove_claude_md_block(claude_md_path)
-    print(f"[{'removed' if changed_claude_md else 'unchanged'}] {claude_md_path}")
-
-    rules_path = _find_cursor_rules(cursor_dir)
-    changed_cursor, _ = remove_cursor_rules_block(cursor_dir)
-    cursor_label = str(rules_path) if rules_path else str(cursor_dir / "rules")
-    print(f"[{'removed' if changed_cursor else 'unchanged'}] {cursor_label}")
-
+    # zshrc is shared (not owned by any adapter)
     changed_zshrc, _ = remove_zshrc_line(zshrc_path)
     print(f"[{'removed' if changed_zshrc else 'unchanged'}] {zshrc_path}")
 
