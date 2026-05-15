@@ -21,7 +21,7 @@ class FTSIndex:
         return conn
 
     def _init_db(self) -> None:
-        """Create FTS5 table and metadata table if they don't exist."""
+        """Create FTS5 table if it doesn't exist."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -29,14 +29,7 @@ class FTSIndex:
                 USING fts5(item_id UNINDEXED, content, metadata)
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS items_meta (
-                    item_id TEXT PRIMARY KEY,
-                    metadata TEXT
-                )
-                """
-            )
+            conn.execute("DROP TABLE IF EXISTS items_meta")
             conn.commit()
 
     def index_item(
@@ -50,15 +43,10 @@ class FTSIndex:
         with self._connect() as conn:
             # Delete existing entries for this item_id
             conn.execute("DELETE FROM items_fts WHERE item_id = ?", (item_id,))
-            conn.execute("DELETE FROM items_meta WHERE item_id = ?", (item_id,))
             # Insert new entry
             conn.execute(
                 "INSERT INTO items_fts (item_id, content, metadata) VALUES (?, ?, ?)",
                 (item_id, content, meta_str),
-            )
-            conn.execute(
-                "INSERT INTO items_meta (item_id, metadata) VALUES (?, ?)",
-                (item_id, meta_str),
             )
             conn.commit()
 
@@ -104,5 +92,4 @@ class FTSIndex:
         """Remove an item from the FTS5 index."""
         with self._connect() as conn:
             conn.execute("DELETE FROM items_fts WHERE item_id = ?", (item_id,))
-            conn.execute("DELETE FROM items_meta WHERE item_id = ?", (item_id,))
             conn.commit()
