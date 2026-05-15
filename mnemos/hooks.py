@@ -52,7 +52,7 @@ class HookDispatcher:
                 [str(script)],
                 env=env,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
         except OSError as exc:
             logger.warning("Hook script failed to start: %s — %s", script, exc)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 import click
 
@@ -229,6 +230,15 @@ def memory_forget(item_id: str, force: bool) -> None:
     except FileNotFoundError:
         click.echo(f"error: item '{item_id}' not found", err=True)
         sys.exit(1)
+
+
+@cli.command("install")
+@click.argument("path", default=".", type=click.Path())
+def install_cmd(path: str) -> None:
+    """Scaffold a mnemos wiki repo structure at PATH (default: current directory)."""
+    from mnemos.install import install
+    install(Path(path))
+    click.echo(f"mnemos installed at {path}")
 
 
 @cli.command("memory-log")
