@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -209,12 +210,111 @@ def remove_zshrc_line(zshrc_path: Path) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# pipx uninstall
+# pipx uninstall + fallback cleanup
 # ---------------------------------------------------------------------------
+
+def _default_pipx_bin_dir() -> Path:
+    """Return the default pipx binary directory (~/.local/bin)."""
+    return Path.home() / ".local" / "bin"
+
+
+def _default_pipx_venvs_dir() -> Path:
+    """Return the default pipx venvs directory (~/.local/pipx/venvs)."""
+    return Path.home() / ".local" / "pipx" / "venvs"
+
+
+def _read_pipx_metadata(venvs_dir: Optional[Path] = None) -> Optional[dict]:
+    """Read ~/.local/pipx/venvs/mnemos/pipx_metadata.json if it exists.
+
+    Returns the parsed JSON dict or None if not found / unreadable.
+    """
+    if venvs_dir is None:
+        venvs_dir = _default_pipx_venvs_dir()
+    metadata_path = venvs_dir / "mnemos" / "pipx_metadata.json"
+    if not metadata_path.exists():
+        return None
+    try:
+        return json.loads(metadata_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
 
 def pipx_uninstall() -> None:
     """Run pipx uninstall mnemos."""
     subprocess.run(["pipx", "uninstall", "mnemos"], check=True)
+
+
+def purge_mnemos_artifacts(
+    bin_dir: Optional[Path] = None,
+    venvs_dir: Optional[Path] = None,
+) -> dict[str, object]:
+    """Remove the mnemos binary and venv directory with fallback cleanup.
+
+    Steps:
+      1. Read pipx_metadata.json to find the actual install location.
+      2. Try ``pipx uninstall mnemos`` (existing behaviour).
+      3. Fallback: directly remove the binary file if still present.
+      4. Fallback: directly shutil.rmtree the venv directory if still present.
+      5. Verify with shutil.which("mnemos") that the binary is gone.
+
+    Returns a dict with keys:
+      ``pipx_ok``       — bool, True if pipx uninstall succeeded
+      ``binary_removed`` — Path or None, the binary that was removed by fallback
+      ``venv_removed``   — Path or None, the venv dir that was removed by fallback
+      ``metadata``       — dict or None, content of pipx_metadata.json (may be None)
+      ``still_present``  — bool, True if shutil.which still finds the binary after cleanup
+    """
+    if bin_dir is None:
+        bin_dir = _default_pipx_bin_dir()
+    if venvs_dir is None:
+        venvs_dir = _default_pipx_venvs_dir()
+
+    binary_path = bin_dir / "mnemos"
+    venv_path = venvs_dir / "mnemos"
+
+    # Step 1 — read metadata (informational; used for reporting)
+    metadata = _read_pipx_metadata(venvs_dir)
+
+    # Step 2 — try pipx uninstall
+    pipx_ok = False
+    try:
+        subprocess.run(
+            ["pipx", "uninstall", "mnemos"],
+            check=True,
+            capture_output=True,
+        )
+        pipx_ok = True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pipx_ok = False
+
+    # Step 3 — fallback: remove binary directly
+    binary_removed: Optional[Path] = None
+    if binary_path.exists():
+        try:
+            binary_path.unlink()
+            binary_removed = binary_path
+        except OSError:
+            pass
+
+    # Step 4 — fallback: remove venv directory directly
+    venv_removed: Optional[Path] = None
+    if venv_path.exists():
+        try:
+            shutil.rmtree(venv_path)
+            venv_removed = venv_path
+        except OSError:
+            pass
+
+    # Step 5 — verify
+    still_present = shutil.which("mnemos") is not None
+
+    return {
+        "pipx_ok": pipx_ok,
+        "binary_removed": binary_removed,
+        "venv_removed": venv_removed,
+        "metadata": metadata,
+        "still_present": still_present,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -301,15 +401,41 @@ def run_uninstall(
     changed_zshrc, _ = remove_zshrc_line(zshrc_path)
     print(f"[{'removed' if changed_zshrc else 'unchanged'}] {zshrc_path}")
 
-    # Optional pipx uninstall
+    # Optional pipx uninstall + fallback artifact removal
     if purge:
-        print("\n── pipx uninstall mnemos ─────────────────────────────────────")
-        try:
-            pipx_uninstall()
-        except subprocess.CalledProcessError as exc:
-            print(f"warning: pipx uninstall failed — {exc}", file=sys.stderr)
+        print("\n── purge: removing mnemos binary and venv ────────────────────")
+        result = purge_mnemos_artifacts()
+
+        # Report metadata location (informational)
+        if result["metadata"] is not None:
+            print("[info] read pipx_metadata.json — found install metadata")
+        else:
+            print("[info] pipx_metadata.json not found (package may already be removed)")
+
+        # Report pipx outcome
+        if result["pipx_ok"]:
+            print("[removed] pipx uninstall mnemos succeeded")
+        else:
+            print("[warning] pipx uninstall did not succeed — applying fallback cleanup",
+                  file=sys.stderr)
+
+        # Report fallback removals
+        if result["binary_removed"] is not None:
+            print(f"[removed] binary: {result['binary_removed']}")
+        if result["venv_removed"] is not None:
+            print(f"[removed] venv:   {result['venv_removed']}")
+
+        # Final verification
+        if result["still_present"]:
+            print(
+                "warning: mnemos binary still found in PATH after purge — "
+                "manual cleanup may be required",
+                file=sys.stderr,
+            )
             print("\n── uninstall complete (with warnings) ────────────────────────")
             return 1
+        else:
+            print("[verified] mnemos binary is no longer in PATH")
 
     print("\n── uninstall complete ────────────────────────────────────────────")
     return 0
