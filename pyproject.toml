@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnemos"
+version = "0.1.0"
+description = "LLM Wiki Memory OS — Global Memory Operating System"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "python-frontmatter>=1.0",
+]
+
+[project.optional-dependencies]
+vector = ["qdrant-client>=1.7", "chromadb>=0.4"]
+search = ["opensearch-py>=2.4"]
+
+[project.scripts]
+mnemos = "mnemos.cli:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mnemos*"]
