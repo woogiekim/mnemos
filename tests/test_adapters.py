@@ -573,3 +573,14 @@ class TestMnemosBehaviorBlockParity:
         assert "Stable project decisions" in content
         assert "Do NOT capture" in content
         assert "mnemos promotion rules" in content
+
+    def test_behavior_block_contains_capture_interaction_pattern_section(self):
+        """MNEMOS_BEHAVIOR_BLOCK must include the capture interaction pattern section."""
+        assert "### Capture interaction pattern" in MNEMOS_BEHAVIOR_BLOCK
+        assert "do NOT ask permission" in MNEMOS_BEHAVIOR_BLOCK
+        assert "Should I capture this?" in MNEMOS_BEHAVIOR_BLOCK
+
+    def test_behavior_block_capture_pattern_has_notify_and_delete_guidance(self):
+        """Capture interaction pattern must specify notify format and delete-on-request."""
+        assert "(ID: xxxx)" in MNEMOS_BEHAVIOR_BLOCK
+        assert "mnemos delete" in MNEMOS_BEHAVIOR_BLOCK
