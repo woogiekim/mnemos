@@ -536,10 +536,14 @@ class TestMnemosBehaviorBlockParity:
             assert "mnemos search" in block, f"{label} missing search instruction"
 
     def test_both_blocks_contain_promotion_rules(self):
-        """Both adapter blocks must include layer promotion explanation."""
+        """Both adapter blocks must include layer promotion/selection explanation."""
         for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
-            assert "session layer" in block, f"{label} missing session layer reference"
-            assert "mnemos promotion rules" in block, f"{label} missing promotion rules reference"
+            # Must reference all three user-facing layers
+            assert "session" in block, f"{label} missing session layer reference"
+            assert "project" in block, f"{label} missing project layer reference"
+            assert "global" in block, f"{label} missing global layer reference"
+            # Must include layer selection guidance
+            assert "layer" in block.lower(), f"{label} missing layer selection guidance"
 
     def test_adapter_delimiters_are_preserved(self):
         """Adapter-specific HTML comment delimiters must be preserved."""
@@ -557,7 +561,9 @@ class TestMnemosBehaviorBlockParity:
         assert "mnemos capture" in content
         assert "Stable project decisions" in content
         assert "Do NOT capture" in content
-        assert "mnemos promotion rules" in content
+        # Layer selection criteria must be present (replaced old "mnemos promotion rules" text)
+        assert "project" in content
+        assert "global" in content
 
     def test_behavior_block_contains_capture_interaction_pattern_section(self):
         """MNEMOS_BEHAVIOR_BLOCK must include the capture interaction pattern section."""
@@ -614,13 +620,14 @@ class TestClaudeCodeAdapterEventBus:
         })
 
         out = capsys.readouterr().out
-        assert "promoted:" in out
-        assert "Architecture decision" in out
-        assert "session" in out
+        # New format: ✻ 🧠 promoted <item_id> → <to_layer>
+        assert "promoted" in out
+        assert "abc-123" in out
         assert "project" in out
+        assert "→" in out
 
     def test_on_post_promote_format_matches_spec(self, capsys, monkeypatch):
-        """Output format must be: ✻ 🧠 promoted: <content_preview> (<from_layer> → <to_layer>)"""
+        """Output format must be: ✻ 🧠 promoted <item_id> → <to_layer>"""
         monkeypatch.setenv("NO_COLOR", "1")
         from core.events import EventBus, POST_PROMOTE
         bus = EventBus()
@@ -635,7 +642,7 @@ class TestClaudeCodeAdapterEventBus:
         })
 
         out = capsys.readouterr().out.strip()
-        assert out == "✻ 🧠 promoted: Use SQLite for FTS (working → session)"
+        assert out == "✻ 🧠 promoted id-001 → session"
 
     def test_on_post_capture_prints_for_persistent_layers(self, capsys, monkeypatch):
         """post-capture handler must print notice for session/project/global layers."""

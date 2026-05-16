@@ -185,17 +185,29 @@ def memory_update(item_id: str, content: str) -> None:
 @click.option("--target-layer", default=None, help="Target layer (default: next layer).")
 @click.option("--run-id", default=None, help="Run ID.")
 @click.option("--session-id", default=None, help="Session ID.")
+@click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress promotion notification output.")
+@click.option("--no-color", "no_color", is_flag=True, default=False, help="Disable ANSI color output.")
 def memory_promote(
     item_id: str,
     target_layer: str | None,
     run_id: str | None,
     session_id: str | None,
+    quiet: bool,
+    no_color: bool,
 ) -> None:
     """Promote a memory item to the next (or specified) layer."""
     from core.adapters.claude import ClaudeCodeAdapter
+    from core.output import promote_notice
     gw = _get_gateway()
-    ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
+    if not quiet:
+        ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
     try:
+        # Read the item before promoting to know the target layer
+        item = gw._store.read(item_id)
+        current_layer = item.get("layer", "")
+        effective_target = target_layer
+        if effective_target is None:
+            effective_target = gw._policy.get_next_layer(current_layer)
         new_id = gw.promote(
             item_id=item_id,
             target_layer=target_layer,
@@ -203,6 +215,8 @@ def memory_promote(
             session_id=session_id,
         )
         click.echo(f"promoted: {new_id}")
+        if not quiet:
+            click.echo(promote_notice(item_id=new_id, target_layer=effective_target or "?", no_color=no_color))
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)
