@@ -25,12 +25,31 @@ CLAUDE_MD_BLOCK = (
 )
 
 # Hook definitions that install.sh injects.
-_POST_TOOL_USE_HOOK_TEMPLATE = {
+#
+# Two PostToolUse entries are registered:
+#   1. ingest-claude-md — fires on Write|Edit to keep CLAUDE.md memories current.
+#   2. bg-check — fires on all tool calls (empty matcher) for background GC,
+#      auto-promotion, and duplicate detection.  The bg-check command has its
+#      own throttle (default: once per 5 minutes) so the hook itself is cheap.
+_POST_TOOL_USE_INGEST_HOOK_TEMPLATE = {
     "matcher": "Write|Edit",
     "hooks": [
         {
             "type": "command",
             "command": "MNEMOS_REPO_ROOT=\"{repo_root}\" mnemos ingest-claude-md",
+        }
+    ],
+}
+
+_POST_TOOL_USE_BG_HOOK_TEMPLATE = {
+    "matcher": "",
+    "hooks": [
+        {
+            "type": "command",
+            "command": (
+                'MNEMOS_REPO_ROOT="{repo_root}" '
+                'bash "{bg_hook_script}" 2>/dev/null || true'
+            ),
         }
     ],
 }
@@ -63,6 +82,8 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
             or "mnemos capture" in cmd
             or "mnemos extract-insight" in cmd  # legacy — removed in Issue #4
             or "UserPromptSubmit.sh" in cmd  # active hook script (post-refactor)
+            or "PostToolUse.sh" in cmd  # background ops hook (background ops)
+            or "mnemos bg-check" in cmd  # direct bg-check invocation
         ):
             return True
     return False
@@ -83,12 +104,19 @@ def _hook_script_path(repo_root: str) -> str:
     return str(Path(repo_root) / "hooks" / "UserPromptSubmit.sh")
 
 
+def _bg_hook_script_path(repo_root: str) -> str:
+    """Return the absolute path to the PostToolUse background-ops hook script."""
+    return str(Path(repo_root) / "hooks" / "PostToolUse.sh")
+
+
 def _render_template(template: dict, repo_root: str) -> dict:
-    """Instantiate a hook template by substituting {repo_root} and {hook_script}."""
+    """Instantiate a hook template by substituting {repo_root}, {hook_script}, {bg_hook_script}."""
     hook_script = _hook_script_path(repo_root)
+    bg_hook_script = _bg_hook_script_path(repo_root)
     raw = json.dumps(template)
     raw = raw.replace("{repo_root}", repo_root)
     raw = raw.replace("{hook_script}", hook_script)
+    raw = raw.replace("{bg_hook_script}", bg_hook_script)
     return json.loads(raw)
 
 
@@ -168,17 +196,27 @@ class ClaudeCodeAdapter(HostAdapter):
         hooks = data.setdefault("hooks", {})
         changed = False
 
-        for hook_type, template in [
-            ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
-            ("UserPromptSubmit", _USER_PROMPT_SUBMIT_HOOK_TEMPLATE),
-        ]:
-            hook_list = hooks.get(hook_type, [])
-            non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
-            canonical = _render_template(template, repo_root)
-            new_list = non_mnemos + [canonical]
-            if new_list != hook_list:
-                changed = True
-            hooks[hook_type] = new_list
+        # PostToolUse: two canonical entries (ingest + bg-check)
+        post_tool_templates = [
+            _POST_TOOL_USE_INGEST_HOOK_TEMPLATE,
+            _POST_TOOL_USE_BG_HOOK_TEMPLATE,
+        ]
+        hook_list = hooks.get("PostToolUse", [])
+        non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
+        canonical_entries = [_render_template(t, repo_root) for t in post_tool_templates]
+        new_list = non_mnemos + canonical_entries
+        if new_list != hook_list:
+            changed = True
+        hooks["PostToolUse"] = new_list
+
+        # UserPromptSubmit: single canonical entry
+        hook_list = hooks.get("UserPromptSubmit", [])
+        non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
+        canonical = _render_template(_USER_PROMPT_SUBMIT_HOOK_TEMPLATE, repo_root)
+        new_list = non_mnemos + [canonical]
+        if new_list != hook_list:
+            changed = True
+        hooks["UserPromptSubmit"] = new_list
 
         if changed:
             new_text = json.dumps(data, indent=2) + "\n"
@@ -274,18 +312,26 @@ class ClaudeCodeAdapter(HostAdapter):
             if repo_root:
                 break
 
-        # Remove all existing mnemos hook entries and replace with canonical ones.
-        for hook_type, template in [
-            ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
-            ("UserPromptSubmit", _USER_PROMPT_SUBMIT_HOOK_TEMPLATE),
-        ]:
-            hook_list = hooks.get(hook_type, [])
-            non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
-            canonical = _render_template(template, repo_root)
-            new_list = non_mnemos + [canonical]
-            if new_list != hook_list:
-                changed = True
-            hooks[hook_type] = new_list
+        # PostToolUse: two canonical entries (ingest + bg-check)
+        post_tool_list = hooks.get("PostToolUse", [])
+        non_mnemos_pt = [e for e in post_tool_list if not _is_mnemos_hook_entry(e)]
+        canonical_pt = [
+            _render_template(_POST_TOOL_USE_INGEST_HOOK_TEMPLATE, repo_root),
+            _render_template(_POST_TOOL_USE_BG_HOOK_TEMPLATE, repo_root),
+        ]
+        new_pt = non_mnemos_pt + canonical_pt
+        if new_pt != post_tool_list:
+            changed = True
+        hooks["PostToolUse"] = new_pt
+
+        # UserPromptSubmit: single canonical entry
+        ups_list = hooks.get("UserPromptSubmit", [])
+        non_mnemos_ups = [e for e in ups_list if not _is_mnemos_hook_entry(e)]
+        canonical_ups = _render_template(_USER_PROMPT_SUBMIT_HOOK_TEMPLATE, repo_root)
+        new_ups = non_mnemos_ups + [canonical_ups]
+        if new_ups != ups_list:
+            changed = True
+        hooks["UserPromptSubmit"] = new_ups
 
         # Remove any previously-installed Stop hook (Stop fires after every AI
         # response turn, not at session end — it floods the session layer).
@@ -339,6 +385,7 @@ class ClaudeCodeAdapter(HostAdapter):
 
         Checks:
         - PostToolUse hook (mnemos ingest-claude-md) in settings.json
+        - PostToolUse hook (PostToolUse.sh / mnemos bg-check) in settings.json
         - UserPromptSubmit hook (UserPromptSubmit.sh) in settings.json
         - Managed block (<!-- mnemos-start --> ... <!-- mnemos-end -->) in CLAUDE.md
 
@@ -355,7 +402,14 @@ class ClaudeCodeAdapter(HostAdapter):
 
                 post_list = hooks.get("PostToolUse", [])
                 if not any(_is_mnemos_hook_entry(e) and "ingest-claude-md" in str(e) for e in post_list):
-                    missing.append("PostToolUse hook (settings.json)")
+                    missing.append("PostToolUse ingest-claude-md hook (settings.json)")
+
+                if not any(
+                    _is_mnemos_hook_entry(e)
+                    and ("PostToolUse.sh" in str(e) or "bg-check" in str(e))
+                    for e in post_list
+                ):
+                    missing.append("PostToolUse bg-check hook (settings.json)")
 
                 user_list = hooks.get("UserPromptSubmit", [])
                 if not any(_is_mnemos_hook_entry(e) for e in user_list):

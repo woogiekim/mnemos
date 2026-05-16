@@ -557,6 +557,105 @@ def memory_gc(
             )
 
 
+@cli.command("bg-check")
+@click.option(
+    "--interval",
+    "interval_minutes",
+    default=None,
+    type=int,
+    help="Throttle interval in minutes (default: 5). Pass 0 to force a run.",
+)
+@click.option(
+    "--no-gc",
+    "gc_disabled",
+    is_flag=True,
+    default=False,
+    help="Skip garbage-collection phase.",
+)
+@click.option(
+    "--no-promote",
+    "promote_disabled",
+    is_flag=True,
+    default=False,
+    help="Skip auto-promotion phase.",
+)
+@click.option(
+    "--no-dedup",
+    "dedup_disabled",
+    is_flag=True,
+    default=False,
+    help="Skip duplicate-detection phase.",
+)
+@click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help="Bypass throttle and always run (useful for testing).",
+)
+@click.option(
+    "--verbose",
+    "verbose",
+    is_flag=True,
+    default=False,
+    help="Print a summary even when there is no activity.",
+)
+def bg_check_cmd(
+    interval_minutes: int | None,
+    gc_disabled: bool,
+    promote_disabled: bool,
+    dedup_disabled: bool,
+    force: bool,
+    verbose: bool,
+) -> None:
+    """Run autonomous background maintenance (GC + auto-promote + dedup).
+
+    \b
+    This command is intended to be called by the PostToolUse hook after every
+    Claude tool call.  It is throttled (runs at most once per --interval
+    minutes) and silent unless it actually does something.
+
+    When activity occurs, a <mnemos-context type="background-activity"> block
+    is emitted to stdout so Claude sees a brief summary injected into context.
+
+    \b
+    Examples:
+      mnemos bg-check                   # throttled, silent unless active
+      mnemos bg-check --force --verbose # always run, always print summary
+      mnemos bg-check --no-gc           # skip GC phase
+    """
+    from core.bg import (
+        run_background_check,
+        DEFAULT_INTERVAL_MINUTES,
+    )
+
+    gw = _get_gateway()
+    repo_root = str(gw._root)
+
+    effective_interval = DEFAULT_INTERVAL_MINUTES if interval_minutes is None else interval_minutes
+
+    result = run_background_check(
+        repo_root=repo_root,
+        interval_minutes=effective_interval,
+        gc_enabled=not gc_disabled,
+        auto_promote_enabled=not promote_disabled,
+        dedup_enabled=not dedup_disabled,
+        force=force or (interval_minutes == 0),
+    )
+
+    if not result.ran:
+        # Throttled — completely silent (no output)
+        return
+
+    if result.has_activity:
+        click.echo(result.to_context_block())
+    elif verbose:
+        click.echo(
+            f"[mnemos bg] check complete — nothing to do "
+            f"({result.elapsed_ms:.0f} ms)"
+        )
+
+
 @cli.command("ingest-claude-md")
 @click.option(
     "--project-root",
