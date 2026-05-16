@@ -137,6 +137,27 @@ class CursorAdapter(HostAdapter):
         return True, diff
 
     # ------------------------------------------------------------------
+    # verify_hooks
+    # ------------------------------------------------------------------
+
+    def verify_hooks(self, home: Path) -> tuple[bool, list[str]]:
+        """Check that the cursor rules managed block is present.
+
+        Returns:
+            (True, []) when the block is present; (False, [missing...]) otherwise.
+        """
+        missing: list[str] = []
+        cursor_dir = home / ".cursor"
+        rules_path = _find_cursor_rules(cursor_dir)
+
+        if rules_path is not None:
+            content = rules_path.read_text()
+            if "<!-- mnemos:start -->" not in content or "<!-- mnemos:end -->" not in content:
+                missing.append(f"cursor rules managed block ({rules_path.name})")
+
+        return (len(missing) == 0, missing)
+
+    # ------------------------------------------------------------------
     # uninstall
     # ------------------------------------------------------------------
 
