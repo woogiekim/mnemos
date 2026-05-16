@@ -431,8 +431,10 @@ echo "  - surprising findings, root causes discovered, constraints identified"
 echo "  - anything a future session would benefit from knowing"
 echo "Do NOT capture: trivial yes/no answers, simple file lookups, or steps already"
 echo "visible in the code or git history."
-echo "Only after \`mnemos capture\` returns a captured ID, notify inline: ✻ 🧠 <brief description> (session)"
-echo "NEVER emit ✻ 🧠 without a preceding successful mnemos capture tool call."
+echo "After \`mnemos capture\` returns \`captured: <uuid>\`, notify inline in this EXACT format:"
+echo "  ✻ 🧠 <brief description> (session) [id: <uuid>]"
+echo "The [id: <uuid>] suffix is MANDATORY and must be the real uuid printed by the tool call."
+echo "Without a real id from a tool call, the notification format is invalid — never fabricate or omit the id."
 echo "</mnemos-capture-protocol>"
 
 exit 0
