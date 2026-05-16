@@ -413,7 +413,7 @@ class TestCaptureANSIOutput:
             color=True,
         )
         assert result.exit_code == 0, result.output
-        assert "\033[34m" in result.output  # blue
+        assert "\033[94m" in result.output  # bright blue
 
     def test_capture_notice_session_layer_uses_gray(self, runner, cli_with_repo):
         """session layer notice must use gray ANSI color code."""
@@ -428,8 +428,8 @@ class TestCaptureANSIOutput:
         assert result.exit_code == 0, result.output
         assert "\033[90m" in result.output  # gray
 
-    def test_capture_notice_global_layer_uses_white(self, runner, cli_with_repo):
-        """global layer notice must use white ANSI color code."""
+    def test_capture_notice_global_layer_uses_yellow(self, runner, cli_with_repo):
+        """global layer notice must use yellow/gold ANSI color code."""
         import os
         env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
         result = runner.invoke(
@@ -439,7 +439,7 @@ class TestCaptureANSIOutput:
             color=True,
         )
         assert result.exit_code == 0, result.output
-        assert "\033[37m" in result.output  # white
+        assert "\033[33m" in result.output  # yellow/gold
 
     def test_capture_notice_includes_dim_and_italic(self, runner, cli_with_repo):
         """capture notice must include DIM and ITALIC ANSI codes."""
@@ -455,3 +455,13 @@ class TestCaptureANSIOutput:
         assert "\033[2m" in result.output  # dim
         assert "\033[3m" in result.output  # italic
         assert "\033[0m" in result.output  # reset
+
+    def test_capture_notice_has_prefix_symbol(self, runner, cli_with_repo):
+        """capture notice must include ✻ prefix symbol."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Prefix symbol test", "--no-color"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "✻" in result.output
+        assert "🧠" in result.output
