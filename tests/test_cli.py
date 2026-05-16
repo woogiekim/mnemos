@@ -110,37 +110,37 @@ class TestMemoryCaptureCommand:
         content = "Short insight"
         result = runner.invoke(
             cli_with_repo,
-            ["capture", "--layer", "global", "--content", content],
+            ["capture", "--layer", "global", "--content", content, "--no-color"],
         )
         assert result.exit_code == 0, result.output
-        assert "[mnemos] Captured:" in result.output
-        assert f'"{content}"' in result.output
+        assert "🧠" in result.output
+        assert content in result.output
         assert "..." not in result.output
-        assert "→ global layer" in result.output
+        assert "(global)" in result.output
 
     def test_memory_capture_notification_long_content(self, runner, cli_with_repo):
         """capture notification must truncate content > 60 chars with '...'."""
         content = "A" * 80  # 80 chars, more than 60
         result = runner.invoke(
             cli_with_repo,
-            ["capture", "--layer", "global", "--content", content],
+            ["capture", "--layer", "global", "--content", content, "--no-color"],
         )
         assert result.exit_code == 0, result.output
-        assert "[mnemos] Captured:" in result.output
+        assert "🧠" in result.output
         preview = content[:60]
-        assert f'"{preview}..."' in result.output
-        assert "→ global layer" in result.output
+        assert f"{preview}..." in result.output
+        assert "(global)" in result.output
 
     def test_memory_capture_notification_exactly_60_chars(self, runner, cli_with_repo):
         """capture notification must not add '...' when content is exactly 60 chars."""
         content = "B" * 60  # exactly 60 chars
         result = runner.invoke(
             cli_with_repo,
-            ["capture", "--layer", "global", "--content", content],
+            ["capture", "--layer", "global", "--content", content, "--no-color"],
         )
         assert result.exit_code == 0, result.output
-        assert "[mnemos] Captured:" in result.output
-        assert f'"{content}"' in result.output
+        assert "🧠" in result.output
+        assert content in result.output
         assert "..." not in result.output
 
 
@@ -326,11 +326,11 @@ class TestCaptureEphemeralDefault:
         """capture without --layer must write to .agent/runs/.../scratch/ and report ephemeral."""
         result = runner.invoke(
             cli_with_repo,
-            ["capture", "--content", "Ephemeral CLI default test"],
+            ["capture", "--content", "Ephemeral CLI default test", "--no-color"],
         )
         assert result.exit_code == 0, result.output
         assert "captured" in result.output.lower()
-        assert "→ ephemeral layer" in result.output
+        assert "(ephemeral)" in result.output
 
         # File must exist somewhere under .agent/runs/{run_id}/scratch/
         agent_runs = repo_root / ".agent" / "runs"
@@ -341,10 +341,10 @@ class TestCaptureEphemeralDefault:
         """capture with --layer global must still write to wiki/global/."""
         result = runner.invoke(
             cli_with_repo,
-            ["capture", "--layer", "global", "--content", "Explicit global layer"],
+            ["capture", "--layer", "global", "--content", "Explicit global layer", "--no-color"],
         )
         assert result.exit_code == 0, result.output
-        assert "→ global layer" in result.output
+        assert "(global)" in result.output
         matches = list((repo_root / "wiki" / "global").glob("*.md"))
         assert len(matches) >= 1
 
@@ -355,3 +355,103 @@ class TestCaptureEphemeralDefault:
             ["capture", "--content", "No layer flag provided"],
         )
         assert result.exit_code == 0, result.output
+
+
+class TestCaptureANSIOutput:
+    """Tests for colored italic ANSI output in capture command (issue #15)."""
+
+    def test_capture_notice_contains_ansi_by_default(self, runner, cli_with_repo):
+        """capture notice must include ANSI escape codes when --no-color is not set."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "ANSI styled output test"],
+            env=env,
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "🧠" in result.output
+        assert "\033[" in result.output
+
+    def test_capture_notice_no_color_flag_strips_ansi(self, runner, cli_with_repo):
+        """--no-color flag must produce plain text output without ANSI codes."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Plain text output test", "--no-color"],
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "🧠" in result.output
+        assert "\033[" not in result.output
+        assert "(global)" in result.output
+
+    def test_capture_notice_no_color_env_strips_ansi(self, runner, cli_with_repo):
+        """NO_COLOR env var must produce plain text output without ANSI codes."""
+        import os
+        env = dict(os.environ)
+        env["NO_COLOR"] = "1"
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "NO_COLOR env test"],
+            env=env,
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "🧠" in result.output
+        assert "\033[" not in result.output
+        assert "(global)" in result.output
+
+    def test_capture_notice_project_layer_uses_blue(self, runner, cli_with_repo):
+        """project layer notice must use blue ANSI color code."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "project", "--content", "Project layer color test"],
+            env=env,
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "\033[34m" in result.output  # blue
+
+    def test_capture_notice_session_layer_uses_gray(self, runner, cli_with_repo):
+        """session layer notice must use gray ANSI color code."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "session", "--content", "Session layer color test"],
+            env=env,
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "\033[90m" in result.output  # gray
+
+    def test_capture_notice_global_layer_uses_white(self, runner, cli_with_repo):
+        """global layer notice must use white ANSI color code."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Global layer color test"],
+            env=env,
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "\033[37m" in result.output  # white
+
+    def test_capture_notice_includes_dim_and_italic(self, runner, cli_with_repo):
+        """capture notice must include DIM and ITALIC ANSI codes."""
+        import os
+        env = {k: v for k, v in os.environ.items() if k != "NO_COLOR"}
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "session", "--content", "Dim italic style test"],
+            env=env,
+            color=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert "\033[2m" in result.output  # dim
+        assert "\033[3m" in result.output  # italic
+        assert "\033[0m" in result.output  # reset
