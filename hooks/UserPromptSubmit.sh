@@ -14,6 +14,8 @@
 #   2. /compact shortcut: emit a reminder to capture session insights before compacting.
 #   3. Per-prompt active search: extract key terms from the prompt and run
 #      `mnemos search` to surface relevant memories (top 5 results).
+#   4. Observability: log every hook invocation, search call, and session-start
+#      event to wiki/observability.jsonl (async background write, zero latency impact).
 #
 # Environment variables:
 #   MNEMOS_REPO_ROOT   — path to the mnemos repository (required)
@@ -52,6 +54,66 @@ fi
 if ! command -v mnemos >/dev/null 2>&1; then
   exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# Observability helper — async background write to observability.jsonl
+# Use python3 inline so the write never blocks the hook response.
+# ---------------------------------------------------------------------------
+_obs_append() {
+  # $1 = JSON object string (already valid JSON, caller's responsibility)
+  local json_line="$1"
+  local obs_path="${REPO_ROOT}/wiki/observability.jsonl"
+  python3 - "${obs_path}" "${json_line}" <<'PYEOF' &
+import json, os, sys, datetime
+obs_path, json_line = sys.argv[1], sys.argv[2]
+try:
+    os.makedirs(os.path.dirname(obs_path), exist_ok=True)
+    with open(obs_path, "a", encoding="utf-8") as f:
+        f.write(json_line + "\n")
+except Exception:
+    pass
+PYEOF
+}
+
+_obs_event() {
+  # Build and append an observability JSON line.
+  # Args: event session_id [extra_json_pairs...]
+  # extra_json_pairs: key=value pairs appended as JSON fields (string values only).
+  local event="$1"
+  local session="$2"
+  shift 2
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # Build extra fields from remaining key=value args via python3
+  local extras_json="{}"
+  if [ $# -gt 0 ]; then
+    extras_json="$(python3 -c "
+import json, sys
+pairs = sys.argv[1:]
+d = {}
+for p in pairs:
+    if '=' in p:
+        k, _, v = p.partition('=')
+        try:
+            d[k] = json.loads(v)
+        except Exception:
+            d[k] = v
+print(json.dumps(d))
+" "$@" 2>/dev/null || echo '{}')"
+  fi
+
+  local entry
+  entry="$(python3 -c "
+import json, sys
+base = {'ts': sys.argv[1], 'event': sys.argv[2], 'agent': 'claude', 'session_id': sys.argv[3]}
+extra = json.loads(sys.argv[4])
+base.update(extra)
+print(json.dumps(base, ensure_ascii=False))
+" "${ts}" "${event}" "${session}" "${extras_json}" 2>/dev/null || true)"
+
+  [ -n "${entry}" ] && _obs_append "${entry}"
+}
 
 # ---------------------------------------------------------------------------
 # Read JSON input from stdin
@@ -96,6 +158,8 @@ mkdir -p "${SESSION_FLAG_DIR}" 2>/dev/null || true
 SESSION_KEY="$(echo "${SESSION_ID}" | tr -cd 'a-zA-Z0-9_-' | cut -c1-64)"
 SESSION_FLAG="${SESSION_FLAG_DIR}/mnemos-session-loaded-${SESSION_KEY}"
 
+SESSION_MEMORY_COUNT=0
+
 if [ -n "${SESSION_KEY}" ] && [ ! -f "${SESSION_FLAG}" ]; then
   # Mark session as loaded immediately to prevent duplicate loads
   touch "${SESSION_FLAG}" 2>/dev/null || true
@@ -108,11 +172,70 @@ if [ -n "${SESSION_KEY}" ] && [ ! -f "${SESSION_FLAG}" ]; then
   )"
 
   if [ -n "${STANDING_CONTEXT}" ]; then
+    # Count loaded memories (lines that start with whitespace then [layer])
+    SESSION_MEMORY_COUNT="$(echo "${STANDING_CONTEXT}" | grep -c '^\s*\[' 2>/dev/null || echo 0)"
+
     echo "<mnemos-context type=\"session-start\" layers=\"project,global\">"
     echo "${STANDING_CONTEXT}"
     echo "</mnemos-context>"
     echo ""
   fi
+
+  # Brief stats summary at session-start (3-4 lines max)
+  STATS_SUMMARY="$(
+    python3 -c "
+import json, os, datetime, collections
+obs_path = os.path.join(os.environ.get('MNEMOS_REPO_ROOT', ''), 'wiki', 'observability.jsonl')
+try:
+    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    captures = collections.defaultdict(int)
+    hook_calls = 0
+    last_gc_ts = None
+    last_gc_count = 0
+    with open(obs_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            ts = e.get('ts', '')
+            ev = e.get('event', '')
+            if ts >= cutoff:
+                if ev == 'capture':
+                    captures[e.get('layer', 'unknown')] += 1
+                if ev in ('hook_search', 'hook_session_start'):
+                    hook_calls += 1
+            if ev == 'gc' and (last_gc_ts is None or ts > last_gc_ts):
+                last_gc_ts = ts
+                last_gc_count = e.get('archived_count', 0)
+    total_cap = sum(captures.values())
+    proj = captures.get('project', 0)
+    gl = captures.get('global', 0)
+    parts = [f'captures this week: {total_cap} (project={proj}, global={gl})',
+             f'hook calls this week: {hook_calls}']
+    if last_gc_ts:
+        parts.append(f'last GC: {last_gc_ts[:10]} (archived {last_gc_count})')
+    print(' | '.join(parts))
+except FileNotFoundError:
+    pass
+except Exception:
+    pass
+" 2>/dev/null || true
+  )"
+
+  if [ -n "${STATS_SUMMARY}" ]; then
+    echo "<mnemos-context type=\"stats\">"
+    echo "${STATS_SUMMARY}"
+    echo "</mnemos-context>"
+    echo ""
+  fi
+
+  # Observability: log session-start event (async)
+  _obs_event "hook_session_start" "${SESSION_ID}" \
+    "memory_count=${SESSION_MEMORY_COUNT}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -177,10 +300,19 @@ print('\n'.join(keywords[:5]))
 SEEN_KEYS_FILE="$(mktemp)" || SEEN_KEYS_FILE=""
 MERGED_LINES=""
 FIRST_KEYWORD=""
+ALL_KEYWORDS_LIST=""
+SEARCH_RESULT_IDS=""
 
 while IFS= read -r KW; do
   [ -z "${KW}" ] && continue
   [ -z "${FIRST_KEYWORD}" ] && FIRST_KEYWORD="${KW}"
+
+  # Track all keywords used (for observability log)
+  if [ -z "${ALL_KEYWORDS_LIST}" ]; then
+    ALL_KEYWORDS_LIST="${KW}"
+  else
+    ALL_KEYWORDS_LIST="${ALL_KEYWORDS_LIST},${KW}"
+  fi
 
   KW_RESULTS="$(
     _timeout "${TIMEOUT}" \
@@ -204,6 +336,16 @@ while IFS= read -r KW; do
     fi
     [ -n "${SEEN_KEYS_FILE}" ] && printf '%s\n' "${KEY}" >> "${SEEN_KEYS_FILE}"
 
+    # Track result IDs for observability (first token before the colon)
+    RESULT_ID="${KEY%%:*}"
+    if [ -n "${RESULT_ID}" ]; then
+      if [ -z "${SEARCH_RESULT_IDS}" ]; then
+        SEARCH_RESULT_IDS="${RESULT_ID}"
+      else
+        SEARCH_RESULT_IDS="${SEARCH_RESULT_IDS},${RESULT_ID}"
+      fi
+    fi
+
     if [ -z "${MERGED_LINES}" ]; then
       MERGED_LINES="${LINE}"
     else
@@ -224,6 +366,45 @@ if [ -n "${MERGED_LINES}" ]; then
   echo "<mnemos-context type=\"search\" query=\"${FIRST_KEYWORD:0:60}\">"
   echo "${MERGED_LINES}"
   echo "</mnemos-context>"
+fi
+
+# ---------------------------------------------------------------------------
+# Observability: log the search event (async, fires even if no results)
+# ---------------------------------------------------------------------------
+if [ -n "${ALL_KEYWORDS_LIST}" ]; then
+  RESULT_COUNT="$(echo "${MERGED_LINES}" | grep -c . 2>/dev/null || echo 0)"
+  [ -z "${MERGED_LINES}" ] && RESULT_COUNT=0
+
+  # Build a compact JSON result list from the collected IDs
+  RESULTS_JSON="$(python3 -c "
+import json, sys
+ids_str = sys.argv[1]
+ids = [i.strip() for i in ids_str.split(',') if i.strip()] if ids_str else []
+print(json.dumps([{'id': i, 'score': 0.0} for i in ids]))
+" "${SEARCH_RESULT_IDS:-}" 2>/dev/null || echo '[]')"
+
+  KW_JSON="$(python3 -c "
+import json, sys
+kws = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
+print(json.dumps(kws))
+" "${ALL_KEYWORDS_LIST}" 2>/dev/null || echo '[]')"
+
+  OBS_ENTRY="$(python3 -c "
+import json, sys, datetime
+ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+entry = {
+    'ts': ts,
+    'event': 'hook_search',
+    'agent': 'claude',
+    'session_id': sys.argv[1],
+    'keywords': json.loads(sys.argv[2]),
+    'results': json.loads(sys.argv[3]),
+    'result_count': int(sys.argv[4]),
+}
+print(json.dumps(entry, ensure_ascii=False))
+" "${SESSION_ID}" "${KW_JSON}" "${RESULTS_JSON}" "${RESULT_COUNT}" 2>/dev/null || true)"
+
+  [ -n "${OBS_ENTRY}" ] && _obs_append "${OBS_ENTRY}"
 fi
 
 exit 0
