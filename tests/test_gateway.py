@@ -260,3 +260,189 @@ class TestAuditLog:
         lines = [l for l in log_path.read_text().splitlines() if l.strip()]
         ops = [json.loads(l)["operation"] for l in lines]
         assert "archive" in ops
+
+
+class TestAutoPromotion:
+    """Tests for the silent auto-promotion engine (Part 1 of issue #11)."""
+
+    def test_read_auto_promotes_when_eligible(self, gateway, repo_root):
+        """Reading an item that meets promotion thresholds should promote it silently."""
+        # The test fixture uses zero thresholds for all promotions,
+        # so any item meeting access_count=0 and quality_score=0 is immediately eligible.
+        item_id = gateway.capture(
+            layer="project",
+            content="Auto-promote on read test",
+            quality_score=0.9,
+            run_id="run-test",
+        )
+        # Item starts in project layer
+        matches_project = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
+        assert len(matches_project) == 1
+
+        # Reading increments access_count and triggers auto-promotion check.
+        # With zero thresholds, the item qualifies immediately → promoted to global.
+        gateway.read(item_id)
+
+        # Item should now be in global layer
+        matches_global = list((repo_root / "wiki" / "global").glob(f"{item_id}.md"))
+        assert len(matches_global) == 1
+        # Old location must be gone
+        matches_project_after = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
+        assert len(matches_project_after) == 0
+
+    def test_search_auto_promotes_accessed_results(self, gateway, repo_root):
+        """Search should auto-promote eligible results silently."""
+        item_id = gateway.capture(
+            layer="project",
+            content="auto-promote-search-unique-token",
+            quality_score=0.9,
+            item_id="auto-promo-search-001",
+            run_id="run-test",
+        )
+        # Confirm item starts in project layer
+        matches_project = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
+        assert len(matches_project) == 1
+
+        # Search finds the item → access_count incremented → auto-promotion triggered
+        results = gateway.search("auto-promote-search-unique-token")
+        found_ids = [r.get("item_id") for r in results]
+        assert item_id in found_ids
+
+        # With zero thresholds, item should have been promoted to global
+        matches_global = list((repo_root / "wiki" / "global").glob(f"{item_id}.md"))
+        assert len(matches_global) == 1
+        matches_project_after = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
+        assert len(matches_project_after) == 0
+
+    def test_auto_promotion_does_not_raise_when_already_at_top(self, gateway, repo_root):
+        """Reading a global-layer item (no next layer) must not raise any error."""
+        item_id = gateway.capture(
+            layer="global",
+            content="Already at top layer",
+            quality_score=0.9,
+        )
+        # Should complete without exception even though global has no next layer
+        item = gateway.read(item_id)
+        assert item is not None
+
+    def test_capture_does_not_auto_promote(self, gateway, repo_root):
+        """capture() must NOT auto-promote — newly created items stay in their layer."""
+        item_id = gateway.capture(
+            layer="project",
+            content="Newly captured item",
+            quality_score=0.9,
+            run_id="run-test",
+        )
+        # Item must still be in project layer immediately after capture
+        matches_project = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
+        assert len(matches_project) == 1
+        matches_global = list((repo_root / "wiki" / "global").glob(f"{item_id}.md"))
+        assert len(matches_global) == 0
+
+
+class TestConsolidate:
+    """Tests for the gateway.consolidate() sweep (Part 2 of issue #11)."""
+
+    def test_consolidate_promotes_eligible_items(self, gateway, repo_root):
+        """consolidate() must promote all items that meet policy thresholds."""
+        # Capture several items in project layer (zero thresholds → all eligible)
+        ids = []
+        for i in range(3):
+            item_id = gateway.capture(
+                layer="project",
+                content=f"Consolidate test item {i}",
+                quality_score=0.9,
+                run_id="run-test",
+            )
+            ids.append(item_id)
+
+        # All items start in project
+        for item_id in ids:
+            assert len(list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))) == 1
+
+        promoted_count = gateway.consolidate()
+        assert promoted_count >= 3
+
+        # All items should now be in global layer
+        for item_id in ids:
+            matches_global = list((repo_root / "wiki" / "global").glob(f"{item_id}.md"))
+            assert len(matches_global) == 1
+
+    def test_consolidate_skips_ineligible_items(self, repo_root):
+        """consolidate() must not promote items that do not meet quality_score threshold."""
+        import yaml
+        # Write a policy with high quality_score threshold that prevents promotion
+        strict_policy = {
+            "layers": {
+                "project": {
+                    "path_template": "wiki/projects/",
+                    "promotes_to": "global",
+                    "promotion": {
+                        "age_hours": 0.0,
+                        "access_count": 0,
+                        "quality_score": 0.99,  # Very high — low-quality items won't pass
+                    },
+                },
+                "global": {
+                    "path_template": "wiki/global/",
+                    "promotes_to": None,
+                    "promotion": {"age_hours": 0, "access_count": 0, "quality_score": 0.0},
+                },
+                "ephemeral": {
+                    "path_template": ".agent/runs/{run_id}/scratch/",
+                    "promotes_to": "working",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "working": {
+                    "path_template": ".agent/runs/{run_id}/working/",
+                    "promotes_to": "session",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "session": {
+                    "path_template": ".agent/sessions/{session_id}/",
+                    "promotes_to": "project",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+            },
+            "forget": {"requires_archived": True},
+            "archive": {"allowed_stages": ["stored", "retrieved", "used", "validated"]},
+        }
+        (repo_root / "wiki" / "policy.yaml").write_text(yaml.dump(strict_policy))
+
+        from core.gateway import MemoryGateway
+        gw = MemoryGateway(repo_root=str(repo_root))
+
+        # Capture a low-quality item
+        item_id = gw.capture(
+            layer="project",
+            content="Low quality item",
+            quality_score=0.5,  # Below the 0.99 threshold
+            run_id="run-test",
+        )
+
+        promoted_count = gw.consolidate()
+        assert promoted_count == 0
+
+        # Item should still be in project
+        matches_project = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
+        assert len(matches_project) == 1
+
+    def test_consolidate_returns_zero_on_empty_store(self, gateway, repo_root):
+        """consolidate() must return 0 when no items exist."""
+        promoted_count = gateway.consolidate()
+        assert promoted_count == 0
+
+    def test_consolidate_does_not_double_promote(self, gateway, repo_root):
+        """consolidate() run twice must not fail — already promoted items are in global."""
+        item_id = gateway.capture(
+            layer="project",
+            content="Double consolidate test",
+            quality_score=0.9,
+            run_id="run-test",
+        )
+        first_run = gateway.consolidate()
+        assert first_run >= 1
+
+        # Second run should not promote the global item (no next layer)
+        second_run = gateway.consolidate()
+        assert second_run == 0

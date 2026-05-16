@@ -268,3 +268,52 @@ class TestMemoryForgetCommand:
             ["forget", "--force", "forget-002"],
         )
         assert result.exit_code == 0, result.output
+
+
+class TestConsolidateCommand:
+    """Tests for `mnemos consolidate` CLI command (Part 2 of issue #11)."""
+
+    def test_consolidate_exits_zero(self, runner, cli_with_repo):
+        """consolidate must exit 0 even on an empty store."""
+        result = runner.invoke(cli_with_repo, ["consolidate"])
+        assert result.exit_code == 0, result.output
+
+    def test_consolidate_output_format(self, runner, cli_with_repo):
+        """consolidate must print 'Promoted N memories'."""
+        result = runner.invoke(cli_with_repo, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Promoted" in result.output
+        assert "memories" in result.output
+
+    def test_consolidate_promotes_eligible_items(self, runner, cli_with_repo, repo_root):
+        """consolidate must promote items that meet policy thresholds and report count."""
+        import re
+        # Capture items in project layer (zero thresholds in test policy → all eligible)
+        for i in range(2):
+            runner.invoke(
+                cli_with_repo,
+                [
+                    "capture",
+                    "--layer", "project",
+                    "--content", f"Consolidate CLI test item {i}",
+                    "--quality-score", "0.9",
+                ],
+            )
+
+        result = runner.invoke(cli_with_repo, ["consolidate"])
+        assert result.exit_code == 0, result.output
+
+        match = re.search(r"Promoted (\d+) memories", result.output)
+        assert match is not None, f"Expected 'Promoted N memories' in: {result.output}"
+        n = int(match.group(1))
+        assert n >= 2
+
+        # Items must now be in global layer
+        global_files = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert len(global_files) >= 2
+
+    def test_consolidate_empty_store_reports_zero(self, runner, cli_with_repo):
+        """consolidate on empty store must report 'Promoted 0 memories'."""
+        result = runner.invoke(cli_with_repo, ["consolidate"])
+        assert result.exit_code == 0, result.output
+        assert "Promoted 0 memories" in result.output
