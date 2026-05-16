@@ -87,9 +87,15 @@ DEFAULT_DEDUP_LAYERS: list[str] = ["session", "project", "global"]
 # ---------------------------------------------------------------------------
 
 def _timestamp_path() -> Path:
-    """Return the path to the background-check timestamp file in /tmp."""
+    """Return the path to the background-check timestamp file.
+
+    Uses /tmp directly so the path matches the bash PostToolUse hook which
+    also writes to /tmp/mnemos-bg-check-{uid}.ts.  On macOS tempfile.gettempdir()
+    returns a session-specific /var/folders/… path that differs from /tmp,
+    breaking the shared throttle.
+    """
     uid = os.getuid() if hasattr(os, "getuid") else "0"
-    return Path(tempfile.gettempdir()) / f"mnemos-bg-check-{uid}.ts"
+    return Path("/tmp") / f"mnemos-bg-check-{uid}.ts"
 
 
 def should_run(interval_minutes: int = DEFAULT_INTERVAL_MINUTES) -> bool:
