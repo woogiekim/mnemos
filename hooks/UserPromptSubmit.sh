@@ -15,8 +15,10 @@
 #   3. Per-prompt active search: extract key terms from the prompt and run
 #      `mnemos search` to surface relevant memories (top 5 results).
 #   4. Per-prompt capture reminder: inject a <mnemos-capture-protocol> block that
-#      instructs Claude to call `mnemos capture --quiet` after each response turn,
-#      so the memory base grows organically from conversations.
+#      instructs Claude to call `mnemos capture --quiet --session-id <id>` after
+#      each response turn so captures share the same session_id as hook_search
+#      events (observability correlation). The SESSION_ID from the hook input
+#      is also exported as MNEMOS_SESSION_ID for the CLI's env-var fallback.
 #   5. Observability: log every hook invocation, search call, and session-start
 #      event to wiki/observability.jsonl (async background write, zero latency impact).
 #
@@ -137,6 +139,7 @@ except Exception:
 }
 
 SESSION_ID="$(read_field session_id)"
+export MNEMOS_SESSION_ID="${SESSION_ID}"
 PROMPT="$(read_field prompt)"
 
 if [ -z "${PROMPT}" ]; then
@@ -419,7 +422,7 @@ fi
 echo ""
 echo "<mnemos-capture-protocol>"
 echo "After responding, proactively capture new insights using:"
-echo "  mnemos capture --content \"<insight>\" --quiet --layer session"
+echo "  mnemos capture --content \"<insight>\" --quiet --layer session --session-id \"${SESSION_ID}\""
 echo "Capture liberally — when in doubt, capture. Aim for at least 1 capture per"
 echo "substantive response. Capture anything from:"
 echo "  - decisions, user preferences, architecture choices, workflow patterns"

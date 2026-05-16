@@ -46,6 +46,11 @@ def memory_capture(
     quiet: bool,
 ) -> None:
     """Capture a new memory item into the target layer (default: ephemeral)."""
+    # Defensive fallback: if --session-id was not passed, check env var set by
+    # the UserPromptSubmit hook so observability correlation still works even
+    # when Claude omits the flag from the injected capture protocol command.
+    if session_id is None:
+        session_id = os.environ.get("MNEMOS_SESSION_ID")
     gw = _get_gateway()
     try:
         captured_id = gw.capture(
