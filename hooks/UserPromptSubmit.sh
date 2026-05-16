@@ -415,12 +415,19 @@ fi
 # Capture protocol reminder — injected on every prompt turn.
 #
 # This block tells Claude to proactively call `mnemos capture` after
-# each response, so the memory base grows organically from conversations.
+# each response AND to call `mnemos search` when handling bug analysis,
+# decision review, or root-cause lookup mid-session.
 # Emitted unconditionally (even when no search results were found) because
 # the reminder should fire regardless of whether past memories were surfaced.
 # ---------------------------------------------------------------------------
 echo ""
 echo "<mnemos-capture-protocol>"
+echo "Search first when relevant:"
+echo "  - Analyzing a bug or error: run \`mnemos search <error-keyword>\` before debugging."
+echo "  - Answering 'why was X decided': run \`mnemos search <topic> decision\` first."
+echo "  - Before refactoring: run \`mnemos search <module> constraint\`."
+echo "  - Architecture/design question: run \`mnemos search <component>\`."
+echo ""
 echo "After responding, proactively capture new insights using:"
 echo "  mnemos capture --content \"<insight>\" --quiet --layer session --session-id \"${SESSION_ID}\""
 echo "Capture liberally — when in doubt, capture. Aim for at least 1 capture per"
