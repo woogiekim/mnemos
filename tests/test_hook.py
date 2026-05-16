@@ -247,6 +247,26 @@ class TestCaptureProtocol:
         assert rc == 0
         assert "<mnemos-capture-protocol>" not in output
 
+    def test_capture_protocol_uses_liberal_language(self, tmp_path):
+        """Protocol must encourage liberal capturing, not just 'worth recalling'."""
+        rc, output = _run_hook("how does this work?", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "liberally" in output
+        assert "when in doubt" in output
+
+    def test_capture_protocol_sets_minimum_frequency(self, tmp_path):
+        """Protocol must state a minimum capture frequency per response."""
+        rc, output = _run_hook("explain the flow", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "at least 1" in output
+
+    def test_capture_protocol_includes_expanded_categories(self, tmp_path):
+        """Protocol must list expanded capture categories including root causes and constraints."""
+        rc, output = _run_hook("why did this fail?", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "root cause" in output
+        assert "constraint" in output
+
 
 # ---------------------------------------------------------------------------
 # ClaudeCodeAdapter template changes
