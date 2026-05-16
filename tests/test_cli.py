@@ -144,6 +144,64 @@ class TestMemoryCaptureCommand:
         assert "..." not in result.output
 
 
+class TestMemoryListCommand:
+    def test_list_empty_store(self, runner, cli_with_repo):
+        """list on empty store must exit 0 and report 0 memories."""
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] 0 memories" in result.output
+
+    def test_list_shows_captured_items(self, runner, cli_with_repo):
+        """list must show items that have been captured."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "List test item", "--id", "list-001"],
+        )
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert result.exit_code == 0, result.output
+        assert "list-001" in result.output
+        assert "[mnemos] 1 memories" in result.output
+
+    def test_list_layer_filter(self, runner, cli_with_repo):
+        """--layer must restrict output to the specified layer."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Global item", "--id", "list-global"],
+        )
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "project", "--content", "Project item", "--id", "list-project"],
+        )
+        result = runner.invoke(cli_with_repo, ["list", "--layer", "global"])
+        assert result.exit_code == 0, result.output
+        assert "list-global" in result.output
+        assert "list-project" not in result.output
+
+    def test_list_limit(self, runner, cli_with_repo):
+        """--limit must cap the number of items returned."""
+        for i in range(5):
+            runner.invoke(
+                cli_with_repo,
+                ["capture", "--layer", "global", "--content", f"Item {i}", "--id", f"limit-{i:03d}"],
+            )
+        result = runner.invoke(cli_with_repo, ["list", "--limit", "2"])
+        assert result.exit_code == 0, result.output
+        assert "[mnemos] 2 memories" in result.output
+
+    def test_list_output_format(self, runner, cli_with_repo):
+        """list output lines must follow '  [layer] item_id: content' format."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Format check content", "--id", "fmt-001"],
+        )
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if l.startswith("  [")]
+        assert len(lines) >= 1
+        assert "[global]" in lines[0]
+        assert "fmt-001" in lines[0]
+
+
 class TestMemorySearchCommand:
     def test_memory_search_command(self, runner, cli_with_repo, repo_root):
         """search must return results for indexed content."""

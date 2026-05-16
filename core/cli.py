@@ -93,6 +93,27 @@ def memory_classify(item_id: str, tag: str, layer: str | None) -> None:
         sys.exit(1)
 
 
+@cli.command("list")
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated list of layers to include (default: all).",
+)
+@click.option("--limit", default=None, type=int, help="Maximum number of items to show.")
+def memory_list(layers: str | None, limit: int | None) -> None:
+    """List memory items across all layers (or specified layers)."""
+    gw = _get_gateway()
+    layer_list = [l.strip() for l in layers.split(",")] if layers else None
+    items = gw.list_all(layers=layer_list, limit=limit)
+    if not items:
+        click.echo("no memories found")
+    else:
+        for item in items:
+            click.echo(f"  [{item['layer']}] {item['item_id']}: {item['content'][:80]}")
+    click.echo(f"[mnemos] {len(items)} memories")
+
+
 @cli.command("search")
 @click.argument("query")
 @click.option(

@@ -490,6 +490,71 @@ class MemoryGateway:
         return promoted_count
 
     # ------------------------------------------------------------------ #
+    # List                                                                  #
+    # ------------------------------------------------------------------ #
+
+    def list_all(
+        self,
+        layers: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all memory items, optionally filtered by layer(s) and capped by limit."""
+        from core.layers import LAYER_STATIC_PATHS
+
+        static_layers = list(LAYER_STATIC_PATHS.keys())
+        dynamic_layers = ["ephemeral", "working", "session"]
+        all_layers = static_layers + dynamic_layers
+        if layers:
+            all_layers = [l for l in all_layers if l in layers]
+
+        results: list[dict[str, Any]] = []
+
+        for layer in all_layers:
+            if limit is not None and len(results) >= limit:
+                break
+
+            paths: list[Path] = []
+            if layer == "ephemeral":
+                agent_runs = Path(self._root) / ".agent" / "runs"
+                if agent_runs.exists():
+                    for rd in agent_runs.iterdir():
+                        if rd.is_dir():
+                            scratch = rd / "scratch"
+                            if scratch.exists():
+                                paths.extend(scratch.glob("*.md"))
+            elif layer == "working":
+                agent_runs = Path(self._root) / ".agent" / "runs"
+                if agent_runs.exists():
+                    for rd in agent_runs.iterdir():
+                        if rd.is_dir():
+                            working_dir = rd / "working"
+                            if working_dir.exists():
+                                paths.extend(working_dir.glob("*.md"))
+            elif layer == "session":
+                agent_sessions = Path(self._root) / ".agent" / "sessions"
+                if agent_sessions.exists():
+                    paths = list(agent_sessions.rglob("*.md"))
+            else:
+                paths = list(self._store.list_layer(layer))
+
+            for item_path in paths:
+                if limit is not None and len(results) >= limit:
+                    break
+                try:
+                    item = self._store._parse_file(item_path)
+                    results.append({
+                        "item_id": item.get("id") or item_path.stem,
+                        "layer": item.get("layer", layer),
+                        "content": item.get("content", ""),
+                        "tags": item.get("tags", []),
+                        "created_at": item.get("created_at"),
+                    })
+                except Exception:
+                    continue
+
+        return results
+
+    # ------------------------------------------------------------------ #
     # Log                                                                   #
     # ------------------------------------------------------------------ #
 
