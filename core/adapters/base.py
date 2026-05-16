@@ -5,6 +5,33 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------------
+# Canonical behavioral ruleset shared across all adapters
+# ---------------------------------------------------------------------------
+
+MNEMOS_BEHAVIOR_BLOCK = """\
+## Memory (mnemos)
+When asked about past context, notes, or decisions, run:
+`mnemos search <query>`
+This searches your personal memory store managed by mnemos.
+
+### Capturing knowledge
+Use `mnemos capture "<insight>"` when you identify:
+- Stable project decisions
+- Architecture constraints
+- User preferences
+- Reusable workflows
+- Important operational knowledge
+- Persistent project context
+
+Do NOT capture:
+- Temporary debugging, speculative reasoning, incomplete thoughts
+- Transient conversation, low-confidence assumptions, scratch work
+
+All captured insights begin in the session layer.
+Promotion to project or global layer happens through mnemos promotion rules only."""
+
+
 class HostAdapter(ABC):
     """Abstract base class for mnemos host environment adapters.
 

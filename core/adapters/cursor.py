@@ -5,21 +5,18 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from core.adapters.base import HostAdapter
+from core.adapters.base import HostAdapter, MNEMOS_BEHAVIOR_BLOCK
 
 
 # ---------------------------------------------------------------------------
 # Canonical managed block content (mirrors install.sh)
 # ---------------------------------------------------------------------------
 
-CURSOR_RULES_BLOCK = """\
-<!-- mnemos:start -->
-## Memory (mnemos)
-For memory-related, project-history, architecture-history, or prior-decision questions, run:
-`mnemos search <query>`
-before answering. Do not assume the current conversation contains complete context.
-Use mnemos as the persistent memory retrieval system.
-<!-- mnemos:end -->"""
+CURSOR_RULES_BLOCK = (
+    "<!-- mnemos:start -->\n"
+    + MNEMOS_BEHAVIOR_BLOCK
+    + "\n<!-- mnemos:end -->"
+)
 
 
 # ---------------------------------------------------------------------------
