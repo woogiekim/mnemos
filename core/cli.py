@@ -24,7 +24,7 @@ def cli() -> None:
 
 
 @cli.command("capture")
-@click.option("--layer", required=True, help="Target memory layer.")
+@click.option("--layer", default=None, help="Target memory layer (default: ephemeral).")
 @click.option("--content", required=True, help="Content to capture.")
 @click.option("--id", "item_id", default=None, help="Optional item ID.")
 @click.option("--tag", "tags", multiple=True, help="Tags to attach (repeatable).")
@@ -32,7 +32,7 @@ def cli() -> None:
 @click.option("--run-id", default=None, help="Run ID for ephemeral/working layers.")
 @click.option("--session-id", default=None, help="Session ID for session layer.")
 def memory_capture(
-    layer: str,
+    layer: str | None,
     content: str,
     item_id: str | None,
     tags: tuple[str, ...],
@@ -40,7 +40,7 @@ def memory_capture(
     run_id: str | None,
     session_id: str | None,
 ) -> None:
-    """Capture a new memory item into the target layer."""
+    """Capture a new memory item into the target layer (default: ephemeral)."""
     gw = _get_gateway()
     try:
         captured_id = gw.capture(
@@ -52,6 +52,7 @@ def memory_capture(
             run_id=run_id,
             session_id=session_id,
         )
+        effective_layer = layer or "ephemeral"
         if captured_id is None:
             preview = content[:60]
             click.echo(f"[mnemos] Skipped (duplicate): \"{preview}\"")
@@ -59,7 +60,7 @@ def memory_capture(
             click.echo(f"captured: {captured_id}")
             preview = content[:60]
             suffix = "..." if len(content) > 60 else ""
-            click.echo(f"[mnemos] Captured: \"{preview}{suffix}\" → {layer} layer")
+            click.echo(f"[mnemos] Captured: \"{preview}{suffix}\" → {effective_layer} layer")
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)

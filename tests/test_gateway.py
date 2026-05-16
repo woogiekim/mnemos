@@ -446,3 +446,78 @@ class TestConsolidate:
         # Second run should not promote the global item (no next layer)
         second_run = gateway.consolidate()
         assert second_run == 0
+
+
+class TestEphemeralDefault:
+    """Tests for the ephemeral-first capture default (issue #12)."""
+
+    def test_capture_defaults_to_ephemeral_layer(self, gateway, repo_root):
+        """capture() without --layer must write to the ephemeral layer."""
+        item_id = gateway.capture(content="Ephemeral default test")
+
+        # File must exist somewhere under .agent/runs/{run_id}/scratch/
+        agent_runs = repo_root / ".agent" / "runs"
+        matches = list(agent_runs.rglob("*.md"))
+        assert any(item_id in m.name for m in matches), (
+            f"Expected ephemeral file for {item_id} under {agent_runs}, found: {matches}"
+        )
+
+    def test_capture_default_layer_metadata_is_ephemeral(self, gateway, repo_root):
+        """Item captured without explicit layer must record layer=ephemeral in metadata."""
+        import frontmatter as fm
+        item_id = gateway.capture(content="Layer metadata check")
+
+        agent_runs = repo_root / ".agent" / "runs"
+        found = [p for p in agent_runs.rglob("*.md") if item_id in p.name]
+        assert len(found) == 1, f"Expected exactly one file, got {found}"
+        post = fm.load(str(found[0]))
+        assert post["layer"] == "ephemeral"
+
+    def test_capture_explicit_layer_overrides_default(self, gateway, repo_root):
+        """Explicit layer= argument must still be honoured."""
+        item_id = gateway.capture(content="Explicit session capture", layer="session")
+
+        agent_sessions = repo_root / ".agent" / "sessions"
+        matches = list(agent_sessions.rglob("*.md"))
+        assert any(item_id in m.name for m in matches), (
+            f"Expected session file for {item_id} under {agent_sessions}, found: {matches}"
+        )
+
+    def test_capture_auto_generates_run_id_per_gateway(self, gateway, repo_root):
+        """Two captures from the same gateway must share the same auto-generated run_id."""
+        id1 = gateway.capture(content="First ephemeral item")
+        id2 = gateway.capture(content="Second ephemeral item")
+
+        agent_runs = repo_root / ".agent" / "runs"
+        file1 = next((p for p in agent_runs.rglob("*.md") if id1 in p.name), None)
+        file2 = next((p for p in agent_runs.rglob("*.md") if id2 in p.name), None)
+        assert file1 is not None
+        assert file2 is not None
+        # Both files must live in the same run directory
+        assert file1.parent.parent == file2.parent.parent, (
+            f"Expected same run dir: {file1.parent.parent} vs {file2.parent.parent}"
+        )
+
+    def test_capture_explicit_run_id_overrides_gateway_default(self, gateway, repo_root):
+        """Explicit run_id= must be used instead of the gateway auto-generated one."""
+        custom_run_id = "custom-run-abc"
+        item_id = gateway.capture(content="Custom run_id test", run_id=custom_run_id)
+
+        expected_dir = repo_root / ".agent" / "runs" / custom_run_id / "scratch"
+        assert expected_dir.exists(), f"Expected directory {expected_dir} to exist"
+        matches = list(expected_dir.glob(f"{item_id}.md"))
+        assert len(matches) == 1
+
+    def test_capture_records_run_id_and_session_id_in_metadata(self, gateway, repo_root):
+        """Captured item must record run_id and session_id in front-matter metadata."""
+        import frontmatter as fm
+        item_id = gateway.capture(content="Metadata run_id session_id test")
+
+        agent_runs = repo_root / ".agent" / "runs"
+        found = [p for p in agent_runs.rglob("*.md") if item_id in p.name]
+        assert len(found) == 1
+        post = fm.load(str(found[0]))
+        assert "run_id" in post.metadata, "run_id must be in front-matter metadata"
+        assert "session_id" in post.metadata, "session_id must be in front-matter metadata"
+        assert post["run_id"] == gateway._run_id
+        assert post["session_id"] == gateway._session_id
