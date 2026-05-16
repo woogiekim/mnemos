@@ -585,3 +585,9 @@ class TestMnemosBehaviorBlockParity:
         assert "기억됨" in MNEMOS_BEHAVIOR_BLOCK
         assert "(<layer>)" in MNEMOS_BEHAVIOR_BLOCK
         assert "mnemos delete" in MNEMOS_BEHAVIOR_BLOCK
+
+    def test_behavior_block_notification_only_for_persistent_layers(self):
+        """Notification must only apply to session/project/global; ephemeral/working are silent."""
+        assert "session, project, global" in MNEMOS_BEHAVIOR_BLOCK
+        assert "ephemeral, working" in MNEMOS_BEHAVIOR_BLOCK
+        assert "capture silently" in MNEMOS_BEHAVIOR_BLOCK
