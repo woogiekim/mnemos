@@ -12,19 +12,25 @@
 #   1. Session-start load: on the first prompt of a session, load all project
 #      and global layer memories and inject them as standing context.
 #   2. /compact shortcut: emit a reminder to capture session insights before compacting.
-#   3. Per-prompt active search: extract key terms from the prompt and run
+#   3. Per-prompt promotion block: inject a <mnemos-promotion> context block listing
+#      any memory promotions that occurred since the last hook fire. The block is
+#      omitted when there are no new promotions (empty block omitted). Cursor tracking
+#      is stored in ~/.mnemos/.cache/promotion-cursor.txt (or MNEMOS_PROMO_CURSOR).
+#   4. Per-prompt active search: extract key terms from the prompt and run
 #      `mnemos search` to surface relevant memories (top 5 results).
-#   4. Per-prompt capture reminder: inject a <mnemos-capture-protocol> block that
+#   5. Per-prompt capture reminder: inject a <mnemos-capture-protocol> block that
 #      instructs Claude to call `mnemos capture --quiet --session-id <id>` after
 #      each response turn so captures share the same session_id as hook_search
 #      events (observability correlation). The SESSION_ID from the hook input
 #      is also exported as MNEMOS_SESSION_ID for the CLI's env-var fallback.
-#   5. Observability: log every hook invocation, search call, and session-start
+#   6. Observability: log every hook invocation, search call, and session-start
 #      event to wiki/observability.jsonl (async background write, zero latency impact).
 #
 # Environment variables:
-#   MNEMOS_REPO_ROOT   — path to the mnemos repository (required)
+#   MNEMOS_REPO_ROOT    — path to the mnemos repository (required)
 #   MNEMOS_HOOK_TIMEOUT — seconds before search is aborted (default: 8)
+#   MNEMOS_PROMO_CURSOR — override path for the promotion cursor file
+#                         (default: ~/.mnemos/.cache/promotion-cursor.txt)
 
 set -euo pipefail
 
@@ -243,6 +249,96 @@ except Exception:
   _obs_event "hook_session_start" "${SESSION_ID}" \
     "memory_count=${SESSION_MEMORY_COUNT}"
 fi
+
+# ---------------------------------------------------------------------------
+# Per-prompt promotion block — inject <mnemos-promotion> when promotions exist
+# ---------------------------------------------------------------------------
+# Read wiki/observability.jsonl and collect promotion events that occurred
+# after the last cursor timestamp.  The cursor is stored in a small file under
+# ~/.mnemos/.cache/ so it persists across prompts within a session.
+#
+# Cursor path resolution (first match wins):
+#   1. MNEMOS_PROMO_CURSOR env var (testability / override)
+#   2. Default: ${HOME}/.mnemos/.cache/promotion-cursor.txt
+
+_promo_cursor_path() {
+  if [ -n "${MNEMOS_PROMO_CURSOR:-}" ]; then
+    echo "${MNEMOS_PROMO_CURSOR}"
+  else
+    echo "${HOME}/.mnemos/.cache/promotion-cursor.txt"
+  fi
+}
+
+_inject_promotion_block() {
+  local obs_log="${REPO_ROOT}/wiki/observability.jsonl"
+  local cursor_path
+  cursor_path="$(_promo_cursor_path)"
+  local cursor_dir
+  cursor_dir="$(dirname "${cursor_path}")"
+
+  # No observability log → nothing to do
+  [ -f "${obs_log}" ] || return 0
+
+  # Read cursor; if absent treat epoch as cursor (inject nothing for old data)
+  local cursor_ts="2020-01-01T00:00:00Z"
+  if [ -f "${cursor_path}" ]; then
+    cursor_ts="$(cat "${cursor_path}" 2>/dev/null | tr -d '[:space:]' || echo '2020-01-01T00:00:00Z')"
+    [ -z "${cursor_ts}" ] && cursor_ts="2020-01-01T00:00:00Z"
+  fi
+
+  # Extract promotion events newer than cursor (pure python3, no subprocess)
+  local promo_lines
+  promo_lines="$(python3 - "${obs_log}" "${cursor_ts}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+
+obs_path = sys.argv[1]
+cursor_ts = sys.argv[2]
+
+lines = []
+try:
+    with open(obs_path, "r", encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except Exception:
+                continue
+            if entry.get("event") != "promotion":
+                continue
+            ts = entry.get("ts", "")
+            if ts <= cursor_ts:
+                continue
+            memory_id = entry.get("memory_id") or entry.get("item_id") or ""
+            layer = entry.get("layer") or entry.get("to_layer") or ""
+            if memory_id and layer:
+                lines.append(f"{memory_id} → {layer}")
+except Exception:
+    pass
+
+print("\n".join(lines))
+PYEOF
+)"
+
+  if [ -n "${promo_lines}" ]; then
+    echo "<mnemos-promotion>"
+    while IFS= read -r entry_line; do
+      [ -z "${entry_line}" ] && continue
+      echo "<promotion>${entry_line}</promotion>"
+    done <<< "${promo_lines}"
+    echo "</mnemos-promotion>"
+    echo ""
+  fi
+
+  # Update cursor to now so these promotions are not re-injected next prompt
+  local new_ts
+  new_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "${cursor_dir}" 2>/dev/null || true
+  printf '%s\n' "${new_ts}" > "${cursor_path}" 2>/dev/null || true
+}
+
+_inject_promotion_block
 
 # ---------------------------------------------------------------------------
 # Per-prompt active search — keyword extraction + per-keyword search + dedup

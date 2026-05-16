@@ -537,28 +537,22 @@ class ClaudeCodeAdapter(HostAdapter):
         bus.subscribe("post-capture", self._on_post_capture)
 
     def _on_post_promote(self, payload: dict) -> None:
-        """Handle a ``post-promote`` event by printing a capture_notice-style line.
+        """Handle a ``post-promote`` event by printing a promotion notice.
 
         Output format (plain)::
 
-            ✻ 🧠 promoted: <content_preview> (<from_layer> → <to_layer>)
+            ✻ 🧠 promoted <item_id> → <to_layer>
 
         ANSI styling uses the destination layer's colour.  The notice is
         suppressed when ``NO_COLOR`` is set in the environment (same
         behaviour as :func:`~core.output.capture_notice`).
         """
-        from core.output import ANSI_RESET, ANSI_ITALIC, ANSI_DIM, LAYER_COLOR
+        from core.output import promote_notice
 
-        content_preview = payload.get("content_preview", "")
-        from_layer = payload.get("from_layer", "?")
+        item_id = payload.get("item_id", "?")
         to_layer = payload.get("to_layer", "?")
         no_color = "NO_COLOR" in os.environ
-        plain = f"✻ 🧠 promoted: {content_preview} ({from_layer} → {to_layer})"
-        if no_color:
-            print(plain)
-        else:
-            color = LAYER_COLOR.get(to_layer, "\033[90m")
-            print(f"{color}{ANSI_DIM}{ANSI_ITALIC}{plain}{ANSI_RESET}")
+        print(promote_notice(item_id=item_id, target_layer=to_layer, no_color=no_color))
 
     def _on_post_capture(self, payload: dict) -> None:
         """Handle a ``post-capture`` event by printing a notice for persistent layers.

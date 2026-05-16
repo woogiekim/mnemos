@@ -46,8 +46,35 @@ Do NOT capture:
 - Temporary debugging steps or scratch work
 - Transient one-off conversation with no lasting value
 
-All captured insights begin in the session layer.
-Promotion to project or global layer happens through mnemos promotion rules only.
+### Layer selection — when to write directly vs. letting promotion handle it
+
+Default to `--layer session` and let mnemos promote automatically. Write directly
+to a higher layer only when the information clearly belongs there from the start:
+
+- **`--layer session`** (default): anything discovered or decided in this session
+  that may be useful later. mnemos auto-promotes to project/global when thresholds
+  are met. Use for: debugging findings, session notes, intermediate conclusions.
+
+- **`--layer project`**: stable architectural decisions, reusable constraints, and
+  patterns that apply for the lifetime of this project. Examples:
+  - "Architecture decision: use SQLite for FTS"
+  - "Constraint: all public API responses must include a request-id header"
+  - "Pattern: hexagonal architecture with ports-and-adapters layout"
+  Write directly here when you know the decision is final and project-scoped.
+
+- **`--layer global`**: cross-project user preferences, user role facts, and
+  conventions that apply regardless of which project is active. Examples:
+  - "User preference: always require TDD before implementation"
+  - "User role: senior backend engineer, prefers explicit error handling"
+  - "Convention: use kebab-case for all CLI flag names"
+  Write directly here only for facts that transcend a single project.
+
+Example commands:
+```
+mnemos capture --quiet --content "Architecture: hexagonal pattern" --layer project
+mnemos capture --quiet --content "User preference: TDD required" --layer global
+mnemos capture --quiet --content "Found root cause of auth bug" --layer session
+```
 
 ### Capture interaction pattern
 - Capture proactively — do NOT ask permission before calling `mnemos capture`

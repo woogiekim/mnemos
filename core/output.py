@@ -22,3 +22,17 @@ def capture_notice(content: str, layer: str, *, no_color: bool = False) -> str:
         return f"✻ 🧠 {content} ({layer})"
     color = LAYER_COLOR.get(layer, "\033[90m")
     return f"{color}{ANSI_DIM}{ANSI_ITALIC}✻ 🧠 {content} ({layer}){ANSI_RESET}"
+
+
+def promote_notice(item_id: str, target_layer: str, *, no_color: bool = False) -> str:
+    """Return a styled promotion notice.
+
+    Format: ✻ 🧠 promoted <item_id> → <target_layer>
+
+    Strips ANSI when NO_COLOR is set in the environment or no_color=True.
+    Uses the destination layer's colour for styling.
+    """
+    if no_color or "NO_COLOR" in os.environ:
+        return f"✻ 🧠 promoted {item_id} → {target_layer}"
+    color = LAYER_COLOR.get(target_layer, "\033[90m")
+    return f"{color}{ANSI_DIM}{ANSI_ITALIC}✻ 🧠 promoted {item_id} → {target_layer}{ANSI_RESET}"

@@ -185,17 +185,32 @@ def memory_update(item_id: str, content: str) -> None:
 @click.option("--target-layer", default=None, help="Target layer (default: next layer).")
 @click.option("--run-id", default=None, help="Run ID.")
 @click.option("--session-id", default=None, help="Session ID.")
+@click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress promotion notification output.")
+@click.option("--no-color", "no_color", is_flag=True, default=False, help="Disable ANSI color output.")
 def memory_promote(
     item_id: str,
     target_layer: str | None,
     run_id: str | None,
     session_id: str | None,
+    quiet: bool,
+    no_color: bool,
 ) -> None:
-    """Promote a memory item to the next (or specified) layer."""
-    from core.adapters.claude import ClaudeCodeAdapter
+    """Promote a memory item to the next (or specified) layer.
+
+    On success, emits 'promoted: <id>' followed by a '✻ 🧠 promoted <id> → <layer>'
+    notice (suppressed when --quiet is given).  When the promotion is rejected by
+    policy (e.g. already at the top layer), the policy error is printed instead.
+    """
+    from core.output import promote_notice
     gw = _get_gateway()
-    ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
     try:
+        # Resolve the effective target layer before promoting (for notice output).
+        item = gw._store.read(item_id)
+        current_layer = item.get("layer", "")
+        effective_target = target_layer
+        if effective_target is None:
+            effective_target = gw._policy.get_next_layer(current_layer)
+
         new_id = gw.promote(
             item_id=item_id,
             target_layer=target_layer,
@@ -203,6 +218,15 @@ def memory_promote(
             session_id=session_id,
         )
         click.echo(f"promoted: {new_id}")
+        if not quiet:
+            # Emit the promotion notice directly (mirrors how `capture` emits its notice).
+            # The event bus also fires a post-promote event for consolidate/bg-check paths,
+            # but the promote CLI command owns its notice output independently.
+            click.echo(promote_notice(
+                item_id=new_id,
+                target_layer=effective_target or "?",
+                no_color=no_color,
+            ))
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)
