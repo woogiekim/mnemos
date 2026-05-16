@@ -11,11 +11,13 @@ from core.policy import PolicyEngine, PolicyViolationError
 from core.store import MemoryStore
 from core.log import AuditLogger
 from core.hooks import HookDispatcher
+from core.events import EventBus
 from core.fts import FTSIndex
 from core.search import SearchMiddleware
 
 
 DEFAULT_QUALITY_SCORE = 0.8
+_CONTENT_PREVIEW_LENGTH = 60
 
 
 def _resolve_repo_root() -> Path:
@@ -81,6 +83,7 @@ class MemoryGateway:
         self._store = MemoryStore(repo_root=self._root)
         self._logger = AuditLogger(repo_root=self._root)
         self._hooks = HookDispatcher(repo_root=self._root)
+        self._event_bus: EventBus = EventBus()
         state_dir = Path(self._root) / ".agent" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         fts_db = str(state_dir / "fts.db")
@@ -94,6 +97,20 @@ class MemoryGateway:
         self._session_id: str = str(uuid.uuid4())
 
     # ------------------------------------------------------------------ #
+    # Event bus access                                                      #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def event_bus(self) -> EventBus:
+        """Return the gateway's :class:`~core.events.EventBus` instance.
+
+        Adapters call ``gateway.event_bus.subscribe(event, handler)`` to
+        register in-process notification handlers.  The bus is created once
+        per gateway instance and shared across all callers.
+        """
+        return self._event_bus
+
+    # ------------------------------------------------------------------ #
     # Internal: silent auto-promotion                                        #
     # ------------------------------------------------------------------ #
 
@@ -105,8 +122,9 @@ class MemoryGateway:
         """Silently promote *item* if it meets promotion thresholds.
 
         This is called as a side-effect after capture/search/read operations.
-        It never raises and never produces output — promotion is entirely
-        transparent to the caller.
+        It never raises and emits a ``post-promote`` event on the :attr:`event_bus`
+        so that adapter handlers (e.g. ClaudeCode stdout notice) are notified
+        even for auto-promotions that were previously completely silent.
         """
         try:
             if not self._policy.check_promotion_eligible(item):
@@ -115,6 +133,8 @@ class MemoryGateway:
             if next_layer is None:
                 return
             self.promote(item_id=item_id, target_layer=next_layer)
+            # Note: promote() already emits the post-promote event via EventBus,
+            # so no additional emit is needed here.
         except Exception:
             # Swallow all errors: auto-promotion is best-effort
             pass
@@ -191,7 +211,13 @@ class MemoryGateway:
             layer=layer,
             metadata={"tags": tags or []},
         )
+        content_preview = content[:_CONTENT_PREVIEW_LENGTH]
         self._hooks.fire("post-capture", {"item_id": item_id, "layer": layer})
+        self._event_bus.emit("post-capture", {
+            "item_id": item_id,
+            "content_preview": content_preview,
+            "layer": layer,
+        })
 
         return item_id
 
@@ -350,7 +376,14 @@ class MemoryGateway:
             target_layer,
             {"from_layer": current_layer},
         )
+        content_preview = content[:_CONTENT_PREVIEW_LENGTH]
         self._hooks.fire("post-promote", {"item_id": item_id, "layer": target_layer})
+        self._event_bus.emit("post-promote", {
+            "item_id": item_id,
+            "content_preview": content_preview,
+            "from_layer": current_layer,
+            "to_layer": target_layer,
+        })
 
         return item_id
 
@@ -412,6 +445,7 @@ class MemoryGateway:
         self._store.update(item["_path"], metadata_updates={"stage": "archived"})
         self._logger.append("archive", item_id, item.get("layer", "unknown"))
         self._hooks.fire("post-archive", {"item_id": item_id})
+        self._event_bus.emit("post-archive", {"item_id": item_id, "layer": item.get("layer", "unknown")})
 
     # ------------------------------------------------------------------ #
     # Forget                                                                #
@@ -427,6 +461,7 @@ class MemoryGateway:
 
         self._logger.append("forget", item_id, item.get("layer", "unknown"))
         self._hooks.fire("post-forget", {"item_id": item_id})
+        self._event_bus.emit("post-forget", {"item_id": item_id})
 
     # ------------------------------------------------------------------ #
     # Consolidate                                                           #

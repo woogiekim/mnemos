@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from core.adapters.base import HostAdapter, MNEMOS_BEHAVIOR_BLOCK
+
+if TYPE_CHECKING:
+    from core.events import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -190,3 +193,19 @@ class CursorAdapter(HostAdapter):
         diff = _unified_diff(str(rules_path), original, updated)
         rules_path.write_text(updated)
         return True, diff
+
+    # ------------------------------------------------------------------
+    # EventBus integration
+    # ------------------------------------------------------------------
+
+    def subscribe_to_event_bus(self, bus: "EventBus") -> None:
+        """Register in-process handlers on *bus*.
+
+        Cursor does not expose a hooks API equivalent to Claude Code's
+        ``settings.json`` hooks, so this adapter currently does not print
+        promotion notices.  The method is implemented to fulfil the
+        :class:`~core.adapters.base.HostAdapter` contract and to allow
+        future Cursor-specific event handling.
+        """
+        # No-op: Cursor has no equivalent stdout channel for in-process events.
+        # Future: subscribe to post-promote for Cursor-specific notification.
