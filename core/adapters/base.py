@@ -16,17 +16,18 @@ When asked about past context, notes, or decisions, run:
 This searches your personal memory store managed by mnemos.
 
 ### Capturing knowledge
-Use `mnemos capture "<insight>"` when you identify:
+Capture liberally — when in doubt, capture. Use `mnemos capture "<insight>"` for:
 - Stable project decisions
 - Architecture constraints
-- User preferences
+- User preferences and working style
 - Reusable workflows
 - Important operational knowledge
 - Persistent project context
+- Any insight the user would want to recall in a future session
 
 Do NOT capture:
-- Temporary debugging, speculative reasoning, incomplete thoughts
-- Transient conversation, low-confidence assumptions, scratch work
+- Temporary debugging steps or scratch work
+- Transient one-off conversation with no lasting value
 
 All captured insights begin in the session layer.
 Promotion to project or global layer happens through mnemos promotion rules only.
@@ -38,7 +39,14 @@ Promotion to project or global layer happens through mnemos promotion rules only
   - **session, project, global**: `✻ 🧠 <brief description> (<layer>)`
   - **ephemeral, working**: no notification
 - If the user says the capture is unnecessary, delete it: `mnemos delete <id>`
-- Never prompt "Should I capture this?" — make the judgment and act"""
+- Never prompt "Should I capture this?" — make the judgment and act
+
+### /compact — automatic session capture
+When [mnemos] /compact detected appears in context:
+- Immediately run `mnemos capture --quiet` for each significant insight, decision,
+  or piece of context from the current session that has not already been captured
+- Do this BEFORE the compact summary is generated
+- Be thorough: this is the last chance to preserve session knowledge"""
 
 
 class HostAdapter(ABC):

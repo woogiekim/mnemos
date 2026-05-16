@@ -37,8 +37,14 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
         {
             "type": "command",
             "command": (
-                'MNEMOS_REPO_ROOT="{repo_root}" mnemos search '
-                '"${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true'
+                'if [ "${CLAUDE_PROMPT}" = "/compact" ]; then\n'
+                '  echo "[mnemos] /compact detected — before compacting, '
+                'capture the key insights, decisions, and context from this session using mnemos capture --quiet. '
+                'Run mnemos capture --quiet for each significant item now."\n'
+                'else\n'
+                '  MNEMOS_REPO_ROOT="{repo_root}" mnemos search '
+                '"${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true\n'
+                'fi'
             ),
         }
     ],
