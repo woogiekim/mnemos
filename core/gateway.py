@@ -596,3 +596,74 @@ class MemoryGateway:
     def log(self, operation: str, item_id: str, layer: str, metadata: dict[str, Any] | None = None) -> None:
         """Manually append an entry to the audit log."""
         self._logger.append(operation=operation, item_id=item_id, layer=layer, metadata=metadata)
+
+    # ------------------------------------------------------------------ #
+    # Garbage collection                                                    #
+    # ------------------------------------------------------------------ #
+
+    def gc(
+        self,
+        dry_run: bool = False,
+        layers: list[str] | None = None,
+        staleness_hours: float | None = None,
+        gc_threshold: float | None = None,
+        limit: int | None = None,
+    ) -> "GCReport":  # noqa: F821 – forward ref resolved at runtime
+        """Run G1GC-style garbage collection and return a :class:`~core.gc.GCReport`.
+
+        This is the programmatic API counterpart of the ``mnemos gc`` CLI
+        command.  Memories whose composite garbage score exceeds *gc_threshold*
+        are soft-archived (``stage=archived``).  No memory is ever
+        hard-deleted.
+
+        Parameters
+        ----------
+        dry_run:
+            When ``True``, compute scores and identify candidates without
+            modifying any files.
+        layers:
+            Restrict GC to these layer names.  ``None`` means all layers.
+        staleness_hours:
+            Age threshold for staleness scoring (default: 24 h).
+        gc_threshold:
+            Minimum garbage score [0.0–1.0] to collect a memory
+            (default: 0.7).
+        limit:
+            Maximum number of memories to archive per run (default: 100).
+
+        Returns
+        -------
+        GCReport
+            Detailed report including per-item scores and reasons.
+        """
+        from core.gc import (
+            GarbageCollector,
+            DEFAULT_STALENESS_HOURS,
+            DEFAULT_GC_THRESHOLD,
+            DEFAULT_LIMIT,
+            GCReport,
+        )
+
+        collector = GarbageCollector(
+            repo_root=self._root,
+            staleness_hours=staleness_hours if staleness_hours is not None else DEFAULT_STALENESS_HOURS,
+            gc_threshold=gc_threshold if gc_threshold is not None else DEFAULT_GC_THRESHOLD,
+            limit=limit if limit is not None else DEFAULT_LIMIT,
+            layers=layers,
+        )
+        report = collector.run(dry_run=dry_run)
+
+        # Audit log: record which items were archived by GC
+        if not dry_run:
+            for item_info in report.archived_items:
+                self._logger.append(
+                    operation="gc_archive",
+                    item_id=item_info["item_id"],
+                    layer=item_info["layer"],
+                    metadata={
+                        "garbage_score": item_info["garbage_score"],
+                        "reason": item_info["reason"],
+                    },
+                )
+
+        return report

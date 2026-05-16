@@ -443,6 +443,120 @@ def memory_consolidate() -> None:
         sys.exit(1)
 
 
+@cli.command("gc")
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Show what would be archived without actually archiving.",
+)
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help=(
+        "Comma-separated list of layers to collect from "
+        "(default: all — ephemeral, working, session, project, global)."
+    ),
+)
+@click.option(
+    "--threshold",
+    "gc_threshold",
+    default=None,
+    type=float,
+    help="Minimum garbage score [0.0–1.0] to collect a memory (default: 0.7).",
+)
+@click.option(
+    "--staleness-hours",
+    "staleness_hours",
+    default=None,
+    type=float,
+    help="Age in hours beyond which staleness starts saturating toward 1.0 (default: 24.0).",
+)
+@click.option(
+    "--limit",
+    "limit",
+    default=None,
+    type=int,
+    help="Maximum number of memories to archive per run (default: 100).",
+)
+@click.option(
+    "--verbose",
+    "verbose",
+    is_flag=True,
+    default=False,
+    help="Include score breakdowns in the output.",
+)
+def memory_gc(
+    dry_run: bool,
+    layers: str | None,
+    gc_threshold: float | None,
+    staleness_hours: float | None,
+    limit: int | None,
+    verbose: bool,
+) -> None:
+    """Run G1GC-style garbage collection on memory layers.
+
+    \b
+    Scores each memory by staleness, access frequency, quality, and lifecycle
+    stage. Groups memories into layer regions, prioritises the most garbage-
+    heavy regions first (Garbage-First), then archives memories that exceed
+    the configured score threshold.
+
+    Archives are soft-deletes (stage=archived) — no memory is ever
+    hard-deleted by this command.
+
+    \b
+    Examples:
+      mnemos gc --dry-run
+      mnemos gc --layer ephemeral,working --threshold 0.6
+      mnemos gc --staleness-hours 48 --limit 50 --verbose
+    """
+    from core.gc import (
+        GarbageCollector,
+        DEFAULT_STALENESS_HOURS,
+        DEFAULT_GC_THRESHOLD,
+        DEFAULT_LIMIT,
+    )
+
+    gw = _get_gateway()
+    repo_root = gw._root
+
+    layer_list = [l.strip() for l in layers.split(",")] if layers else None
+
+    gc = GarbageCollector(
+        repo_root=repo_root,
+        staleness_hours=staleness_hours if staleness_hours is not None else DEFAULT_STALENESS_HOURS,
+        gc_threshold=gc_threshold if gc_threshold is not None else DEFAULT_GC_THRESHOLD,
+        limit=limit if limit is not None else DEFAULT_LIMIT,
+        layers=layer_list,
+    )
+
+    try:
+        report = gc.run(dry_run=dry_run)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        import sys
+        sys.exit(1)
+
+    for line in report.summary_lines():
+        click.echo(line)
+
+    if verbose and report.archived_items:
+        click.echo("")
+        click.echo("Score breakdowns:")
+        for item in report.archived_items:
+            bd = item.get("score_breakdown", {})
+            click.echo(
+                f"  {item['item_id']}"
+                f"  staleness={bd.get('staleness', 0):.3f}"
+                f"  access={bd.get('access', 0):.3f}"
+                f"  quality={bd.get('quality', 0):.3f}"
+                f"  stage={bd.get('stage', 0):.3f}"
+            )
+
+
 @cli.command("ingest-claude-md")
 @click.option(
     "--project-root",
