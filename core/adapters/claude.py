@@ -335,6 +335,48 @@ class ClaudeCodeAdapter(HostAdapter):
         return True, diff
 
     # ------------------------------------------------------------------
+    # verify_hooks
+    # ------------------------------------------------------------------
+
+    def verify_hooks(self, home: Path) -> tuple[bool, list[str]]:
+        """Check that all expected Claude Code hooks and managed blocks are present.
+
+        Checks:
+        - PostToolUse hook (mnemos ingest-claude-md) in settings.json
+        - UserPromptSubmit hook (mnemos search) in settings.json
+        - Managed block (<!-- mnemos-start --> ... <!-- mnemos-end -->) in CLAUDE.md
+
+        Returns:
+            (True, []) when all hooks are present; (False, [missing...]) otherwise.
+        """
+        missing: list[str] = []
+
+        settings_path = home / ".claude" / "settings.json"
+        if settings_path.exists():
+            try:
+                data = json.loads(settings_path.read_text())
+                hooks = data.get("hooks", {})
+
+                post_list = hooks.get("PostToolUse", [])
+                if not any(_is_mnemos_hook_entry(e) and "ingest-claude-md" in str(e) for e in post_list):
+                    missing.append("PostToolUse hook (settings.json)")
+
+                user_list = hooks.get("UserPromptSubmit", [])
+                if not any(_is_mnemos_hook_entry(e) and "mnemos search" in str(e) for e in user_list):
+                    missing.append("UserPromptSubmit hook (settings.json)")
+
+            except (json.JSONDecodeError, OSError):
+                missing.append("settings.json (unreadable)")
+
+        claude_md_path = home / ".claude" / "CLAUDE.md"
+        if claude_md_path.exists():
+            content = claude_md_path.read_text()
+            if "<!-- mnemos-start -->" not in content or "<!-- mnemos-end -->" not in content:
+                missing.append("CLAUDE.md managed block")
+
+        return (len(missing) == 0, missing)
+
+    # ------------------------------------------------------------------
     # uninstall
     # ------------------------------------------------------------------
 

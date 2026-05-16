@@ -58,3 +58,17 @@ class HostAdapter(ABC):
         Returns:
             A list of human-readable status messages describing what was done.
         """
+
+    @abstractmethod
+    def verify_hooks(self, home: Path) -> tuple[bool, list[str]]:
+        """Check whether all expected hooks/blocks are present for this host.
+
+        Args:
+            home: The user's home directory.
+
+        Returns:
+            A tuple of (all_present, missing_items) where:
+              - all_present is True if every expected hook/block is registered
+              - missing_items is a list of human-readable descriptions of what
+                is absent (empty list when all_present is True)
+        """

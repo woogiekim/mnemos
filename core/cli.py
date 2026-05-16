@@ -240,6 +240,51 @@ def memory_forget(item_id: str, force: bool) -> None:
         sys.exit(1)
 
 
+@cli.command("doctor")
+def doctor_cmd() -> None:
+    """Check all detected host adapters for missing hooks and auto-repair them.
+
+    Scans each known host adapter (Claude Code, Cursor) using is_present() to
+    detect whether the host is active. For every detected adapter, verifies that
+    all expected hooks and managed config blocks are registered. Missing hooks
+    are automatically re-registered without requiring any flags.
+
+    \b
+    Output format per adapter:
+      ClaudeCodeAdapter ... OK
+      CursorAdapter ....... FIXED (re-registered 2 hook(s))
+      SomeAdapter ......... SKIPPED (not detected)
+    """
+    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+
+    home = Path.home()
+    adapters = [ClaudeCodeAdapter(), CursorAdapter()]
+
+    all_ok = True
+    for adapter in adapters:
+        label = adapter.name
+        dots = "." * max(1, 24 - len(label))
+
+        if not adapter.is_present(home):
+            click.echo(f"{label} {dots} SKIPPED (not detected)")
+            continue
+
+        ok, missing = adapter.verify_hooks(home)
+        if ok:
+            click.echo(f"{label} {dots} OK")
+        else:
+            # Auto-repair: re-register all hooks without requiring a flag
+            adapter.install(home)
+            count = len(missing)
+            click.echo(f"{label} {dots} FIXED (re-registered {count} hook(s))")
+            all_ok = False
+
+    if all_ok:
+        click.echo("[mnemos] All hooks verified — nothing to repair.")
+    else:
+        click.echo("[mnemos] doctor complete — missing hooks have been re-registered.")
+
+
 @cli.command("install")
 @click.argument("path", default=".", type=click.Path())
 def install_cmd(path: str) -> None:
