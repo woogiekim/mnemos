@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 import frontmatter
 
-from core.layers import LAYER_STATIC_PATHS
+from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
 
 
 class MemoryStore:
@@ -33,6 +33,11 @@ class MemoryStore:
             if not session_id:
                 session_id = "default"
             return self._root / ".agent" / "sessions" / session_id
+        elif layer == "transient":
+            # Flat directory — no run_id or session_id namespace.
+            # Items are short-lived and shared across all processes; GC
+            # collects them on a 1-hour staleness window.
+            return self._root / TRANSIENT_PATH
         elif layer in LAYER_STATIC_PATHS:
             return self._root / LAYER_STATIC_PATHS[layer]
         else:
@@ -88,6 +93,10 @@ class MemoryStore:
     def _find_by_id(self, item_id: str) -> Iterator[Path]:
         """Search all known layer directories for a file matching item_id."""
         search_dirs = [self._root / path for path in LAYER_STATIC_PATHS.values()]
+        # Include the transient flat directory
+        transient_dir = self._root / TRANSIENT_PATH
+        if transient_dir.exists():
+            search_dirs.append(transient_dir)
         # Search only known .agent subdirs (avoids scanning state/, reports/, tools/, etc.)
         agent_runs = self._root / ".agent" / "runs"
         agent_sessions = self._root / ".agent" / "sessions"

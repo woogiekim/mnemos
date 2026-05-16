@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from core.store import MemoryStore
-from core.layers import LAYER_STATIC_PATHS
+from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +37,14 @@ from core.layers import LAYER_STATIC_PATHS
 # ---------------------------------------------------------------------------
 
 #: All layers recognised by the GC, ordered from most ephemeral to most stable.
-ALL_LAYERS: list[str] = ["ephemeral", "working", "session", "project", "global"]
+#: "transient" is listed first because it has the shortest expiry window and
+#: should be the highest-priority GC target.
+ALL_LAYERS: list[str] = ["transient", "ephemeral", "working", "session", "project", "global"]
+
+#: Staleness threshold (hours) for the transient layer.
+#: Items older than this are prime GC candidates.  Set to 1 hour so that
+#: protocol-test captures are eligible for collection within the same session.
+TRANSIENT_STALENESS_HOURS: float = 1.0
 
 #: Default staleness threshold (hours). Memories older than this contribute
 #: to their garbage score.
@@ -313,7 +320,12 @@ def _build_record(path: Path, store: MemoryStore, staleness_hours: float, now: d
 
 def _iter_layer_paths(repo_root: Path, layer: str) -> Iterator[Path]:
     """Yield all .md file paths for a given layer."""
-    if layer == "ephemeral":
+    if layer == "transient":
+        # Flat directory — no sub-namespacing by run_id or session_id.
+        transient_dir = repo_root / TRANSIENT_PATH
+        if transient_dir.exists():
+            yield from transient_dir.glob("*.md")
+    elif layer == "ephemeral":
         agent_runs = repo_root / ".agent" / "runs"
         if agent_runs.exists():
             for rd in agent_runs.iterdir():
@@ -388,6 +400,18 @@ class GarbageCollector:
     # Public API
     # ------------------------------------------------------------------
 
+    def _effective_staleness_hours(self, layer: str) -> float:
+        """Return the staleness threshold for a given layer.
+
+        The transient layer always uses :data:`TRANSIENT_STALENESS_HOURS`
+        (1 hour) regardless of the instance-level ``staleness_hours`` setting,
+        ensuring protocol-test captures are GC-eligible within the same session.
+        All other layers use the instance-level value.
+        """
+        if layer == "transient":
+            return TRANSIENT_STALENESS_HOURS
+        return self.staleness_hours
+
     def scan(self) -> list[GCRegion]:
         """Scan all configured layers and return a list of :class:`GCRegion`.
 
@@ -399,8 +423,9 @@ class GarbageCollector:
 
         for layer in self.layers:
             region = GCRegion(layer=layer)
+            layer_staleness = self._effective_staleness_hours(layer)
             for path in _iter_layer_paths(self._root, layer):
-                record = _build_record(path, self._store, self.staleness_hours, now)
+                record = _build_record(path, self._store, layer_staleness, now)
                 if record is not None:
                     region.records.append(record)
             regions.append(region)

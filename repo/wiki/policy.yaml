@@ -2,6 +2,19 @@
 # Controls lifecycle transitions between memory layers.
 
 layers:
+  transient:
+    # Short-lived layer for protocol-test and throwaway captures.
+    # Captures land here instead of polluting the session layer.
+    # GC staleness window: 1 hour (see TRANSIENT_STALENESS_HOURS in core/gc.py).
+    # promotes_to is null — transient items are never promoted automatically;
+    # they are meant to be deleted via `mnemos delete <id>` or GC'd.
+    path_template: ".agent/transient/"
+    promotes_to: null
+    promotion:
+      age_hours: 0
+      access_count: 0
+      quality_score: 0.0
+
   ephemeral:
     path_template: ".agent/runs/{run_id}/scratch/"
     promotes_to: working
