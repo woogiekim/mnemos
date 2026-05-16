@@ -212,6 +212,43 @@ class TestSearchOutput:
 
 
 # ---------------------------------------------------------------------------
+# Capture protocol reminder
+# ---------------------------------------------------------------------------
+
+class TestCaptureProtocol:
+    def test_capture_protocol_emitted_on_normal_prompt(self, tmp_path):
+        """The hook must emit a <mnemos-capture-protocol> block on every normal prompt."""
+        rc, output = _run_hook("how does caching work?",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "<mnemos-capture-protocol>" in output
+        assert "</mnemos-capture-protocol>" in output
+
+    def test_capture_protocol_contains_command(self, tmp_path):
+        """The capture protocol block must include the mnemos capture command."""
+        rc, output = _run_hook("explain the architecture",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "mnemos capture" in output
+        assert "--quiet" in output
+        assert "--layer session" in output
+
+    def test_capture_protocol_emitted_even_without_search_results(self, tmp_path):
+        """The capture protocol block must fire even when no search results are found."""
+        # tmp_path has no memories, so search returns nothing — protocol still fires
+        rc, output = _run_hook("xyzzy quux plugh nosuchterm",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "<mnemos-capture-protocol>" in output
+
+    def test_compact_does_not_emit_capture_protocol_block(self, tmp_path):
+        """/compact exits early with its own reminder; capture protocol block must NOT appear."""
+        rc, output = _run_hook("/compact", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "<mnemos-capture-protocol>" not in output
+
+
+# ---------------------------------------------------------------------------
 # ClaudeCodeAdapter template changes
 # ---------------------------------------------------------------------------
 
