@@ -111,8 +111,8 @@ class TestClaudeCodeAdapterInstall:
         user_cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
         assert "mnemos search" in user_cmd
 
-    def test_install_registers_stop_hook(self, tmp_path):
-        """install() must register a Stop hook for capture on session end."""
+    def test_install_does_not_register_stop_hook(self, tmp_path):
+        """install() must NOT register a Stop hook (fires per-response, not per-session)."""
         home = _make_claude_home(tmp_path)
         adapter = ClaudeCodeAdapter()
         adapter.install(home)
@@ -120,22 +120,7 @@ class TestClaudeCodeAdapterInstall:
         settings = home / ".claude" / "settings.json"
         data = json.loads(settings.read_text())
         hooks = data.get("hooks", {})
-        assert "Stop" in hooks, "Stop hook must be registered by install()"
-
-        stop_cmd = hooks["Stop"][0]["hooks"][0]["command"]
-        assert "mnemos capture" in stop_cmd
-
-    def test_install_stop_hook_is_idempotent(self, tmp_path):
-        """Running install() twice must not duplicate the Stop hook."""
-        home = _make_claude_home(tmp_path)
-        adapter = ClaudeCodeAdapter()
-        adapter.install(home)
-        adapter.install(home)
-
-        settings = home / ".claude" / "settings.json"
-        data = json.loads(settings.read_text())
-        hooks = data.get("hooks", {})
-        assert len(hooks.get("Stop", [])) == 1, "Stop hook must appear exactly once"
+        assert "Stop" not in hooks, "Stop hook must not be registered by install()"
 
     def test_install_writes_managed_block_to_claude_md(self, tmp_path):
         home = _make_claude_home(tmp_path)
@@ -230,8 +215,8 @@ class TestClaudeCodeAdapterUpdate:
         hooks = result["hooks"]["PostToolUse"]
         assert hooks[0]["matcher"] == "Write|Edit"
 
-    def test_update_replaces_legacy_stop_hook(self, tmp_path):
-        """Legacy Stop hook (extract-insight) is replaced with canonical capture hook."""
+    def test_update_removes_legacy_stop_hook(self, tmp_path):
+        """update() removes any previously-installed Stop hook (legacy or canonical)."""
         home = _make_claude_home(tmp_path)
         settings = home / ".claude" / "settings.json"
         data = {
@@ -250,16 +235,11 @@ class TestClaudeCodeAdapterUpdate:
 
         result = json.loads(settings.read_text())
         hooks = result.get("hooks", {})
-        # Stop hook should now be the canonical capture hook, not the legacy extract-insight
-        assert "Stop" in hooks
-        stop_cmd = hooks["Stop"][0]["hooks"][0]["command"]
-        assert "mnemos capture" in stop_cmd
-        assert "extract-insight" not in stop_cmd
+        assert "Stop" not in hooks, "update() must remove any mnemos Stop hook"
 
-    def test_update_registers_stop_hook_when_absent(self, tmp_path):
-        """update() adds the canonical Stop hook if no Stop hook existed."""
+    def test_update_does_not_add_stop_hook_when_absent(self, tmp_path):
+        """update() must not add a Stop hook if none existed."""
         home = _make_claude_home(tmp_path)
-        # settings.json with no Stop hook
         settings = home / ".claude" / "settings.json"
         settings.write_text('{"hooks": {}}\n')
 
@@ -267,9 +247,7 @@ class TestClaudeCodeAdapterUpdate:
 
         result = json.loads(settings.read_text())
         hooks = result.get("hooks", {})
-        assert "Stop" in hooks
-        stop_cmd = hooks["Stop"][0]["hooks"][0]["command"]
-        assert "mnemos capture" in stop_cmd
+        assert "Stop" not in hooks
 
     def test_update_returns_messages(self, tmp_path):
         home = _make_claude_home(tmp_path)
@@ -317,14 +295,21 @@ class TestClaudeCodeAdapterUninstall:
         result = json.loads(settings.read_text())
         assert "hooks" not in result
 
-    def test_uninstall_removes_stop_hook(self, tmp_path):
-        """uninstall() removes the Stop hook registered by install()."""
+    def test_uninstall_removes_legacy_stop_hook(self, tmp_path):
+        """uninstall() removes a previously-installed Stop hook from settings.json."""
         home = _make_claude_home(tmp_path)
-        adapter = ClaudeCodeAdapter()
-        adapter.install(home)
-        adapter.uninstall(home)
-
         settings = home / ".claude" / "settings.json"
+        data = {
+            "hooks": {
+                "Stop": [
+                    {"matcher": "", "hooks": [{"type": "command", "command": "mnemos capture --layer session --content session-end"}]}
+                ]
+            }
+        }
+        settings.write_text(json.dumps(data, indent=2) + "\n")
+
+        ClaudeCodeAdapter().uninstall(home)
+
         result = json.loads(settings.read_text())
         assert "Stop" not in result.get("hooks", {})
 

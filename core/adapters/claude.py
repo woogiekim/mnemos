@@ -44,20 +44,6 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
     ],
 }
 
-_STOP_HOOK_TEMPLATE = {
-    "matcher": "",
-    "hooks": [
-        {
-            "type": "command",
-            "command": (
-                'MNEMOS_REPO_ROOT="{repo_root}" mnemos capture '
-                '--layer session --content "session-end" --tag auto-stop '
-                "2>/dev/null || true"
-            ),
-        }
-    ],
-}
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -112,7 +98,6 @@ class ClaudeCodeAdapter(HostAdapter):
     Owns:
     - PostToolUse hook in ~/.claude/settings.json
     - UserPromptSubmit hook in ~/.claude/settings.json
-    - Stop hook in ~/.claude/settings.json (captures session-end marker)
     - CLAUDE.md managed block (<!-- mnemos-start --> ... <!-- mnemos-end -->)
     """
 
@@ -167,7 +152,6 @@ class ClaudeCodeAdapter(HostAdapter):
         for hook_type, template in [
             ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
             ("UserPromptSubmit", _USER_PROMPT_SUBMIT_HOOK_TEMPLATE),
-            ("Stop", _STOP_HOOK_TEMPLATE),
         ]:
             hook_list = hooks.get(hook_type, [])
             non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
@@ -261,7 +245,7 @@ class ClaudeCodeAdapter(HostAdapter):
 
         # Collect repo_root from existing entries (prefer first found)
         repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
-        for hook_type in ("PostToolUse", "UserPromptSubmit", "Stop"):
+        for hook_type in ("PostToolUse", "UserPromptSubmit"):
             for entry in hooks.get(hook_type, []):
                 if _is_mnemos_hook_entry(entry):
                     found = _extract_repo_root_from_hook(entry)
@@ -271,12 +255,10 @@ class ClaudeCodeAdapter(HostAdapter):
             if repo_root:
                 break
 
-        # Remove all existing mnemos hook entries and replace with canonical ones
-        # (This also replaces any legacy Stop hook from Issue #4 with the new canonical version)
+        # Remove all existing mnemos hook entries and replace with canonical ones.
         for hook_type, template in [
             ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
             ("UserPromptSubmit", _USER_PROMPT_SUBMIT_HOOK_TEMPLATE),
-            ("Stop", _STOP_HOOK_TEMPLATE),
         ]:
             hook_list = hooks.get(hook_type, [])
             non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
@@ -287,6 +269,17 @@ class ClaudeCodeAdapter(HostAdapter):
             if new_list != hook_list:
                 changed = True
             hooks[hook_type] = new_list
+
+        # Remove any previously-installed Stop hook (Stop fires after every AI
+        # response turn, not at session end — it floods the session layer).
+        stop_list = hooks.get("Stop", [])
+        non_mnemos_stop = [e for e in stop_list if not _is_mnemos_hook_entry(e)]
+        if non_mnemos_stop != stop_list:
+            changed = True
+            if non_mnemos_stop:
+                hooks["Stop"] = non_mnemos_stop
+            else:
+                del hooks["Stop"]
 
         if not changed:
             return False, ""
