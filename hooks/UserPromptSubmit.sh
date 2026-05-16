@@ -329,22 +329,20 @@ while IFS= read -r KW; do
     [ -z "${LINE}" ] && continue
     echo "${LINE}" | grep -q '^\[mnemos\]' && continue
 
+    # Extract memory ID for observability from [fts] header lines only.
+    # Format: "  [fts] <memory-id>: <preview>"
+    # Content lines (title:, applies_to:, etc.) must NOT be used as IDs.
+    if echo "${LINE}" | grep -qE '^\s+\[fts\] '; then
+      RESULT_ID="$(echo "${LINE}" | sed 's/^[[:space:]]*\[fts\] \(.*\): .*/\1/')"
+      [ -n "${RESULT_ID}" ] && SEARCH_RESULT_IDS="${SEARCH_RESULT_IDS:+${SEARCH_RESULT_IDS},}${RESULT_ID}"
+    fi
+
     KEY="${LINE%% *}"
     # Skip if this key has already been seen.
     if [ -n "${SEEN_KEYS_FILE}" ] && grep -qxF "${KEY}" "${SEEN_KEYS_FILE}" 2>/dev/null; then
       continue
     fi
     [ -n "${SEEN_KEYS_FILE}" ] && printf '%s\n' "${KEY}" >> "${SEEN_KEYS_FILE}"
-
-    # Track result IDs for observability (first token before the colon)
-    RESULT_ID="${KEY%%:*}"
-    if [ -n "${RESULT_ID}" ]; then
-      if [ -z "${SEARCH_RESULT_IDS}" ]; then
-        SEARCH_RESULT_IDS="${RESULT_ID}"
-      else
-        SEARCH_RESULT_IDS="${SEARCH_RESULT_IDS},${RESULT_ID}"
-      fi
-    fi
 
     if [ -z "${MERGED_LINES}" ]; then
       MERGED_LINES="${LINE}"
