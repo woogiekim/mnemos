@@ -267,6 +267,27 @@ class TestCaptureProtocol:
         assert "root cause" in output
         assert "constraint" in output
 
+    def test_capture_protocol_prohibits_notification_without_tool_call(self, tmp_path):
+        """Protocol must explicitly forbid emitting ✻ 🧠 without a preceding successful
+        mnemos capture tool call (fixes issue #17 — fake notification without capture)."""
+        rc, output = _run_hook("explain this system", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        # The prohibition must be present in the protocol block
+        assert "NEVER emit" in output, (
+            "Protocol must explicitly forbid emitting ✻ 🧠 without a capture tool call"
+        )
+        assert "mnemos capture" in output
+
+    def test_capture_protocol_notification_gated_on_captured_id(self, tmp_path):
+        """Protocol must state that notification is only allowed after mnemos capture
+        returns a captured ID — not as a freestanding text emission."""
+        rc, output = _run_hook("describe the architecture", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        # Wording must make the gate explicit: captured ID must precede notification
+        assert "captured ID" in output or "returns a captured" in output, (
+            "Protocol must gate the notification on a confirmed capture ID from mnemos capture"
+        )
+
 
 # ---------------------------------------------------------------------------
 # ClaudeCodeAdapter template changes
