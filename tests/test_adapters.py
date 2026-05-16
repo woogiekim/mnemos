@@ -582,7 +582,7 @@ class TestMnemosBehaviorBlockParity:
 
     def test_behavior_block_capture_pattern_has_notify_and_delete_guidance(self):
         """Capture interaction pattern must specify notify format and delete-on-request."""
-        assert "기억됨" in MNEMOS_BEHAVIOR_BLOCK
+        assert "mnemos capture --quiet" in MNEMOS_BEHAVIOR_BLOCK
         assert "(<layer>)" in MNEMOS_BEHAVIOR_BLOCK
         assert "mnemos delete" in MNEMOS_BEHAVIOR_BLOCK
 
@@ -590,4 +590,4 @@ class TestMnemosBehaviorBlockParity:
         """Notification must only apply to session/project/global; ephemeral/working are silent."""
         assert "session, project, global" in MNEMOS_BEHAVIOR_BLOCK
         assert "ephemeral, working" in MNEMOS_BEHAVIOR_BLOCK
-        assert "capture silently" in MNEMOS_BEHAVIOR_BLOCK
+        assert "no notification" in MNEMOS_BEHAVIOR_BLOCK
