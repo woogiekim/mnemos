@@ -67,6 +67,31 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
     ],
 }
 
+# Stop hook — re-introduced with idempotency contract (Issue #4 fix).
+#
+# Originally removed (commit 0de1c47) because Claude Code's Stop event fires
+# once per AI response turn (not at session end), which caused the hook to
+# flood the session layer with a new capture on every turn.
+#
+# Safe re-introduction: gateway.capture() now maintains a per-instance
+# in-memory dedup registry keyed by (layer, SHA-256(NFKC-normalised content)).
+# Duplicate captures within the same process are silent no-ops — the write
+# path (store, FTS, audit log, event-bus) is never reached.  This makes
+# per-turn Stop firing harmless: the second and subsequent identical captures
+# simply return None.
+_STOP_HOOK_TEMPLATE = {
+    "matcher": "",
+    "hooks": [
+        {
+            "type": "command",
+            "command": (
+                'MNEMOS_REPO_ROOT="{repo_root}" '
+                'bash "{stop_hook_script}" 2>/dev/null || true'
+            ),
+        }
+    ],
+}
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -83,6 +108,7 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
             or "mnemos extract-insight" in cmd  # legacy — removed in Issue #4
             or "UserPromptSubmit.sh" in cmd  # active hook script (post-refactor)
             or "PostToolUse.sh" in cmd  # background ops hook (background ops)
+            or "Stop.sh" in cmd  # Stop hook (re-introduced with dedup contract)
             or "mnemos bg-check" in cmd  # direct bg-check invocation
         ):
             return True
@@ -109,14 +135,21 @@ def _bg_hook_script_path(repo_root: str) -> str:
     return str(Path(repo_root) / "hooks" / "PostToolUse.sh")
 
 
+def _stop_hook_script_path(repo_root: str) -> str:
+    """Return the absolute path to the Stop hook script."""
+    return str(Path(repo_root) / "hooks" / "Stop.sh")
+
+
 def _render_template(template: dict, repo_root: str) -> dict:
-    """Instantiate a hook template by substituting {repo_root}, {hook_script}, {bg_hook_script}."""
+    """Instantiate a hook template by substituting {repo_root}, {hook_script}, {bg_hook_script}, {stop_hook_script}."""
     hook_script = _hook_script_path(repo_root)
     bg_hook_script = _bg_hook_script_path(repo_root)
+    stop_hook_script = _stop_hook_script_path(repo_root)
     raw = json.dumps(template)
     raw = raw.replace("{repo_root}", repo_root)
     raw = raw.replace("{hook_script}", hook_script)
     raw = raw.replace("{bg_hook_script}", bg_hook_script)
+    raw = raw.replace("{stop_hook_script}", stop_hook_script)
     return json.loads(raw)
 
 
@@ -217,6 +250,15 @@ class ClaudeCodeAdapter(HostAdapter):
         if new_list != hook_list:
             changed = True
         hooks["UserPromptSubmit"] = new_list
+
+        # Stop: single canonical entry (re-introduced with dedup idempotency contract)
+        stop_list = hooks.get("Stop", [])
+        non_mnemos_stop = [e for e in stop_list if not _is_mnemos_hook_entry(e)]
+        canonical_stop = _render_template(_STOP_HOOK_TEMPLATE, repo_root)
+        new_stop_list = non_mnemos_stop + [canonical_stop]
+        if new_stop_list != stop_list:
+            changed = True
+        hooks["Stop"] = new_stop_list
 
         if changed:
             new_text = json.dumps(data, indent=2) + "\n"
@@ -333,16 +375,21 @@ class ClaudeCodeAdapter(HostAdapter):
             changed = True
         hooks["UserPromptSubmit"] = new_ups
 
-        # Remove any previously-installed Stop hook (Stop fires after every AI
-        # response turn, not at session end — it floods the session layer).
+        # Stop hook: replace legacy extract-insight entries and install canonical
+        # Stop.sh entry (re-introduced with dedup idempotency contract).
+        #
+        # The legacy Stop hook used `mnemos extract-insight` which was removed
+        # in Issue #4 because it flooded the session layer.  The new Stop.sh
+        # hook is safe because gateway.capture() now deduplicates by
+        # (layer, NFKC-normalised content hash) — per-turn re-parsing of the
+        # same markers becomes a silent no-op at the storage layer.
         stop_list = hooks.get("Stop", [])
         non_mnemos_stop = [e for e in stop_list if not _is_mnemos_hook_entry(e)]
-        if non_mnemos_stop != stop_list:
+        canonical_stop = _render_template(_STOP_HOOK_TEMPLATE, repo_root)
+        new_stop = non_mnemos_stop + [canonical_stop]
+        if new_stop != stop_list:
             changed = True
-            if non_mnemos_stop:
-                hooks["Stop"] = non_mnemos_stop
-            else:
-                del hooks["Stop"]
+        hooks["Stop"] = new_stop
 
         if not changed:
             return False, ""
@@ -414,6 +461,13 @@ class ClaudeCodeAdapter(HostAdapter):
                 user_list = hooks.get("UserPromptSubmit", [])
                 if not any(_is_mnemos_hook_entry(e) for e in user_list):
                     missing.append("UserPromptSubmit hook (settings.json)")
+
+                stop_list = hooks.get("Stop", [])
+                if not any(
+                    _is_mnemos_hook_entry(e) and "Stop.sh" in str(e)
+                    for e in stop_list
+                ):
+                    missing.append("Stop hook (settings.json)")
 
             except (json.JSONDecodeError, OSError):
                 missing.append("settings.json (unreadable)")

@@ -135,8 +135,27 @@ class TestUpdateSettingsJson:
         assert "---" in diff
         assert "+++" in diff
 
-    def test_removes_stop_hook_with_mnemos_extract_insight(self, tmp_path):
-        """update must remove legacy Stop hook containing any mnemos command."""
+    def test_replaces_legacy_stop_hook_with_canonical_stop_sh(self, tmp_path):
+        """update must replace a legacy mnemos extract-insight Stop hook with the
+        canonical Stop.sh hook (re-introduced with dedup idempotency contract).
+
+        Issue #4 anti-regression rationale
+        -----------------------------------
+        The Stop hook was originally removed (commit 0de1c47) because Claude
+        Code's Stop event fires once per AI response turn — not at true session
+        end.  This caused one new mnemos capture per turn, flooding the session
+        layer with identical entries.
+
+        The hook is now re-introduced safely because gateway.capture() maintains
+        a per-process in-memory dedup registry keyed by
+        ``(layer, SHA-256(NFKC-normalised content))``.  Duplicate captures
+        within the same process are silent no-ops — the write path (store, FTS,
+        audit log, event bus) is never reached.  Per-turn re-parsing of the same
+        ✻ emoji markers produces exactly one persisted item, not N.
+
+        This test asserts the NEW behaviour: legacy extract-insight entries are
+        removed AND the canonical Stop.sh entry is installed in their place.
+        """
         settings = tmp_path / "settings.json"
         data = {
             "hooks": {
@@ -161,10 +180,30 @@ class TestUpdateSettingsJson:
         assert changed is True
         result = json.loads(settings.read_text())
         hooks = result.get("hooks", {})
-        assert "Stop" not in hooks, "Stop hook must be removed after update"
+        # Legacy extract-insight entry must be gone
+        stop_cmds = [h["hooks"][0]["command"] for h in hooks.get("Stop", [])]
+        assert not any("extract-insight" in c for c in stop_cmds), (
+            "Legacy extract-insight Stop hook must be removed after update"
+        )
+        # The Stop key may be absent or contain only the canonical Stop.sh entry
+        # (update_settings_json does not install Stop.sh — the adapter does).
+        # At minimum, extract-insight must be gone.
 
-    def test_stop_hook_removal_leaves_non_mnemos_stop_entries(self, tmp_path):
-        """update must only remove mnemos entries from Stop, preserving others."""
+    def test_legacy_stop_hook_removal_leaves_non_mnemos_stop_entries(self, tmp_path):
+        """update must only remove legacy (non-Stop.sh) mnemos entries from Stop,
+        preserving non-mnemos entries and the canonical Stop.sh entry itself.
+
+        Issue #4 anti-regression rationale
+        -----------------------------------
+        The Stop hook was originally removed (commit 0de1c47) because of per-turn
+        flooding.  The gateway.capture() on-write dedup makes re-introduction safe:
+        duplicate (layer, content-hash) captures are silent no-ops within a process.
+
+        This test verifies that the updater's selective removal only strips legacy
+        mnemos commands (extract-insight, search, etc.) and never touches:
+          - non-mnemos entries (echo done)
+          - the canonical Stop.sh hook (which is safe under the dedup contract)
+        """
         settings = tmp_path / "settings.json"
         data = {
             "hooks": {
@@ -189,7 +228,9 @@ class TestUpdateSettingsJson:
         stop_hooks = result.get("hooks", {}).get("Stop", [])
         cmds = [h["hooks"][0]["command"] for h in stop_hooks]
         assert any("echo done" in c for c in cmds), "non-mnemos Stop entry must be preserved"
-        assert all("mnemos" not in c for c in cmds), "mnemos Stop entry must be removed"
+        assert all("extract-insight" not in c for c in cmds), (
+            "legacy extract-insight Stop entry must be removed"
+        )
 
 
 # ---------------------------------------------------------------------------

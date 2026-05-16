@@ -521,3 +521,199 @@ class TestEphemeralDefault:
         assert "session_id" in post.metadata, "session_id must be in front-matter metadata"
         assert post["run_id"] == gateway._run_id
         assert post["session_id"] == gateway._session_id
+
+
+class TestCaptureDedup:
+    """Tests for on-write dedup in gateway.capture() — Issue #4 anti-regression.
+
+    Background
+    ----------
+    The Stop hook (hooks/Stop.sh) fires once per AI response turn, not at true
+    session end.  Without dedup, re-parsing the same transcript on every turn
+    would flood the session layer with repeated captures of the same insight
+    (original Issue #4 that led to the Stop hook being removed in commit
+    0de1c47).
+
+    Re-introduction contract
+    ------------------------
+    gateway.capture() now maintains a per-gateway-instance in-memory dedup
+    registry keyed by (layer, SHA-256(NFKC-normalised content)).
+
+    - Duplicate captures within the same process return None (silent no-op).
+    - The storage, FTS, audit log, and event-bus paths are never reached for
+      duplicates.
+    - The dedup key is layer-scoped: (session, hash_A) and (global, hash_A)
+      are distinct keys, so cross-layer promotion is NOT blocked.
+    - Unicode NFKC normalization is applied before whitespace/case folding so
+      compatibility variants (full-width letters, ligatures, etc.) are treated
+      as identical content.
+    """
+
+    @pytest.fixture
+    def gateway(self, repo_root):
+        """Fresh MemoryGateway instance for each test."""
+        from core.gateway import MemoryGateway
+        return MemoryGateway(repo_root=repo_root)
+
+    @pytest.fixture
+    def repo_root(self, tmp_path):
+        """Minimal repo structure required by MemoryGateway."""
+        wiki = tmp_path / "wiki"
+        for d in ["global", "projects", "entities", "claims", "topics"]:
+            (wiki / d).mkdir(parents=True)
+        agent = tmp_path / ".agent"
+        for d in ["runs", "sessions", "state", "reports", "tools"]:
+            (agent / d).mkdir(parents=True)
+        (agent / "workflows" / "hooks").mkdir(parents=True)
+        import yaml
+        policy = {
+            "layers": {
+                "ephemeral": {
+                    "path_template": ".agent/runs/{run_id}/scratch/",
+                    "promotes_to": "working",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "working": {
+                    "path_template": ".agent/runs/{run_id}/working/",
+                    "promotes_to": "session",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "session": {
+                    "path_template": ".agent/sessions/{session_id}/",
+                    "promotes_to": "project",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "project": {
+                    "path_template": "wiki/projects/",
+                    "promotes_to": "global",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "global": {
+                    "path_template": "wiki/global/",
+                    "promotes_to": None,
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+            }
+        }
+        (tmp_path / "wiki" / "policy.yaml").write_text(yaml.dump(policy))
+        return tmp_path
+
+    def test_first_capture_returns_item_id(self, gateway, repo_root):
+        """First capture of unique content must return a non-None item ID."""
+        item_id = gateway.capture(content="Unique insight for dedup test", layer="session")
+        assert item_id is not None, "First capture must return an item_id, not None"
+        assert isinstance(item_id, str)
+        assert len(item_id) > 0
+
+    def test_duplicate_capture_returns_none(self, gateway, repo_root):
+        """Second capture of the same content in the same layer must return None.
+
+        This is the core anti-regression test for Issue #4: the Stop hook fires
+        on every AI turn, so re-parsing the same transcript marker must be a
+        silent no-op after the first write.
+        """
+        content = "Duplicate capture should be suppressed"
+        first_id = gateway.capture(content=content, layer="session")
+        assert first_id is not None, "First capture must succeed"
+
+        second_result = gateway.capture(content=content, layer="session")
+        assert second_result is None, (
+            "Duplicate capture (same layer, same content) must return None — "
+            "the gateway dedup registry should suppress it as a silent no-op"
+        )
+
+    def test_cross_layer_not_deduped(self, gateway, repo_root):
+        """Same content captured in different layers must NOT be deduped.
+
+        Dedup key is (layer, hash) — not just hash — so that cross-layer
+        promotion (session → project → global) remains unblocked.  Capturing
+        the same insight in 'session' and then in 'global' represents a
+        legitimate promotion event, not a duplicate.
+        """
+        content = "Insight that gets promoted across layers"
+        session_id = gateway.capture(content=content, layer="session")
+        assert session_id is not None, "Session-layer capture must succeed"
+
+        global_id = gateway.capture(content=content, layer="global")
+        assert global_id is not None, (
+            "Cross-layer capture of the same content must NOT be deduped — "
+            "promotion across layers must remain unblocked"
+        )
+        assert session_id != global_id, "Each layer must produce its own item_id"
+
+    def test_different_content_same_layer_not_deduped(self, gateway, repo_root):
+        """Different content in the same layer must each return a distinct item_id."""
+        id1 = gateway.capture(content="First distinct insight", layer="session")
+        id2 = gateway.capture(content="Second distinct insight", layer="session")
+        assert id1 is not None
+        assert id2 is not None
+        assert id1 != id2, "Different content must produce different item IDs"
+
+    def test_nfkc_equivalent_forms_are_deduped(self, gateway, repo_root):
+        """NFKC-equivalent Unicode forms must be treated as the same content.
+
+        NFKC normalization collapses compatibility variants — for example,
+        full-width Latin letters (U+FF21..U+FF3A) are canonicalised to their
+        ASCII equivalents.  Two strings that differ only in Unicode
+        compatibility representation must hash to the same dedup key and the
+        second capture must return None.
+        """
+        # Regular ASCII form
+        ascii_content = "decision about architecture"
+        # Full-width Unicode form — NFKC normalises these to ASCII equivalents
+        fullwidth_content = "ｄｅｃｉｓｉｏｎ ａｂｏｕｔ ａｒｃｈｉｔｅｃｔｕｒｅ"
+
+        first_id = gateway.capture(content=ascii_content, layer="session")
+        assert first_id is not None
+
+        second_result = gateway.capture(content=fullwidth_content, layer="session")
+        assert second_result is None, (
+            "NFKC-equivalent content (full-width vs ASCII) must be treated as "
+            "a duplicate and return None"
+        )
+
+    def test_whitespace_normalisation_deduplication(self, gateway, repo_root):
+        """Content differing only in internal whitespace must be deduped.
+
+        After NFKC, the normaliser collapses all whitespace runs to a single
+        space and strips leading/trailing whitespace.  Captures that differ
+        only in spacing are duplicates.
+        """
+        content_clean = "insight about caching strategy"
+        content_extra_spaces = "  insight  about   caching   strategy  "
+
+        first_id = gateway.capture(content=content_clean, layer="session")
+        assert first_id is not None
+
+        second_result = gateway.capture(content=content_extra_spaces, layer="session")
+        assert second_result is None, (
+            "Content differing only in whitespace must be deduped after "
+            "NFKC + whitespace normalisation"
+        )
+
+    def test_dedup_registry_is_per_instance(self, repo_root):
+        """Two separate MemoryGateway instances must NOT share the dedup registry.
+
+        The dedup registry is an in-memory per-instance dict.  A new gateway
+        instance (new process, new hook invocation) starts with an empty
+        registry and captures the item again — this is correct behaviour,
+        because the Stop hook is designed to fire per-turn, and each turn
+        spawns a fresh mnemos process.
+        """
+        from core.gateway import MemoryGateway
+        content = "Shared content across two gateway instances"
+
+        gw1 = MemoryGateway(repo_root=repo_root)
+        id1 = gw1.capture(content=content, layer="session")
+        assert id1 is not None
+
+        # Second instance must NOT see gw1's dedup registry
+        gw2 = MemoryGateway(repo_root=repo_root)
+        id2 = gw2.capture(content=content, layer="session")
+        # gw2 may write a duplicate file but must not see None from its own
+        # fresh dedup registry — the on-write gateway-level dedup is
+        # process-scoped, not storage-scoped (storage dedup is handled by bg.py)
+        assert id2 is not None, (
+            "A fresh gateway instance must not inherit the dedup registry of "
+            "another instance — each process starts clean"
+        )

@@ -179,17 +179,37 @@ def update_settings_json(settings_path: Path) -> tuple[bool, str]:
         if repo_root:
             break
 
-    # Remove legacy Stop hook (mnemos extract-insight was removed in Issue #4 fix)
+    # Stop hook: replace any legacy mnemos Stop entries (including the
+    # old extract-insight hook removed in Issue #4) with the canonical
+    # Stop.sh entry — which is now safe because gateway.capture() deduplicates
+    # writes by (layer, NFKC-normalised content hash).
+    #
+    # This function is the low-level helper used by TestUpdateSettingsJson tests;
+    # the ClaudeCodeAdapter._update_settings_json() path handles the full
+    # install/update including Stop hook registration.  This function is kept
+    # for backwards-compatibility with the updater module API.
+    #
+    # LEGACY BEHAVIOUR PRESERVED: entries that contain any legacy mnemos command
+    # (extract-insight, mnemos search, etc.) are removed.  The caller (adapter)
+    # is responsible for installing the canonical Stop.sh entry separately.
     if "Stop" in hooks:
         stop_list = hooks["Stop"]
-        has_mnemos_stop = any(
-            any("mnemos" in h.get("command", "") for h in entry.get("hooks", []))
+        has_legacy_mnemos_stop = any(
+            any(
+                ("mnemos" in h.get("command", ""))
+                and ("Stop.sh" not in h.get("command", ""))
+                for h in entry.get("hooks", [])
+            )
             for entry in stop_list
         )
-        if has_mnemos_stop:
+        if has_legacy_mnemos_stop:
             cleaned_stop = [
                 e for e in stop_list
-                if not any("mnemos" in h.get("command", "") for h in e.get("hooks", []))
+                if not any(
+                    ("mnemos" in h.get("command", ""))
+                    and ("Stop.sh" not in h.get("command", ""))
+                    for h in e.get("hooks", [])
+                )
             ]
             changed = True
             if cleaned_stop:

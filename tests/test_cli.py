@@ -106,7 +106,10 @@ class TestMemoryCaptureCommand:
         assert result.exit_code != 0 or "error" in result.output.lower()
 
     def test_memory_capture_notification_short_content(self, runner, cli_with_repo):
-        """capture notification must not add '...' when content <= 60 chars."""
+        """capture notification must not add '...' when content <= 60 chars.
+
+        New emoji-based format (no (layer) suffix):  ✻ 🧠 <brief>
+        """
         content = "Short insight"
         result = runner.invoke(
             cli_with_repo,
@@ -116,10 +119,14 @@ class TestMemoryCaptureCommand:
         assert "🧠" in result.output
         assert content in result.output
         assert "..." not in result.output
-        assert "(global)" in result.output
+        # New format omits the (layer) suffix — the emoji identifies the layer
+        assert "(global)" not in result.output
 
     def test_memory_capture_notification_long_content(self, runner, cli_with_repo):
-        """capture notification must truncate content > 60 chars with '...'."""
+        """capture notification must truncate content > 60 chars with '...'.
+
+        New emoji-based format (no (layer) suffix):  ✻ 🧠 <brief>...
+        """
         content = "A" * 80  # 80 chars, more than 60
         result = runner.invoke(
             cli_with_repo,
@@ -129,7 +136,8 @@ class TestMemoryCaptureCommand:
         assert "🧠" in result.output
         preview = content[:60]
         assert f"{preview}..." in result.output
-        assert "(global)" in result.output
+        # New format omits the (layer) suffix — the emoji identifies the layer
+        assert "(global)" not in result.output
 
     def test_memory_capture_notification_exactly_60_chars(self, runner, cli_with_repo):
         """capture notification must not add '...' when content is exactly 60 chars."""
@@ -381,14 +389,21 @@ class TestCaptureEphemeralDefault:
     """CLI tests for ephemeral-first capture default (issue #12)."""
 
     def test_capture_without_layer_defaults_to_ephemeral(self, runner, cli_with_repo, repo_root):
-        """capture without --layer must write to .agent/runs/.../scratch/ and report ephemeral."""
+        """capture without --layer must write to .agent/runs/.../scratch/ and report ephemeral.
+
+        New emoji-based notification format omits the (layer) suffix.
+        The ephemeral layer maps to no emoji (ephemeral is not user-visible in ✻
+        notification), so the output contains 'captured' but no (ephemeral) text.
+        """
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--content", "Ephemeral CLI default test", "--no-color"],
         )
         assert result.exit_code == 0, result.output
         assert "captured" in result.output.lower()
-        assert "(ephemeral)" in result.output
+        # New format omits (layer) suffix — ephemeral captures may show the ✻
+        # notification or just the 'captured: <id>' line without a layer name
+        assert "(ephemeral)" not in result.output
 
         # File must exist somewhere under .agent/runs/{run_id}/scratch/
         agent_runs = repo_root / ".agent" / "runs"
@@ -396,13 +411,17 @@ class TestCaptureEphemeralDefault:
         assert len(matches) >= 1, f"Expected ephemeral file under {agent_runs}"
 
     def test_capture_explicit_layer_still_works(self, runner, cli_with_repo, repo_root):
-        """capture with --layer global must still write to wiki/global/."""
+        """capture with --layer global must still write to wiki/global/.
+
+        New emoji-based notification format: ✻ 🧠 <brief>  (no (global) suffix).
+        """
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "Explicit global layer", "--no-color"],
         )
         assert result.exit_code == 0, result.output
-        assert "(global)" in result.output
+        assert "🧠" in result.output  # global emoji must appear
+        assert "(global)" not in result.output  # suffix is gone in new format
         matches = list((repo_root / "wiki" / "global").glob("*.md"))
         assert len(matches) >= 1
 
@@ -433,7 +452,10 @@ class TestCaptureANSIOutput:
         assert "\033[" in result.output
 
     def test_capture_notice_no_color_flag_strips_ansi(self, runner, cli_with_repo):
-        """--no-color flag must produce plain text output without ANSI codes."""
+        """--no-color flag must produce plain text output without ANSI codes.
+
+        New emoji-based format: ✻ 🧠 <brief>  (no (global) suffix).
+        """
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "Plain text output test", "--no-color"],
@@ -442,10 +464,14 @@ class TestCaptureANSIOutput:
         assert result.exit_code == 0, result.output
         assert "🧠" in result.output
         assert "\033[" not in result.output
-        assert "(global)" in result.output
+        # New format omits (layer) suffix
+        assert "(global)" not in result.output
 
     def test_capture_notice_no_color_env_strips_ansi(self, runner, cli_with_repo):
-        """NO_COLOR env var must produce plain text output without ANSI codes."""
+        """NO_COLOR env var must produce plain text output without ANSI codes.
+
+        New emoji-based format: ✻ 🧠 <brief>  (no (global) suffix).
+        """
         import os
         env = dict(os.environ)
         env["NO_COLOR"] = "1"
@@ -458,7 +484,8 @@ class TestCaptureANSIOutput:
         assert result.exit_code == 0, result.output
         assert "🧠" in result.output
         assert "\033[" not in result.output
-        assert "(global)" in result.output
+        # New format omits (layer) suffix
+        assert "(global)" not in result.output
 
     def test_capture_notice_project_layer_uses_blue(self, runner, cli_with_repo):
         """project layer notice must use blue ANSI color code."""

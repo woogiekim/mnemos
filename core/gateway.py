@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import os
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,33 @@ from core.search import SearchMiddleware
 
 DEFAULT_QUALITY_SCORE = 0.8
 _CONTENT_PREVIEW_LENGTH = 60
+
+
+# ---------------------------------------------------------------------------
+# On-write dedup helpers
+# ---------------------------------------------------------------------------
+
+def _nfkc_normalise(content: str) -> str:
+    """Apply NFKC Unicode normalisation, strip, collapse whitespace, lowercase.
+
+    This is the canonical normalisation used for on-write dedup in
+    :meth:`MemoryGateway.capture`.  It matches the same logic used by
+    ``core.bg._normalise_content`` so background GC dedup and on-write dedup
+    are consistent.
+
+    Dedup key: ``(layer, SHA-256(nfkc_normalise(content)))``.
+    Promotion across layers is NOT blocked by dedup — the key is
+    layer-scoped so the same content can legitimately exist in ``session``
+    and ``global`` simultaneously.
+    """
+    import re
+    nfkc = unicodedata.normalize("NFKC", content)
+    return re.sub(r"\s+", " ", nfkc.strip()).lower()
+
+
+def _capture_content_hash(content: str) -> str:
+    """Return SHA-256 hex digest of the NFKC-normalised content."""
+    return hashlib.sha256(_nfkc_normalise(content).encode("utf-8")).hexdigest()
 
 
 def _resolve_repo_root() -> Path:
@@ -97,6 +126,9 @@ class MemoryGateway:
         # Auto-generated IDs scoped to this gateway instance (i.e. this process)
         self._run_id: str = str(uuid.uuid4())
         self._session_id: str = str(uuid.uuid4())
+        # On-write dedup registry: maps (layer, content_hash) → item_id.
+        # Keyed by layer so cross-layer promotion is never blocked.
+        self._capture_dedup: dict[tuple[str, str], str] = {}
 
     # ------------------------------------------------------------------ #
     # Observability logger access                                           #
@@ -168,7 +200,7 @@ class MemoryGateway:
         run_id: str | None = None,
         session_id: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> str | None:
         """Capture a new memory item into the target layer.
 
         When *layer* is omitted it defaults to ``"ephemeral"``.  The
@@ -176,6 +208,27 @@ class MemoryGateway:
         auto-generated values when not supplied by the caller, ensuring
         that ephemeral items always land in a deterministic path for the
         duration of the process.
+
+        On-write dedup
+        --------------
+        Before writing, the content is NFKC-normalised and hashed.  The
+        dedup key is ``(layer, SHA-256(nfkc_normalise(content)))``.  If an
+        item with the same key was already captured by **this gateway
+        instance** in the current process, the call is a silent no-op and
+        returns ``None``.
+
+        **Why per-instance?**  The dedup registry lives in memory so it does
+        not require a cross-process lock or a full store scan.  It covers the
+        most common flooding scenario — a Stop hook firing once per AI
+        response turn and re-submitting identical content — without adding
+        significant latency to normal captures.
+
+        **Cross-layer promotion is not blocked.**  The dedup key is
+        layer-scoped, so capturing the same content into ``session`` after
+        it has already been promoted to ``global`` is allowed and returns a
+        new item_id.  This matches the invariant stated in the requirements:
+        ``dedup key is (layer, hash) — promotion across layers is NOT blocked
+        by dedup``.
         """
         if layer is None:
             layer = _DEFAULT_LAYER
@@ -186,9 +239,28 @@ class MemoryGateway:
         if session_id is None:
             session_id = self._session_id
 
+        # ------------------------------------------------------------------
+        # On-write dedup check (Issue #4 anti-regression)
+        # ------------------------------------------------------------------
+        # This gate makes Stop hook re-introduction safe: a Stop event that
+        # fires per AI response turn will parse the same capture markers from
+        # the conversation transcript on every turn.  Without dedup, that
+        # floods the session layer with identical items.  With dedup, the
+        # second and subsequent identical captures within the same gateway
+        # process are silent no-ops — the write path (store, FTS, audit log,
+        # hooks) is never reached.
+        content_hash = _capture_content_hash(content)
+        dedup_key = (layer, content_hash)
+        if dedup_key in self._capture_dedup:
+            return None
+
         self._policy.validate_capture(layer=layer, item={"content": content})
 
         item_id = item_id or str(uuid.uuid4())
+        # Register in the dedup cache immediately — before the write — so that
+        # a concurrent duplicate call in the same process is also blocked even
+        # if the write is still in progress.
+        self._capture_dedup[dedup_key] = item_id
         now = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
 
         metadata: dict[str, Any] = {

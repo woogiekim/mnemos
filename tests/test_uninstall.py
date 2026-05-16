@@ -174,8 +174,26 @@ class TestRemoveSettingsJsonHooks:
         result = json.loads(settings.read_text())
         assert "hooks" not in result
 
-    def test_removes_stop_hook_with_mnemos_command(self, tmp_path):
-        """uninstall must remove legacy Stop hook containing any mnemos command."""
+    def test_removes_stop_hook_with_legacy_mnemos_command(self, tmp_path):
+        """uninstall must remove the canonical Stop hook (Stop.sh) and any legacy
+        mnemos Stop entries from settings.json.
+
+        Issue #4 anti-regression rationale
+        -----------------------------------
+        The Stop hook was originally removed (commit 0de1c47) because Claude
+        Code's Stop event fires once per AI response turn (not at session end),
+        causing per-turn flooding of the session layer with identical entries.
+
+        The hook has been re-introduced (feat/emoji-layer-markers-and-dedup)
+        with an idempotency guarantee: gateway.capture() now maintains an
+        in-memory dedup registry keyed by
+        ``(layer, SHA-256(NFKC-normalised content))``.  Duplicate captures in
+        the same process are silent no-ops — the write path is never reached.
+
+        Uninstall is expected to remove ALL mnemos Stop entries (both the
+        canonical Stop.sh and any legacy extract-insight entries) so the user
+        returns to a clean state.  This test asserts that behaviour.
+        """
         settings = tmp_path / "settings.json"
         data = {
             "hooks": {
@@ -198,7 +216,20 @@ class TestRemoveSettingsJsonHooks:
         assert "Stop" not in hooks, "Stop hook must be removed by uninstall"
 
     def test_removes_all_hook_types_including_stop(self, tmp_path):
-        """uninstall removes PostToolUse, UserPromptSubmit, and Stop in one pass."""
+        """uninstall removes PostToolUse, UserPromptSubmit, and Stop in one pass.
+
+        Issue #4 anti-regression rationale
+        -----------------------------------
+        The Stop hook (Stop.sh) is installed by the ClaudeCodeAdapter as part of
+        the emoji-layer-markers-and-dedup feature.  It is safe under the dedup
+        contract (gateway.capture() deduplicates by (layer, content-hash)) but
+        must be fully removed on uninstall so the user's settings.json returns to
+        a clean state with no mnemos hooks.
+
+        This test verifies that all three hook types — PostToolUse, UserPromptSubmit,
+        and Stop — are stripped in a single remove_settings_json_hooks() call,
+        leaving no ``hooks`` key when all entries were mnemos-owned.
+        """
         settings = tmp_path / "settings.json"
         data = {
             "hooks": {

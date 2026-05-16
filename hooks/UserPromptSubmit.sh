@@ -418,6 +418,16 @@ fi
 # each response, so the memory base grows organically from conversations.
 # Emitted unconditionally (even when no search results were found) because
 # the reminder should fire regardless of whether past memories were surfaced.
+#
+# Notification grammar (new in this commit):
+#   ✻ 💡 <brief>   — session layer
+#   ✻ 💾 <brief>   — project layer
+#   ✻ 🧠 <brief>   — global layer
+#
+# The (layer) text suffix is dropped.  During the 2-week grace period the
+# Stop hook's regex (hooks/Stop.sh) accepts BOTH forms:
+#   ✻ 💡 <brief>            ← new emoji-only form
+#   ✻ 🧠 <brief> (session)  ← legacy suffix form (parsed but not emitted)
 # ---------------------------------------------------------------------------
 echo ""
 echo "<mnemos-capture-protocol>"
@@ -432,7 +442,8 @@ echo "  - anything a future session would benefit from knowing"
 echo "Do NOT capture: trivial yes/no answers, simple file lookups, or steps already"
 echo "visible in the code or git history."
 echo "After \`mnemos capture\` returns \`captured: <uuid>\`, notify inline in this EXACT format:"
-echo "  ✻ 🧠 <brief description> (session) [id: <uuid>]"
+echo "  ✻ 💡 <brief description> [id: <uuid>]"
+echo "Use the emoji that matches the capture layer: 💡 session · 💾 project · 🧠 global"
 echo "The [id: <uuid>] suffix is MANDATORY and must be the real uuid printed by the tool call."
 echo "Without a real id from a tool call, the notification format is invalid — never fabricate or omit the id."
 echo "</mnemos-capture-protocol>"
