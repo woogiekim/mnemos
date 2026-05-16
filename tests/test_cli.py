@@ -465,3 +465,59 @@ class TestCaptureANSIOutput:
         assert result.exit_code == 0, result.output
         assert "✻" in result.output
         assert "🧠" in result.output
+
+
+class TestCaptureQuietFlag:
+    """Tests for --quiet flag on the capture command."""
+
+    def test_capture_quiet_suppresses_notice(self, runner, cli_with_repo):
+        """--quiet must suppress the capture_notice line (no ✻ 🧠)."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Quiet flag test", "--quiet"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "🧠" not in result.output
+        assert "✻" not in result.output
+
+    def test_capture_quiet_still_prints_id(self, runner, cli_with_repo):
+        """--quiet must still output 'captured: <id>'."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Quiet ID output test", "--quiet"],
+        )
+        assert result.exit_code == 0, result.output
+        assert result.output.strip().startswith("captured:")
+
+    def test_capture_quiet_output_is_only_id_line(self, runner, cli_with_repo):
+        """--quiet output must contain exactly one line: the captured ID."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Single line output test", "--quiet"],
+        )
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if l.strip()]
+        assert len(lines) == 1
+        assert lines[0].startswith("captured:")
+
+    def test_capture_without_quiet_still_shows_notice(self, runner, cli_with_repo):
+        """Without --quiet, capture_notice line must still be present."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Notice still shown test", "--no-color"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "🧠" in result.output
+        assert "✻" in result.output
+
+    def test_capture_quiet_with_ephemeral_layer(self, runner, cli_with_repo):
+        """--quiet must suppress notice for ephemeral layer too."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--content", "Ephemeral quiet test", "--quiet"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "🧠" not in result.output
+        lines = [l for l in result.output.splitlines() if l.strip()]
+        assert len(lines) == 1
+        assert lines[0].startswith("captured:")

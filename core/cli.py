@@ -33,6 +33,7 @@ def cli() -> None:
 @click.option("--run-id", default=None, help="Run ID for ephemeral/working layers.")
 @click.option("--session-id", default=None, help="Session ID for session layer.")
 @click.option("--no-color", "no_color", is_flag=True, default=False, help="Disable ANSI color output.")
+@click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress capture notification output.")
 def memory_capture(
     layer: str | None,
     content: str,
@@ -42,6 +43,7 @@ def memory_capture(
     run_id: str | None,
     session_id: str | None,
     no_color: bool,
+    quiet: bool,
 ) -> None:
     """Capture a new memory item into the target layer (default: ephemeral)."""
     gw = _get_gateway()
@@ -61,9 +63,10 @@ def memory_capture(
             click.echo(f"[mnemos] Skipped (duplicate): \"{preview}\"")
         else:
             click.echo(f"captured: {captured_id}")
-            preview = content[:60]
-            suffix = "..." if len(content) > 60 else ""
-            click.echo(capture_notice(f"{preview}{suffix}", effective_layer, no_color=no_color))
+            if not quiet:
+                preview = content[:60]
+                suffix = "..." if len(content) > 60 else ""
+                click.echo(capture_notice(f"{preview}{suffix}", effective_layer, no_color=no_color))
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)
