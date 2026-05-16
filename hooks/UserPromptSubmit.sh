@@ -29,6 +29,19 @@ TIMEOUT="${MNEMOS_HOOK_TIMEOUT:-8}"
 SEARCH_LIMIT=5
 SESSION_START_LIMIT=30
 
+# macOS does not ship `timeout`; use gtimeout (coreutils) or perl fallback.
+_timeout() {
+  local secs="$1"; shift
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  else
+    # No timeout binary — run without a hard limit (hook itself has a short budget).
+    "$@"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Guard: mnemos must be available and REPO_ROOT must be set
 # ---------------------------------------------------------------------------
@@ -88,7 +101,7 @@ if [ -n "${SESSION_KEY}" ] && [ ! -f "${SESSION_FLAG}" ]; then
   touch "${SESSION_FLAG}" 2>/dev/null || true
 
   STANDING_CONTEXT="$(
-    timeout "${TIMEOUT}" \
+    _timeout "${TIMEOUT}" \
       env MNEMOS_REPO_ROOT="${REPO_ROOT}" \
       mnemos list --layer project,global --limit "${SESSION_START_LIMIT}" \
       2>/dev/null || true
@@ -110,17 +123,16 @@ fi
 QUERY="${PROMPT:0:200}"
 
 SEARCH_RESULTS="$(
-  timeout "${TIMEOUT}" \
+  _timeout "${TIMEOUT}" \
     env MNEMOS_REPO_ROOT="${REPO_ROOT}" \
     mnemos search "${QUERY}" --limit "${SEARCH_LIMIT}" \
     2>/dev/null || true
 )"
 
-# Only emit if real results were found (not the "no results found" sentinel)
-if [ -n "${SEARCH_RESULTS}" ] && echo "${SEARCH_RESULTS}" | grep -qv "^no results found$"; then
-  # Filter out the summary line "([mnemos] Retrieved N memories)" when there
-  # are actual result lines above it.
-  RESULT_LINES="$(echo "${SEARCH_RESULTS}" | grep -v '^\[mnemos\]' || true)"
+# Only emit if real results were found (skip "no results found" sentinel)
+if [ -n "${SEARCH_RESULTS}" ] && ! echo "${SEARCH_RESULTS}" | grep -q "^no results found"; then
+  # Filter out summary line "[mnemos] Retrieved N memories" and empty lines.
+  RESULT_LINES="$(echo "${SEARCH_RESULTS}" | grep -v '^\[mnemos\]' | grep -v '^$' || true)"
   if [ -n "${RESULT_LINES}" ]; then
     echo "<mnemos-context type=\"search\" query=\"${QUERY:0:60}\">"
     echo "${RESULT_LINES}"
