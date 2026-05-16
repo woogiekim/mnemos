@@ -268,13 +268,18 @@ class TestCaptureProtocol:
         assert "constraint" in output
 
     def test_capture_protocol_prohibits_notification_without_tool_call(self, tmp_path):
-        """Protocol must explicitly forbid emitting ✻ 🧠 without a preceding successful
-        mnemos capture tool call (fixes issue #17 — fake notification without capture)."""
+        """Protocol must require a real capture id in the ✻ 🧠 notification format,
+        making fake notifications structurally impossible (Method A, closes #19).
+        Replaces the text-only prohibition from #17 (Method C)."""
         rc, output = _run_hook("explain this system", mnemos_repo_root=str(tmp_path))
         assert rc == 0
-        # The prohibition must be present in the protocol block
-        assert "NEVER emit" in output, (
-            "Protocol must explicitly forbid emitting ✻ 🧠 without a capture tool call"
+        # Old wording (Method C / #17) must be gone — replaced by Method A
+        assert "NEVER emit" not in output, (
+            "Old Method-C wording 'NEVER emit' must be replaced by Method-A id enforcement"
+        )
+        # Method A: notification format must include [id: <uuid>] suffix
+        assert "[id:" in output, (
+            "Protocol must require [id: <uuid>] suffix in ✻ 🧠 notification (Method A, #19)"
         )
         assert "mnemos capture" in output
 
@@ -284,8 +289,37 @@ class TestCaptureProtocol:
         rc, output = _run_hook("describe the architecture", mnemos_repo_root=str(tmp_path))
         assert rc == 0
         # Wording must make the gate explicit: captured ID must precede notification
-        assert "captured ID" in output or "returns a captured" in output, (
+        assert "captured: <uuid>" in output or "returns a captured" in output, (
             "Protocol must gate the notification on a confirmed capture ID from mnemos capture"
+        )
+
+    def test_capture_protocol_id_suffix_is_mandatory(self, tmp_path):
+        """Protocol must declare the [id: <uuid>] suffix MANDATORY so AI cannot omit it
+        (Method A enforcement, closes #19)."""
+        rc, output = _run_hook("describe the system design", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "MANDATORY" in output, (
+            "Protocol must declare [id: <uuid>] suffix as MANDATORY to prevent fabrication"
+        )
+
+    def test_capture_protocol_id_format_in_exact_notification(self, tmp_path):
+        """Protocol must show the EXACT notification format with [id: <uuid>] suffix
+        so there is no ambiguity about how to format the inline notification."""
+        rc, output = _run_hook("what is the capture flow?", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        # The format line must appear verbatim (or with ✻ 🧠 marker and [id:])
+        assert "[id: <uuid>]" in output, (
+            "Protocol must include the exact format '(session) [id: <uuid>]' as a template"
+        )
+
+    def test_capture_protocol_no_old_method_c_wording(self, tmp_path):
+        """The old Method-C prohibition text ('NEVER emit ✻ 🧠 without') must be absent.
+        It was replaced by Method-A structural enforcement in #19."""
+        rc, output = _run_hook("how does the pipeline work?", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "NEVER emit" not in output, (
+            "Old 'NEVER emit ✻ 🧠 without' wording from #17 must be removed; "
+            "Method A ([id: <uuid>] enforcement) supersedes it"
         )
 
     def test_capture_protocol_includes_session_id_flag(self, tmp_path):
