@@ -14,7 +14,10 @@
 #   2. /compact shortcut: emit a reminder to capture session insights before compacting.
 #   3. Per-prompt active search: extract key terms from the prompt and run
 #      `mnemos search` to surface relevant memories (top 5 results).
-#   4. Observability: log every hook invocation, search call, and session-start
+#   4. Per-prompt capture reminder: inject a <mnemos-capture-protocol> block that
+#      instructs Claude to call `mnemos capture --quiet` after each response turn,
+#      so the memory base grows organically from conversations.
+#   5. Observability: log every hook invocation, search call, and session-start
 #      event to wiki/observability.jsonl (async background write, zero latency impact).
 #
 # Environment variables:
@@ -333,7 +336,7 @@ while IFS= read -r KW; do
     # Format: "  [fts] <memory-id>: <preview>"
     # Content lines (title:, applies_to:, etc.) must NOT be used as IDs.
     if echo "${LINE}" | grep -qE '^\s+\[fts\] '; then
-      RESULT_ID="$(echo "${LINE}" | sed 's/^[[:space:]]*\[fts\] \(.*\): .*/\1/')"
+      RESULT_ID="$(echo "${LINE}" | sed 's/^[[:space:]]*\[fts\] \([0-9a-f-]*\):.*/\1/')"
       [ -n "${RESULT_ID}" ] && SEARCH_RESULT_IDS="${SEARCH_RESULT_IDS:+${SEARCH_RESULT_IDS},}${RESULT_ID}"
     fi
 
@@ -404,5 +407,23 @@ print(json.dumps(entry, ensure_ascii=False))
 
   [ -n "${OBS_ENTRY}" ] && _obs_append "${OBS_ENTRY}"
 fi
+
+# ---------------------------------------------------------------------------
+# Capture protocol reminder — injected on every prompt turn.
+#
+# This block tells Claude to proactively call `mnemos capture` after
+# each response, so the memory base grows organically from conversations.
+# Emitted unconditionally (even when no search results were found) because
+# the reminder should fire regardless of whether past memories were surfaced.
+# ---------------------------------------------------------------------------
+echo ""
+echo "<mnemos-capture-protocol>"
+echo "After responding, proactively capture new insights using:"
+echo "  mnemos capture --content \"<insight>\" --quiet --layer session"
+echo "Capture when you learn: a decision, user preference, architecture choice,"
+echo "workflow pattern, or any fact worth recalling in a future session."
+echo "Do NOT capture: trivial info, temporary steps, or the current task description."
+echo "Notify the user inline: ✻ 🧠 <brief description> (session)"
+echo "</mnemos-capture-protocol>"
 
 exit 0
