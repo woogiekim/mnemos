@@ -333,7 +333,7 @@ while IFS= read -r KW; do
     # Format: "  [fts] <memory-id>: <preview>"
     # Content lines (title:, applies_to:, etc.) must NOT be used as IDs.
     if echo "${LINE}" | grep -qE '^\s+\[fts\] '; then
-      RESULT_ID="$(echo "${LINE}" | sed 's/^[[:space:]]*\[fts\] \(.*\): .*/\1/')"
+      RESULT_ID="$(echo "${LINE}" | sed 's/^[[:space:]]*\[fts\] \([0-9a-f-]*\):.*/\1/')"
       [ -n "${RESULT_ID}" ] && SEARCH_RESULT_IDS="${SEARCH_RESULT_IDS:+${SEARCH_RESULT_IDS},}${RESULT_ID}"
     fi
 
