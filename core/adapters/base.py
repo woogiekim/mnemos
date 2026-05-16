@@ -29,7 +29,13 @@ Do NOT capture:
 - Transient conversation, low-confidence assumptions, scratch work
 
 All captured insights begin in the session layer.
-Promotion to project or global layer happens through mnemos promotion rules only."""
+Promotion to project or global layer happens through mnemos promotion rules only.
+
+### Capture interaction pattern
+- Capture proactively — do NOT ask permission before calling `mnemos capture`
+- After capturing, notify in one line: `Captured: <brief description> (ID: xxxx)`
+- If the user says the capture is unnecessary, delete it: `mnemos delete <id>`
+- Never prompt "Should I capture this?" — make the judgment and act"""
 
 
 class HostAdapter(ABC):
