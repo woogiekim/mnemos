@@ -7,36 +7,18 @@ import re
 import shutil
 from pathlib import Path
 
-from core.adapters.base import HostAdapter
+from core.adapters.base import HostAdapter, MNEMOS_BEHAVIOR_BLOCK
 
 
 # ---------------------------------------------------------------------------
 # Canonical managed block content (mirrors install.sh)
 # ---------------------------------------------------------------------------
 
-CLAUDE_MD_BLOCK = """\
-<!-- mnemos-start -->
-## Memory (mnemos)
-When asked about past context, notes, or decisions, run:
-`mnemos search <query>`
-This searches your personal memory store managed by mnemos.
-
-### Capturing knowledge
-Use `mnemos capture "<insight>"` when you identify:
-- Stable project decisions
-- Architecture constraints
-- User preferences
-- Reusable workflows
-- Important operational knowledge
-- Persistent project context
-
-Do NOT capture:
-- Temporary debugging, speculative reasoning, incomplete thoughts
-- Transient conversation, low-confidence assumptions, scratch work
-
-All captured insights begin in the session layer.
-Promotion to project or global layer happens through mnemos promotion rules only.
-<!-- mnemos-end -->"""
+CLAUDE_MD_BLOCK = (
+    "<!-- mnemos-start -->\n"
+    + MNEMOS_BEHAVIOR_BLOCK
+    + "\n<!-- mnemos-end -->"
+)
 
 # Hook definitions that install.sh injects.
 _POST_TOOL_USE_HOOK_TEMPLATE = {

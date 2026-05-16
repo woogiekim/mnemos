@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from core.adapters import ClaudeCodeAdapter, CursorAdapter, HostAdapter
+from core.adapters.base import MNEMOS_BEHAVIOR_BLOCK
 from core.adapters.claude import CLAUDE_MD_BLOCK
 from core.adapters.cursor import CURSOR_RULES_BLOCK
 
@@ -520,3 +521,55 @@ class TestAdapterNames:
 
     def test_cursor_adapter_name(self):
         assert CursorAdapter().name == "Cursor"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral block parity across adapters
+# ---------------------------------------------------------------------------
+
+class TestMnemosBehaviorBlockParity:
+    """Verify that all adapter managed blocks share the canonical behavior text."""
+
+    def test_claude_md_block_contains_behavior_block(self):
+        """CLAUDE_MD_BLOCK must embed MNEMOS_BEHAVIOR_BLOCK verbatim."""
+        assert MNEMOS_BEHAVIOR_BLOCK in CLAUDE_MD_BLOCK
+
+    def test_cursor_rules_block_contains_behavior_block(self):
+        """CURSOR_RULES_BLOCK must embed MNEMOS_BEHAVIOR_BLOCK verbatim."""
+        assert MNEMOS_BEHAVIOR_BLOCK in CURSOR_RULES_BLOCK
+
+    def test_both_blocks_contain_capture_rules(self):
+        """Both adapter blocks must include capture instructions."""
+        for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
+            assert "mnemos capture" in block, f"{label} missing capture instruction"
+            assert "Stable project decisions" in block, f"{label} missing capture examples"
+            assert "Do NOT capture" in block, f"{label} missing negative capture examples"
+
+    def test_both_blocks_contain_search_rules(self):
+        """Both adapter blocks must include search instructions."""
+        for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
+            assert "mnemos search" in block, f"{label} missing search instruction"
+
+    def test_both_blocks_contain_promotion_rules(self):
+        """Both adapter blocks must include layer promotion explanation."""
+        for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
+            assert "session layer" in block, f"{label} missing session layer reference"
+            assert "mnemos promotion rules" in block, f"{label} missing promotion rules reference"
+
+    def test_adapter_delimiters_are_preserved(self):
+        """Adapter-specific HTML comment delimiters must be preserved."""
+        assert CLAUDE_MD_BLOCK.startswith("<!-- mnemos-start -->")
+        assert CLAUDE_MD_BLOCK.endswith("<!-- mnemos-end -->")
+        assert CURSOR_RULES_BLOCK.startswith("<!-- mnemos:start -->")
+        assert CURSOR_RULES_BLOCK.endswith("<!-- mnemos:end -->")
+
+    def test_cursor_install_includes_full_capture_rules(self, tmp_path):
+        """Cursor install must write the full behavioral block including capture rules."""
+        home = _make_cursor_home(tmp_path)
+        CursorAdapter().install(home)
+
+        content = (home / ".cursor" / "rules").read_text()
+        assert "mnemos capture" in content
+        assert "Stable project decisions" in content
+        assert "Do NOT capture" in content
+        assert "mnemos promotion rules" in content
