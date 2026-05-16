@@ -33,7 +33,7 @@ Promotion to project or global layer happens through mnemos promotion rules only
 
 ### Capture interaction pattern
 - Capture proactively — do NOT ask permission before calling `mnemos capture`
-- After capturing, notify in one line: `Captured: <brief description> (ID: xxxx)`
+- After capturing, notify using blockquote: `> 🧠 기억됨: <brief description> (<layer>)`
 - If the user says the capture is unnecessary, delete it: `mnemos delete <id>`
 - Never prompt "Should I capture this?" — make the judgment and act"""
 

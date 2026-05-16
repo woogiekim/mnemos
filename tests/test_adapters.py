@@ -582,5 +582,6 @@ class TestMnemosBehaviorBlockParity:
 
     def test_behavior_block_capture_pattern_has_notify_and_delete_guidance(self):
         """Capture interaction pattern must specify notify format and delete-on-request."""
-        assert "(ID: xxxx)" in MNEMOS_BEHAVIOR_BLOCK
+        assert "기억됨" in MNEMOS_BEHAVIOR_BLOCK
+        assert "(<layer>)" in MNEMOS_BEHAVIOR_BLOCK
         assert "mnemos delete" in MNEMOS_BEHAVIOR_BLOCK
