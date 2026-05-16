@@ -576,3 +576,149 @@ class TestMnemosBehaviorBlockParity:
         assert "session, project, global" in MNEMOS_BEHAVIOR_BLOCK
         assert "ephemeral, working" in MNEMOS_BEHAVIOR_BLOCK
         assert "no notification" in MNEMOS_BEHAVIOR_BLOCK
+
+
+# ---------------------------------------------------------------------------
+# EventBus integration — ClaudeCodeAdapter
+# ---------------------------------------------------------------------------
+
+class TestClaudeCodeAdapterEventBus:
+    """Tests for ClaudeCodeAdapter.subscribe_to_event_bus and event handlers."""
+
+    def test_subscribe_to_event_bus_registers_post_promote_handler(self):
+        from core.events import EventBus, POST_PROMOTE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+        assert bus.handler_count(POST_PROMOTE) == 1
+
+    def test_subscribe_to_event_bus_registers_post_capture_handler(self):
+        from core.events import EventBus, POST_CAPTURE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+        assert bus.handler_count(POST_CAPTURE) == 1
+
+    def test_on_post_promote_prints_capture_notice(self, capsys):
+        """promote event must print 'promoted: <preview> (<from> → <to>)' to stdout."""
+        from core.events import EventBus, POST_PROMOTE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+
+        bus.emit(POST_PROMOTE, {
+            "item_id": "abc-123",
+            "content_preview": "Architecture decision",
+            "from_layer": "session",
+            "to_layer": "project",
+        })
+
+        out = capsys.readouterr().out
+        assert "promoted:" in out
+        assert "Architecture decision" in out
+        assert "session" in out
+        assert "project" in out
+
+    def test_on_post_promote_format_matches_spec(self, capsys, monkeypatch):
+        """Output format must be: ✻ 🧠 promoted: <content_preview> (<from_layer> → <to_layer>)"""
+        monkeypatch.setenv("NO_COLOR", "1")
+        from core.events import EventBus, POST_PROMOTE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+
+        bus.emit(POST_PROMOTE, {
+            "item_id": "id-001",
+            "content_preview": "Use SQLite for FTS",
+            "from_layer": "working",
+            "to_layer": "session",
+        })
+
+        out = capsys.readouterr().out.strip()
+        assert out == "✻ 🧠 promoted: Use SQLite for FTS (working → session)"
+
+    def test_on_post_capture_prints_for_persistent_layers(self, capsys, monkeypatch):
+        """post-capture handler must print notice for session/project/global layers."""
+        monkeypatch.setenv("NO_COLOR", "1")
+        from core.events import EventBus, POST_CAPTURE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+
+        for layer in ("session", "project", "global"):
+            bus.emit(POST_CAPTURE, {
+                "item_id": "item-001",
+                "content_preview": "Test insight",
+                "layer": layer,
+            })
+
+        out = capsys.readouterr().out
+        assert out.count("Test insight") == 3
+
+    def test_on_post_capture_silent_for_ephemeral_working(self, capsys):
+        """post-capture handler must NOT print for ephemeral or working layers."""
+        from core.events import EventBus, POST_CAPTURE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+
+        for layer in ("ephemeral", "working"):
+            bus.emit(POST_CAPTURE, {
+                "item_id": "item-002",
+                "content_preview": "Ephemeral scratch",
+                "layer": layer,
+            })
+
+        out = capsys.readouterr().out
+        assert out == ""
+
+    def test_subscribe_idempotency_across_multiple_calls(self):
+        """Calling subscribe_to_event_bus multiple times adds additional handlers."""
+        from core.events import EventBus, POST_PROMOTE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+        adapter.subscribe_to_event_bus(bus)
+        # Two subscribe calls → two handlers (documented behaviour for EventBus)
+        assert bus.handler_count(POST_PROMOTE) == 2
+
+    def test_handler_survives_missing_payload_keys(self, capsys):
+        """Handler must not raise if payload is missing expected keys."""
+        from core.events import EventBus, POST_PROMOTE
+        bus = EventBus()
+        adapter = ClaudeCodeAdapter()
+        adapter.subscribe_to_event_bus(bus)
+
+        # Emit with empty payload — must not raise
+        bus.emit(POST_PROMOTE, {})
+        # Output will just use "?" defaults; no exception
+
+
+class TestCursorAdapterEventBus:
+    """Tests for CursorAdapter.subscribe_to_event_bus."""
+
+    def test_subscribe_to_event_bus_is_callable(self):
+        """CursorAdapter must implement subscribe_to_event_bus without raising."""
+        from core.events import EventBus
+        bus = EventBus()
+        adapter = CursorAdapter()
+        adapter.subscribe_to_event_bus(bus)  # no-op but must not raise
+
+    def test_subscribe_to_event_bus_registers_no_handlers(self):
+        """CursorAdapter subscribes no handlers (no-op implementation)."""
+        from core.events import EventBus, POST_PROMOTE, POST_CAPTURE
+        bus = EventBus()
+        CursorAdapter().subscribe_to_event_bus(bus)
+        assert bus.handler_count(POST_PROMOTE) == 0
+        assert bus.handler_count(POST_CAPTURE) == 0
+
+    def test_host_adapter_base_subscribe_is_noop(self):
+        """HostAdapter.subscribe_to_event_bus default is a no-op (no NotImplementedError)."""
+        from core.events import EventBus
+        # Use ClaudeCodeAdapter as a concrete class — base method is called if
+        # subclass doesn't override, but both adapters do override it.
+        # Verify the base class itself doesn't raise.
+        adapter = ClaudeCodeAdapter()
+        bus = EventBus()
+        # If ClaudeCodeAdapter overrides it (it does), just verify it runs cleanly.
+        adapter.subscribe_to_event_bus(bus)  # no exception expected

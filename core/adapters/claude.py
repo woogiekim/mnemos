@@ -6,8 +6,12 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core.adapters.base import HostAdapter, MNEMOS_BEHAVIOR_BLOCK
+
+if TYPE_CHECKING:
+    from core.events import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -451,3 +455,65 @@ class ClaudeCodeAdapter(HostAdapter):
         diff = _unified_diff(str(claude_md_path), original, updated)
         claude_md_path.write_text(updated)
         return True, diff
+
+    # ------------------------------------------------------------------
+    # EventBus integration
+    # ------------------------------------------------------------------
+
+    # Layers that warrant a visible notification on direct capture.
+    # ephemeral and working are intentionally excluded (silent by design).
+    _NOTIFY_CAPTURE_LAYERS = frozenset({"session", "project", "global"})
+
+    def subscribe_to_event_bus(self, bus: "EventBus") -> None:
+        """Register in-process handlers on *bus* for promotion notifications.
+
+        Subscribes to:
+        - ``post-promote`` — prints a styled promotion notice to stdout.
+        - ``post-capture`` — prints a styled capture notice for persistent layers
+          (session, project, global) to stdout.
+        """
+        bus.subscribe("post-promote", self._on_post_promote)
+        bus.subscribe("post-capture", self._on_post_capture)
+
+    def _on_post_promote(self, payload: dict) -> None:
+        """Handle a ``post-promote`` event by printing a capture_notice-style line.
+
+        Output format (plain)::
+
+            ✻ 🧠 promoted: <content_preview> (<from_layer> → <to_layer>)
+
+        ANSI styling uses the destination layer's colour.  The notice is
+        suppressed when ``NO_COLOR`` is set in the environment (same
+        behaviour as :func:`~core.output.capture_notice`).
+        """
+        from core.output import ANSI_RESET, ANSI_ITALIC, ANSI_DIM, LAYER_COLOR
+
+        content_preview = payload.get("content_preview", "")
+        from_layer = payload.get("from_layer", "?")
+        to_layer = payload.get("to_layer", "?")
+        no_color = "NO_COLOR" in os.environ
+        plain = f"✻ 🧠 promoted: {content_preview} ({from_layer} → {to_layer})"
+        if no_color:
+            print(plain)
+        else:
+            color = LAYER_COLOR.get(to_layer, "\033[90m")
+            print(f"{color}{ANSI_DIM}{ANSI_ITALIC}{plain}{ANSI_RESET}")
+
+    def _on_post_capture(self, payload: dict) -> None:
+        """Handle a ``post-capture`` event by printing a notice for persistent layers.
+
+        Only session, project, and global layer captures produce output.
+        ephemeral and working captures are intentionally silent.
+
+        Output format::
+
+            ✻ 🧠 <content_preview> (<layer>)
+        """
+        from core.output import capture_notice
+
+        layer = payload.get("layer", "")
+        if layer not in self._NOTIFY_CAPTURE_LAYERS:
+            return
+        content_preview = payload.get("content_preview", "")
+        no_color = "NO_COLOR" in os.environ
+        print(capture_notice(content_preview, layer, no_color=no_color))

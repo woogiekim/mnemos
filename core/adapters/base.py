@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.events import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -115,4 +119,16 @@ class HostAdapter(ABC):
               - all_present is True if every expected hook/block is registered
               - missing_items is a list of human-readable descriptions of what
                 is absent (empty list when all_present is True)
+        """
+
+    def subscribe_to_event_bus(self, bus: "EventBus") -> None:
+        """Register this adapter's in-process event handlers on *bus*.
+
+        Override in subclasses that need to respond to memory lifecycle events
+        (e.g. printing a promotion notice to stdout).  The default
+        implementation is a no-op so that adapters that do not need
+        in-process notifications require no changes.
+
+        Args:
+            bus: The :class:`~core.events.EventBus` exposed by the gateway.
         """

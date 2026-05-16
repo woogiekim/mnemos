@@ -475,9 +475,16 @@ def memory_ingest_claude_md(
     """
     from agents.scanner import ClaudeMdScanner
     from agents.ingest import IngestAgent
+    from core.adapters.claude import ClaudeCodeAdapter
 
     root = Path(project_root).resolve() if project_root else Path.cwd().resolve()
     gw = _get_gateway()
+
+    # Wire the ClaudeCode adapter's in-process event handlers so that captures
+    # to global/project layers emit a promotion-style notice to stdout.
+    adapter = ClaudeCodeAdapter()
+    adapter.subscribe_to_event_bus(gw.event_bus)
+
     scanner = ClaudeMdScanner(project_root=root)
     agent = IngestAgent(gateway=gw)
 
