@@ -109,7 +109,7 @@ class TestClaudeCodeAdapterInstall:
         assert "mnemos ingest-claude-md" in post_cmd
 
         user_cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
-        assert "mnemos search" in user_cmd
+        assert "UserPromptSubmit.sh" in user_cmd
 
     def test_install_does_not_register_stop_hook(self, tmp_path):
         """install() must NOT register a Stop hook (fires per-response, not per-session)."""

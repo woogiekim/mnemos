@@ -41,14 +41,8 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
         {
             "type": "command",
             "command": (
-                'if [ "${CLAUDE_PROMPT}" = "/compact" ]; then\n'
-                '  echo "[mnemos] /compact detected — before compacting, '
-                'capture the key insights, decisions, and context from this session using mnemos capture --quiet. '
-                'Run mnemos capture --quiet for each significant item now."\n'
-                'else\n'
-                '  MNEMOS_REPO_ROOT="{repo_root}" mnemos search '
-                '"${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true\n'
-                'fi'
+                'MNEMOS_REPO_ROOT="{repo_root}" '
+                'bash "{hook_script}" 2>/dev/null || true'
             ),
         }
     ],
@@ -68,6 +62,7 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
             or "mnemos search" in cmd
             or "mnemos capture" in cmd
             or "mnemos extract-insight" in cmd  # legacy — removed in Issue #4
+            or "UserPromptSubmit.sh" in cmd  # active hook script (post-refactor)
         ):
             return True
     return False
@@ -81,6 +76,20 @@ def _extract_repo_root_from_hook(entry: dict) -> str:
         if m:
             return m.group(1)
     return os.environ.get("MNEMOS_REPO_ROOT", "")
+
+
+def _hook_script_path(repo_root: str) -> str:
+    """Return the absolute path to the UserPromptSubmit hook script."""
+    return str(Path(repo_root) / "hooks" / "UserPromptSubmit.sh")
+
+
+def _render_template(template: dict, repo_root: str) -> dict:
+    """Instantiate a hook template by substituting {repo_root} and {hook_script}."""
+    hook_script = _hook_script_path(repo_root)
+    raw = json.dumps(template)
+    raw = raw.replace("{repo_root}", repo_root)
+    raw = raw.replace("{hook_script}", hook_script)
+    return json.loads(raw)
 
 
 def _unified_diff(label: str, before: str, after: str) -> str:
@@ -165,7 +174,7 @@ class ClaudeCodeAdapter(HostAdapter):
         ]:
             hook_list = hooks.get(hook_type, [])
             non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
-            canonical = json.loads(json.dumps(template).replace("{repo_root}", repo_root))
+            canonical = _render_template(template, repo_root)
             new_list = non_mnemos + [canonical]
             if new_list != hook_list:
                 changed = True
@@ -272,9 +281,7 @@ class ClaudeCodeAdapter(HostAdapter):
         ]:
             hook_list = hooks.get(hook_type, [])
             non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
-            canonical = json.loads(
-                json.dumps(template).replace("{repo_root}", repo_root)
-            )
+            canonical = _render_template(template, repo_root)
             new_list = non_mnemos + [canonical]
             if new_list != hook_list:
                 changed = True
@@ -332,7 +339,7 @@ class ClaudeCodeAdapter(HostAdapter):
 
         Checks:
         - PostToolUse hook (mnemos ingest-claude-md) in settings.json
-        - UserPromptSubmit hook (mnemos search) in settings.json
+        - UserPromptSubmit hook (UserPromptSubmit.sh) in settings.json
         - Managed block (<!-- mnemos-start --> ... <!-- mnemos-end -->) in CLAUDE.md
 
         Returns:
@@ -351,7 +358,7 @@ class ClaudeCodeAdapter(HostAdapter):
                     missing.append("PostToolUse hook (settings.json)")
 
                 user_list = hooks.get("UserPromptSubmit", [])
-                if not any(_is_mnemos_hook_entry(e) and "mnemos search" in str(e) for e in user_list):
+                if not any(_is_mnemos_hook_entry(e) for e in user_list):
                     missing.append("UserPromptSubmit hook (settings.json)")
 
             except (json.JSONDecodeError, OSError):
