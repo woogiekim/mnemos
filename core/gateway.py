@@ -13,6 +13,7 @@ from core.log import AuditLogger
 from core.hooks import HookDispatcher
 from core.events import EventBus
 from core.fts import FTSIndex
+from core.observability import ObservabilityLogger
 from core.search import SearchMiddleware
 
 
@@ -84,6 +85,7 @@ class MemoryGateway:
         self._logger = AuditLogger(repo_root=self._root)
         self._hooks = HookDispatcher(repo_root=self._root)
         self._event_bus: EventBus = EventBus()
+        self._obs = ObservabilityLogger(repo_root=self._root)
         state_dir = Path(self._root) / ".agent" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         fts_db = str(state_dir / "fts.db")
@@ -95,6 +97,19 @@ class MemoryGateway:
         # Auto-generated IDs scoped to this gateway instance (i.e. this process)
         self._run_id: str = str(uuid.uuid4())
         self._session_id: str = str(uuid.uuid4())
+
+    # ------------------------------------------------------------------ #
+    # Observability logger access                                           #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def observability(self) -> ObservabilityLogger:
+        """Return the gateway's :class:`~core.observability.ObservabilityLogger`.
+
+        CLI commands (``mnemos audit``, ``mnemos stats``) and hooks read from
+        and write to this logger directly.
+        """
+        return self._obs
 
     # ------------------------------------------------------------------ #
     # Event bus access                                                      #
@@ -219,6 +234,14 @@ class MemoryGateway:
             "layer": layer,
         })
 
+        # Observability: record this capture event (async, non-blocking)
+        self._obs.log_capture(
+            memory_id=item_id,
+            layer=layer,
+            tags=tags or [],
+            session_id=session_id,
+        )
+
         return item_id
 
     # ------------------------------------------------------------------ #
@@ -272,6 +295,13 @@ class MemoryGateway:
                 self._auto_promote_if_eligible(item_id=result_item_id, item=item)
             except Exception:
                 pass
+
+        # Observability: record this search event (async, non-blocking)
+        self._obs.log_search(
+            keywords=[query],
+            results=results,
+            session_id=self._session_id,
+        )
 
         return results
 
@@ -384,6 +414,14 @@ class MemoryGateway:
             "from_layer": current_layer,
             "to_layer": target_layer,
         })
+
+        # Observability: record this promotion event (async, non-blocking)
+        self._obs.log_promotion(
+            memory_id=item_id,
+            from_layer=current_layer,
+            to_layer=target_layer,
+            session_id=session_id or self._session_id,
+        )
 
         return item_id
 
@@ -665,5 +703,13 @@ class MemoryGateway:
                         "reason": item_info["reason"],
                     },
                 )
+
+        # Observability: record the GC run (async, non-blocking)
+        self._obs.log_gc(
+            archived_count=len(report.archived_items),
+            dry_run=dry_run,
+            layers=layers,
+            session_id=self._session_id,
+        )
 
         return report

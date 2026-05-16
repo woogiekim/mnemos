@@ -557,6 +557,284 @@ def memory_gc(
             )
 
 
+@cli.command("bg-check")
+@click.option(
+    "--interval",
+    "interval_minutes",
+    default=None,
+    type=int,
+    help="Throttle interval in minutes (default: 5). Pass 0 to force a run.",
+)
+@click.option(
+    "--no-gc",
+    "gc_disabled",
+    is_flag=True,
+    default=False,
+    help="Skip garbage-collection phase.",
+)
+@click.option(
+    "--no-promote",
+    "promote_disabled",
+    is_flag=True,
+    default=False,
+    help="Skip auto-promotion phase.",
+)
+@click.option(
+    "--no-dedup",
+    "dedup_disabled",
+    is_flag=True,
+    default=False,
+    help="Skip duplicate-detection phase.",
+)
+@click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help="Bypass throttle and always run (useful for testing).",
+)
+@click.option(
+    "--verbose",
+    "verbose",
+    is_flag=True,
+    default=False,
+    help="Print a summary even when there is no activity.",
+)
+def bg_check_cmd(
+    interval_minutes: int | None,
+    gc_disabled: bool,
+    promote_disabled: bool,
+    dedup_disabled: bool,
+    force: bool,
+    verbose: bool,
+) -> None:
+    """Run autonomous background maintenance (GC + auto-promote + dedup).
+
+    \b
+    This command is intended to be called by the PostToolUse hook after every
+    Claude tool call.  It is throttled (runs at most once per --interval
+    minutes) and silent unless it actually does something.
+
+    When activity occurs, a <mnemos-context type="background-activity"> block
+    is emitted to stdout so Claude sees a brief summary injected into context.
+
+    \b
+    Examples:
+      mnemos bg-check                   # throttled, silent unless active
+      mnemos bg-check --force --verbose # always run, always print summary
+      mnemos bg-check --no-gc           # skip GC phase
+    """
+    from core.bg import (
+        run_background_check,
+        DEFAULT_INTERVAL_MINUTES,
+    )
+
+    gw = _get_gateway()
+    repo_root = str(gw._root)
+
+    effective_interval = DEFAULT_INTERVAL_MINUTES if interval_minutes is None else interval_minutes
+
+    result = run_background_check(
+        repo_root=repo_root,
+        interval_minutes=effective_interval,
+        gc_enabled=not gc_disabled,
+        auto_promote_enabled=not promote_disabled,
+        dedup_enabled=not dedup_disabled,
+        force=force or (interval_minutes == 0),
+    )
+
+    if not result.ran:
+        # Throttled — completely silent (no output)
+        return
+
+    if result.has_activity:
+        click.echo(result.to_context_block())
+    elif verbose:
+        click.echo(
+            f"[mnemos bg] check complete — nothing to do "
+            f"({result.elapsed_ms:.0f} ms)"
+        )
+
+
+@cli.command("audit")
+@click.option("--tail", "tail", default=20, type=int, help="Number of most recent entries to show (default: 20).")
+@click.option("--session", "session_id", default=None, help="Filter by session ID.")
+@click.option("--event", "events", default=None, help="Comma-separated event type filter (e.g. hook_search,capture).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output raw JSON lines instead of a table.")
+def audit_cmd(tail: int, session_id: str | None, events: str | None, as_json: bool) -> None:
+    """Show recent observability log entries (hook calls, captures, searches).
+
+    \b
+    Examples:
+      mnemos audit                         # last 20 events
+      mnemos audit --tail 50               # last 50 events
+      mnemos audit --session SESSION_ID    # filter by session
+      mnemos audit --event hook_search,capture  # filter by event type
+      mnemos audit --json                  # raw JSONL output
+    """
+    gw = _get_gateway()
+    obs = gw.observability
+
+    event_list = [e.strip() for e in events.split(",")] if events else None
+
+    entries = obs.read_entries(
+        tail=tail,
+        session_id=session_id,
+        events=event_list,
+    )
+
+    if not entries:
+        click.echo("no observability entries found")
+        return
+
+    if as_json:
+        import json as _json
+        for entry in entries:
+            click.echo(_json.dumps(entry, ensure_ascii=False))
+        return
+
+    # Human-readable table: timestamp | event | agent | detail
+    click.echo(f"{'TIMESTAMP':<22}  {'EVENT':<22}  {'AGENT':<10}  DETAIL")
+    click.echo("-" * 80)
+    for entry in entries:
+        ts = entry.get("ts", "")[:19]  # drop sub-second / Z
+        event = entry.get("event", "")
+        agent = entry.get("agent", "")
+        session = entry.get("session_id", "")[:12]
+
+        # Build a short human detail string per event type
+        if event in ("hook_search", "search"):
+            kws = ", ".join(entry.get("keywords", []))[:30]
+            cnt = entry.get("result_count", 0)
+            detail = f"kw={kws!r} results={cnt}"
+        elif event == "hook_session_start":
+            cnt = entry.get("memory_count", 0)
+            detail = f"session={session} memories_loaded={cnt}"
+        elif event == "capture":
+            mid = entry.get("memory_id", "")[:16]
+            layer = entry.get("layer", "")
+            tags = entry.get("tags", [])
+            detail = f"id={mid} layer={layer} tags={tags}"
+        elif event == "gc":
+            n = entry.get("archived_count", 0)
+            dr = " [dry-run]" if entry.get("dry_run") else ""
+            detail = f"archived={n}{dr}"
+        elif event == "promotion":
+            mid = entry.get("memory_id", "")[:16]
+            fl = entry.get("from_layer", "")
+            tl = entry.get("layer", "")
+            detail = f"id={mid} {fl}→{tl}"
+        elif event == "hook_post_tool":
+            tool = entry.get("tool_name", "")
+            detail = f"tool={tool} session={session}"
+        else:
+            detail = str(entry)[:60]
+
+        click.echo(f"{ts:<22}  {event:<22}  {agent:<10}  {detail}")
+
+    click.echo(f"\n[mnemos] {len(entries)} entries")
+
+
+@cli.command("stats")
+@click.option("--days", default=7, type=int, help="Lookback window in days (default: 7).")
+def stats_cmd(days: int) -> None:
+    """Show a usage dashboard: captures, searches, top keywords, top memories.
+
+    \b
+    Aggregates observability.jsonl and prints:
+      - Captures in the last N days (by layer)
+      - Hook search activity per day
+      - Top 5 most-searched keywords
+      - Top 5 most-surfaced memory IDs
+      - Last GC timestamp and archived count
+      - Total memories per layer (all-time)
+    """
+    import collections
+    from pathlib import Path as _Path
+
+    gw = _get_gateway()
+    obs = gw.observability
+    stats = obs.aggregate_stats(days=days)
+
+    # Count total memories per layer from the filesystem (live counts, not just log)
+    from core.layers import LAYER_STATIC_PATHS
+    layer_counts: dict[str, int] = {}
+    root = _Path(gw._root)
+    for layer, rel_path in LAYER_STATIC_PATHS.items():
+        layer_dir = root / rel_path
+        if layer_dir.exists():
+            layer_counts[layer] = len(list(layer_dir.glob("*.md")))
+        else:
+            layer_counts[layer] = 0
+
+    click.echo("=" * 60)
+    click.echo("  mnemos Usage Dashboard")
+    click.echo("=" * 60)
+
+    # -- Memory inventory (live) --
+    click.echo("")
+    click.echo("MEMORY INVENTORY (current):")
+    total_live = 0
+    for layer, count in sorted(layer_counts.items()):
+        click.echo(f"  {layer:<15} {count:>5} memories")
+        total_live += count
+    click.echo(f"  {'TOTAL':<15} {total_live:>5} memories")
+
+    # -- Capture activity in window --
+    click.echo("")
+    click.echo(f"CAPTURES (last {days} days):")
+    captures = stats["captures_by_layer"]
+    if captures:
+        for layer, count in sorted(captures.items(), key=lambda x: -x[1]):
+            click.echo(f"  {layer:<15} {count:>5}")
+    else:
+        click.echo("  (none)")
+
+    # -- Search/hook activity --
+    click.echo("")
+    click.echo(f"HOOK SEARCH ACTIVITY (last {days} days):")
+    spd = stats["searches_per_day"]
+    if spd:
+        for day in sorted(spd.keys()):
+            bar = "#" * min(spd[day], 40)
+            click.echo(f"  {day}  {bar} ({spd[day]})")
+    else:
+        click.echo("  (no hook searches logged)")
+    click.echo(f"  Total hook calls: {stats['hook_calls']}")
+
+    # -- Top keywords --
+    click.echo("")
+    click.echo(f"TOP KEYWORDS (last {days} days):")
+    if stats["top_keywords"]:
+        for i, (kw, cnt) in enumerate(stats["top_keywords"], 1):
+            click.echo(f"  {i}. {kw:<20} {cnt:>4}x")
+    else:
+        click.echo("  (no keywords tracked yet)")
+
+    # -- Top surfaced memories --
+    click.echo("")
+    click.echo(f"TOP SURFACED MEMORIES (last {days} days):")
+    if stats["top_surfaced_memories"]:
+        for i, (mid, cnt) in enumerate(stats["top_surfaced_memories"], 1):
+            click.echo(f"  {i}. {mid:<36}  surfaced {cnt}x")
+    else:
+        click.echo("  (no memories surfaced yet)")
+
+    # -- GC info --
+    click.echo("")
+    click.echo("GARBAGE COLLECTION:")
+    if stats["last_gc_ts"]:
+        click.echo(f"  Last GC: {stats['last_gc_ts'][:19]}")
+        click.echo(f"  Archived: {stats['last_gc_count']} memories")
+    else:
+        click.echo("  (no GC recorded)")
+
+    click.echo("")
+    click.echo(f"  Observability log: {obs._log_path}")
+    click.echo(f"  Total log entries: {stats['total_entries']}")
+    click.echo("=" * 60)
+
+
 @cli.command("ingest-claude-md")
 @click.option(
     "--project-root",
