@@ -82,6 +82,32 @@ class MemoryGateway:
         )
 
     # ------------------------------------------------------------------ #
+    # Internal: silent auto-promotion                                        #
+    # ------------------------------------------------------------------ #
+
+    def _auto_promote_if_eligible(
+        self,
+        item_id: str,
+        item: dict[str, Any],
+    ) -> None:
+        """Silently promote *item* if it meets promotion thresholds.
+
+        This is called as a side-effect after capture/search/read operations.
+        It never raises and never produces output — promotion is entirely
+        transparent to the caller.
+        """
+        try:
+            if not self._policy.check_promotion_eligible(item):
+                return
+            next_layer = self._policy.get_next_layer(item.get("layer", ""))
+            if next_layer is None:
+                return
+            self.promote(item_id=item_id, target_layer=next_layer)
+        except Exception:
+            # Swallow all errors: auto-promotion is best-effort
+            pass
+
+    # ------------------------------------------------------------------ #
     # Capture                                                               #
     # ------------------------------------------------------------------ #
 
@@ -167,8 +193,31 @@ class MemoryGateway:
         layers: list[str] | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Search across memory layers."""
-        return self._search.search(query=query, layers=layers, limit=limit)
+        """Search across memory layers.
+
+        After returning results, access_count is incremented for each hit and
+        each hit is checked for silent auto-promotion.
+        """
+        results = self._search.search(query=query, layers=layers, limit=limit)
+
+        # Side-effect: increment access_count and auto-promote eligible results
+        for result in results:
+            result_item_id = result.get("item_id")
+            if not result_item_id:
+                continue
+            try:
+                item = self._store.read(result_item_id)
+                new_count = item.get("access_count", 0) + 1
+                self._store.update(
+                    item["_path"],
+                    metadata_updates={"access_count": new_count},
+                )
+                item["access_count"] = new_count
+                self._auto_promote_if_eligible(item_id=result_item_id, item=item)
+            except Exception:
+                pass
+
+        return results
 
     # ------------------------------------------------------------------ #
     # Read                                                                  #
@@ -180,6 +229,11 @@ class MemoryGateway:
         new_count = item.get("access_count", 0) + 1
         self._store.update(item["_path"], metadata_updates={"access_count": new_count, "stage": "retrieved"})
         self._logger.append("read", item_id, item.get("layer", "unknown"))
+
+        # Side-effect: silently promote if eligible after access_count increment
+        item["access_count"] = new_count
+        self._auto_promote_if_eligible(item_id=item_id, item=item)
+
         return item
 
     # ------------------------------------------------------------------ #
@@ -343,6 +397,67 @@ class MemoryGateway:
 
         self._logger.append("forget", item_id, item.get("layer", "unknown"))
         self._hooks.fire("post-forget", {"item_id": item_id})
+
+    # ------------------------------------------------------------------ #
+    # Consolidate                                                           #
+    # ------------------------------------------------------------------ #
+
+    def consolidate(self) -> int:
+        """Sweep ALL memories across all layers and promote eligible ones.
+
+        This is the engine behind `mnemos consolidate`. It evaluates every
+        memory item against policy.yaml thresholds and promotes those that
+        qualify. Promotion decisions are fully owned by mnemos — AI has no role.
+
+        Returns the total number of items promoted.
+        """
+        from core.layers import LAYER_STATIC_PATHS
+
+        promoted_count = 0
+
+        # Collect all layers known to the store (static + dynamic)
+        static_layers = list(LAYER_STATIC_PATHS.keys())
+        dynamic_layers = ["ephemeral", "working", "session"]
+        all_layers = static_layers + [l for l in dynamic_layers if l not in static_layers]
+
+        for layer in all_layers:
+            # For dynamic layers that need run_id/session_id, scan the
+            # underlying directories directly to find all items.
+            if layer in ("ephemeral", "working"):
+                agent_runs = Path(self._root) / ".agent" / "runs"
+                if not agent_runs.exists():
+                    continue
+                run_dirs = [d for d in agent_runs.iterdir() if d.is_dir()]
+                sub = "scratch" if layer == "ephemeral" else "working"
+                paths = []
+                for rd in run_dirs:
+                    layer_dir = rd / sub
+                    if layer_dir.exists():
+                        paths.extend(layer_dir.glob("*.md"))
+            elif layer == "session":
+                agent_sessions = Path(self._root) / ".agent" / "sessions"
+                if not agent_sessions.exists():
+                    continue
+                paths = list(agent_sessions.rglob("*.md"))
+            else:
+                paths = list(self._store.list_layer(layer))
+
+            for item_path in paths:
+                try:
+                    item = self._store._parse_file(item_path)
+                    item_id = item.get("id") or item_path.stem
+                    if not self._policy.check_promotion_eligible(item):
+                        continue
+                    next_layer = self._policy.get_next_layer(item.get("layer", ""))
+                    if next_layer is None:
+                        continue
+                    self.promote(item_id=item_id, target_layer=next_layer)
+                    promoted_count += 1
+                except Exception:
+                    # Skip items that fail — consolidate is best-effort
+                    continue
+
+        return promoted_count
 
     # ------------------------------------------------------------------ #
     # Log                                                                   #

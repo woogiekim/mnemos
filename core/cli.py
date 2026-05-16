@@ -389,6 +389,28 @@ def memory_log(op: str, item_id: str, layer: str, meta: str | None) -> None:
     click.echo(f"logged: {op} {item_id} ({layer})")
 
 
+@cli.command("consolidate")
+def memory_consolidate() -> None:
+    """Sweep all memories and auto-promote eligible ones per policy.yaml.
+
+    \b
+    mnemos owns promotion entirely — no AI involvement required.
+    Each memory is evaluated against the configured age_hours, access_count,
+    and quality_score thresholds for its layer. Qualifying items are promoted
+    to the next layer silently.
+
+    Output:
+      Promoted N memories
+    """
+    gw = _get_gateway()
+    try:
+        count = gw.consolidate()
+        click.echo(f"Promoted {count} memories")
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+
 @cli.command("ingest-claude-md")
 @click.option(
     "--project-root",

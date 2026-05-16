@@ -157,6 +157,55 @@ class PolicyEngine:
                 f"Expected item stage '{required_stage}' but got '{actual_stage}'."
             )
 
+    def check_promotion_eligible(self, item: dict) -> bool:
+        """Return True if the item meets all promotion thresholds, False otherwise.
+
+        Unlike validate_promote(), this method never raises — it is designed for
+        silent side-effect checks inside gateway operations.
+        """
+        current_layer = item.get("layer", "")
+        layers = self._layers()
+
+        if current_layer not in layers:
+            return False
+
+        next_layer = layers[current_layer].get("promotes_to")
+        if not next_layer:
+            # Already at top layer — no promotion possible
+            return False
+
+        thresholds = layers[current_layer].get("promotion", {})
+
+        # Age check
+        required_age = thresholds.get("age_hours", 0)
+        created_at_str = item.get("created_at", "")
+        if created_at_str and required_age > 0:
+            created_at_str_clean = created_at_str.rstrip("Z")
+            try:
+                created_at = datetime.datetime.fromisoformat(created_at_str_clean).replace(
+                    tzinfo=datetime.timezone.utc
+                )
+                now = datetime.datetime.now(datetime.timezone.utc)
+                actual_age_hours = (now - created_at).total_seconds() / 3600.0
+                if actual_age_hours < required_age:
+                    return False
+            except ValueError:
+                return False
+
+        # Access count check
+        required_access = thresholds.get("access_count", 0)
+        actual_access = item.get("access_count", 0)
+        if actual_access < required_access:
+            return False
+
+        # Quality score check
+        required_quality = thresholds.get("quality_score", 0.0)
+        actual_quality = item.get("quality_score", 0.0)
+        if actual_quality < required_quality:
+            return False
+
+        return True
+
     def get_next_layer(self, current_layer: str) -> str | None:
         """Return the next layer in the promotion chain, or None if at top."""
         layers = self._layers()
