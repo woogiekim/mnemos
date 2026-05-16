@@ -15,24 +15,68 @@ LAYER_COLOR: dict[str, str] = {
     "global": "\033[33m",
 }
 
+# Emoji markers for each layer (new grammar, Issue #4 task).
+# Format: ``✻ {LAYER_EMOJI} <brief description>``
+# The (layer) text suffix is intentionally dropped — the emoji carries the
+# layer signal visually.
+LAYER_EMOJI: dict[str, str] = {
+    "session": "💡",
+    "project": "💾",
+    "global": "🧠",
+}
+
+# Legacy suffix pattern for backward-compat parsing during the 2-week
+# grace period.  Callers that still produce ``✻ 🧠 content (global)``
+# remain parseable; the suffix is simply ignored on display.
+_LEGACY_LAYER_SUFFIX_PATTERN = r"\s*\((?:session|project|global|ephemeral|working)\)\s*$"
+
+
+def _layer_emoji(layer: str) -> str:
+    """Return the marker emoji for *layer*, defaulting to 🧠 for unknown layers."""
+    return LAYER_EMOJI.get(layer, "🧠")
+
 
 def capture_notice(content: str, layer: str, *, no_color: bool = False) -> str:
-    """Return a styled capture notice; strips ANSI when NO_COLOR is set or no_color=True."""
+    """Return a styled capture notice using the emoji-based grammar.
+
+    New format (this commit):
+        ``✻ 💡 <content>``  (session)
+        ``✻ 💾 <content>``  (project)
+        ``✻ 🧠 <content>``  (global / default)
+
+    Legacy format (2-week grace period):
+        ``✻ 🧠 <content> (layer)``
+
+    The ``(layer)`` text suffix is no longer emitted.  Downstream parsers
+    that relied on the suffix must be updated to use the emoji instead.
+    During the grace period the UserPromptSubmit.sh hook regex accepts both
+    forms so existing conversations continue to parse correctly.
+
+    Strips ANSI when ``NO_COLOR`` is set in the environment or
+    *no_color* is True.
+    """
+    emoji = _layer_emoji(layer)
+    text = f"✻ {emoji} {content}"
     if no_color or "NO_COLOR" in os.environ:
-        return f"✻ 🧠 {content} ({layer})"
+        return text
     color = LAYER_COLOR.get(layer, "\033[90m")
-    return f"{color}{ANSI_DIM}{ANSI_ITALIC}✻ 🧠 {content} ({layer}){ANSI_RESET}"
+    return f"{color}{ANSI_DIM}{ANSI_ITALIC}{text}{ANSI_RESET}"
 
 
 def promote_notice(item_id: str, target_layer: str, *, no_color: bool = False) -> str:
-    """Return a styled promotion notice.
+    """Return a styled promotion notice using the emoji-by-layer grammar.
 
-    Format: ✻ 🧠 promoted <item_id> → <target_layer>
+    Format: ``✻ {target_layer_emoji} promoted <item_id> → <target_layer>``
 
-    Strips ANSI when NO_COLOR is set in the environment or no_color=True.
-    Uses the destination layer's colour for styling.
+    The emoji is selected from the destination layer so the visual marker
+    matches the layer the memory is being promoted to (consistent with
+    :func:`capture_notice`). Strips ANSI when ``NO_COLOR`` is set in the
+    environment or ``no_color=True``. Uses the destination layer's colour
+    for styling.
     """
+    emoji = _layer_emoji(target_layer)
+    text = f"✻ {emoji} promoted {item_id} → {target_layer}"
     if no_color or "NO_COLOR" in os.environ:
-        return f"✻ 🧠 promoted {item_id} → {target_layer}"
+        return text
     color = LAYER_COLOR.get(target_layer, "\033[90m")
-    return f"{color}{ANSI_DIM}{ANSI_ITALIC}✻ 🧠 promoted {item_id} → {target_layer}{ANSI_RESET}"
+    return f"{color}{ANSI_DIM}{ANSI_ITALIC}{text}{ANSI_RESET}"

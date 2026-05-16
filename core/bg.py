@@ -233,11 +233,20 @@ class DuplicateGroup:
 def _normalise_content(content: str) -> str:
     """Normalise content for duplicate comparison.
 
-    Strips leading/trailing whitespace and collapses interior runs of
-    whitespace to single spaces.  This catches duplicates that differ only
-    in formatting.
+    Applies Unicode NFKC normalisation first (collapses compatibility
+    variants such as full-width letters and ligatures), then strips
+    leading/trailing whitespace, collapses interior runs of whitespace to
+    single spaces, and lower-cases the result.  This catches duplicates
+    that differ only in formatting or Unicode representation.
+
+    The NFKC step is load-bearing for the on-write dedup in
+    ``gateway.capture()`` — the dedup key is ``(layer, hash(nfkc(content)))``
+    so two payloads that differ only in Unicode compatibility form are
+    treated as identical.
     """
-    return re.sub(r"\s+", " ", content.strip()).lower()
+    import unicodedata
+    nfkc = unicodedata.normalize("NFKC", content)
+    return re.sub(r"\s+", " ", nfkc.strip()).lower()
 
 
 def _content_hash(content: str) -> str:

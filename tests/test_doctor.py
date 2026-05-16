@@ -23,14 +23,17 @@ def runner():
 
 
 def _make_claude_home_with_hooks(tmp_path: Path) -> Path:
-    """Create a home with fully-installed Claude Code hooks."""
+    """Create a home with fully-installed Claude Code hooks.
+
+    Includes all required hooks:
+    - PostToolUse: ingest-claude-md + PostToolUse.sh
+    - UserPromptSubmit: UserPromptSubmit.sh
+    - Stop: Stop.sh  (re-introduced under the on-write dedup contract, Issue #4)
+    """
     home = tmp_path / "home"
     claude_dir = home / ".claude"
     claude_dir.mkdir(parents=True)
 
-    # settings.json with all required hooks:
-    #   PostToolUse (ingest-claude-md) + PostToolUse (bg-check / PostToolUse.sh)
-    #   + UserPromptSubmit (UserPromptSubmit.sh)
     data = {
         "hooks": {
             "PostToolUse": [
@@ -47,6 +50,12 @@ def _make_claude_home_with_hooks(tmp_path: Path) -> Path:
                 {
                     "matcher": "",
                     "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="" bash "/x/hooks/UserPromptSubmit.sh" 2>/dev/null || true'}],
+                }
+            ],
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="" bash "/x/hooks/Stop.sh" 2>/dev/null || true'}],
                 }
             ],
         }

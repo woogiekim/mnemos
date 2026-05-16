@@ -515,6 +515,16 @@ fi
 # decision review, or root-cause lookup mid-session.
 # Emitted unconditionally (even when no search results were found) because
 # the reminder should fire regardless of whether past memories were surfaced.
+#
+# Notification grammar (new in this commit):
+#   ✻ 💡 <brief>   — session layer
+#   ✻ 💾 <brief>   — project layer
+#   ✻ 🧠 <brief>   — global layer
+#
+# The (layer) text suffix is dropped.  During the 2-week grace period the
+# Stop hook's regex (hooks/Stop.sh) accepts BOTH forms:
+#   ✻ 💡 <brief>            ← new emoji-only form
+#   ✻ 🧠 <brief> (session)  ← legacy suffix form (parsed but not emitted)
 # ---------------------------------------------------------------------------
 echo ""
 echo "<mnemos-capture-protocol>"
@@ -547,8 +557,11 @@ echo "Use --layer transient for captures like 'test capture for protocol verific
 echo "'테스트 캡처', or any throwaway check that would pollute the session layer."
 echo ""
 echo "After \`mnemos capture\` returns \`captured: <uuid>\`, notify inline in this EXACT format:"
-echo "  ✻ 🧠 <brief description> (session) [id: <uuid>]"
-echo "  ✻ 🧠 <brief description> (transient) [id: <uuid>]   ← for transient captures"
+echo "  ✻ 💡 <brief description> [id: <uuid>]   ← session"
+echo "  ✻ 💾 <brief description> [id: <uuid>]   ← project"
+echo "  ✻ 🧠 <brief description> [id: <uuid>]   ← global"
+echo "  ✻ ♻️ <brief description> [id: <uuid>]   ← transient (throwaway; Stop hook ignores)"
+echo "Use the emoji that matches the capture layer: 💡 session · 💾 project · 🧠 global · ♻️ transient"
 echo "The [id: <uuid>] suffix is MANDATORY and must be the real uuid printed by the tool call."
 echo "Without a real id from a tool call, the notification format is invalid — never fabricate or omit the id."
 echo "</mnemos-capture-protocol>"

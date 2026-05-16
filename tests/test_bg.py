@@ -171,6 +171,33 @@ class TestContentHash:
         h = _content_hash("some content")
         assert re.match(r"^[0-9a-f]{64}$", h)
 
+    def test_nfkc_fullwidth_ascii_same_hash(self):
+        """Full-width Unicode letters must normalise to ASCII equivalents via NFKC.
+
+        NFKC normalisation is applied as the first step in _normalise_content
+        (before whitespace/case folding) so that compatibility variants are
+        collapsed.  This is the same contract required by gateway.capture()
+        dedup (Issue #4 anti-regression).
+        """
+        from core.bg import _content_hash
+        ascii_form = "decision about architecture"
+        # Full-width Latin letters (U+FF41..U+FF5A) → ASCII via NFKC
+        fullwidth_form = "ｄｅｃｉｓｉｏｎ ａｂｏｕｔ ａｒｃｈｉｔｅｃｔｕｒｅ"
+        assert _content_hash(ascii_form) == _content_hash(fullwidth_form), (
+            "NFKC should collapse full-width letters to ASCII equivalents, "
+            "producing the same normalised form and therefore the same hash"
+        )
+
+    def test_nfkc_ligature_normalisation(self):
+        """Unicode ligatures (e.g. ﬁ U+FB01) must be expanded by NFKC."""
+        from core.bg import _content_hash
+        # ﬁ (U+FB01 LATIN SMALL LIGATURE FI) NFKC-normalises to "fi"
+        with_ligature = "ﬁle system"
+        without_ligature = "file system"
+        assert _content_hash(with_ligature) == _content_hash(without_ligature), (
+            "NFKC should expand the ﬁ ligature to 'fi', producing the same hash"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: find_duplicates

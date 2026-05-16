@@ -111,8 +111,18 @@ class TestClaudeCodeAdapterInstall:
         user_cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
         assert "UserPromptSubmit.sh" in user_cmd
 
-    def test_install_does_not_register_stop_hook(self, tmp_path):
-        """install() must NOT register a Stop hook (fires per-response, not per-session)."""
+    def test_install_registers_stop_hook(self, tmp_path):
+        """install() must register a Stop hook pointing at hooks/Stop.sh.
+
+        Issue #4 anti-regression
+        ------------------------
+        The Stop hook was originally removed (commit 0de1c47) because Claude
+        Code's Stop event fires once per AI response turn, flooding the session
+        layer.  Re-introduction is safe because gateway.capture() now maintains
+        a per-instance in-memory dedup registry keyed by (layer, NFKC-hash).
+        Duplicate captures within the same process return None — storage,
+        FTS, audit log, and event-bus paths are never reached.
+        """
         home = _make_claude_home(tmp_path)
         adapter = ClaudeCodeAdapter()
         adapter.install(home)
@@ -120,7 +130,11 @@ class TestClaudeCodeAdapterInstall:
         settings = home / ".claude" / "settings.json"
         data = json.loads(settings.read_text())
         hooks = data.get("hooks", {})
-        assert "Stop" not in hooks, "Stop hook must not be registered by install()"
+        assert "Stop" in hooks, "Stop hook must be registered by install()"
+        stop_cmds = [h.get("command", "") for entry in hooks["Stop"] for h in entry.get("hooks", [])]
+        assert any("Stop.sh" in cmd for cmd in stop_cmds), (
+            f"Stop hook must reference Stop.sh, got: {stop_cmds}"
+        )
 
     def test_install_writes_managed_block_to_claude_md(self, tmp_path):
         home = _make_claude_home(tmp_path)
@@ -215,8 +229,17 @@ class TestClaudeCodeAdapterUpdate:
         hooks = result["hooks"]["PostToolUse"]
         assert hooks[0]["matcher"] == "Write|Edit"
 
-    def test_update_removes_legacy_stop_hook(self, tmp_path):
-        """update() removes any previously-installed Stop hook (legacy or canonical)."""
+    def test_update_replaces_legacy_stop_hook_with_canonical_stop_sh(self, tmp_path):
+        """update() replaces a legacy mnemos Stop hook with the canonical Stop.sh entry.
+
+        Issue #4 anti-regression
+        ------------------------
+        The legacy Stop hook used 'mnemos extract-insight' and was removed in
+        commit 0de1c47 because it flooded the session layer (Stop fires per AI
+        turn, not per session).  update() must remove the legacy entry and
+        replace it with the canonical Stop.sh hook, which is safe under the
+        on-write dedup contract in gateway.capture().
+        """
         home = _make_claude_home(tmp_path)
         settings = home / ".claude" / "settings.json"
         data = {
@@ -235,10 +258,31 @@ class TestClaudeCodeAdapterUpdate:
 
         result = json.loads(settings.read_text())
         hooks = result.get("hooks", {})
-        assert "Stop" not in hooks, "update() must remove any mnemos Stop hook"
+        # Legacy extract-insight entry must be gone
+        stop_cmds = [
+            h.get("command", "")
+            for entry in hooks.get("Stop", [])
+            for h in entry.get("hooks", [])
+        ]
+        assert not any("extract-insight" in cmd for cmd in stop_cmds), (
+            "update() must remove legacy extract-insight Stop hook"
+        )
+        # Canonical Stop.sh must now be present
+        assert "Stop" in hooks, "update() must install the canonical Stop.sh hook"
+        assert any("Stop.sh" in cmd for cmd in stop_cmds), (
+            f"update() must replace legacy entry with Stop.sh, got: {stop_cmds}"
+        )
 
-    def test_update_does_not_add_stop_hook_when_absent(self, tmp_path):
-        """update() must not add a Stop hook if none existed."""
+    def test_update_installs_stop_hook_when_absent(self, tmp_path):
+        """update() must install the canonical Stop.sh hook even when no Stop entry existed.
+
+        Issue #4 anti-regression
+        ------------------------
+        The Stop hook (hooks/Stop.sh) is now part of the standard mnemos hook
+        set.  update() must always ensure Stop.sh is present, whether or not a
+        previous Stop entry existed, because the on-write dedup in
+        gateway.capture() makes re-firing on every AI turn safe.
+        """
         home = _make_claude_home(tmp_path)
         settings = home / ".claude" / "settings.json"
         settings.write_text('{"hooks": {}}\n')
@@ -247,7 +291,9 @@ class TestClaudeCodeAdapterUpdate:
 
         result = json.loads(settings.read_text())
         hooks = result.get("hooks", {})
-        assert "Stop" not in hooks
+        assert "Stop" in hooks, "update() must install Stop.sh hook"
+        stop_cmds = [h.get("command", "") for entry in hooks["Stop"] for h in entry.get("hooks", [])]
+        assert any("Stop.sh" in cmd for cmd in stop_cmds)
 
     def test_update_returns_messages(self, tmp_path):
         home = _make_claude_home(tmp_path)
@@ -620,14 +666,20 @@ class TestClaudeCodeAdapterEventBus:
         })
 
         out = capsys.readouterr().out
-        # New format: ✻ 🧠 promoted <item_id> → <to_layer>
+        # New format: ✻ <target-emoji> promoted <item_id> → <to_layer>
+        # (target=project → 💾)
         assert "promoted" in out
         assert "abc-123" in out
         assert "project" in out
         assert "→" in out
 
     def test_on_post_promote_format_matches_spec(self, capsys, monkeypatch):
-        """Output format must be: ✻ 🧠 promoted <item_id> → <to_layer>"""
+        """Output format must be: ✻ <target-emoji> promoted <item_id> → <to_layer>
+
+        Emoji is selected from the *target* layer under the emoji-by-layer
+        scheme: 💡 session, 💾 project, 🧠 global. The test promotes
+        working→session, so the emoji is 💡.
+        """
         monkeypatch.setenv("NO_COLOR", "1")
         from core.events import EventBus, POST_PROMOTE
         bus = EventBus()
@@ -642,7 +694,7 @@ class TestClaudeCodeAdapterEventBus:
         })
 
         out = capsys.readouterr().out.strip()
-        assert out == "✻ 🧠 promoted id-001 → session"
+        assert out == "✻ 💡 promoted id-001 → session"
 
     def test_on_post_capture_prints_for_persistent_layers(self, capsys, monkeypatch):
         """post-capture handler must print notice for session/project/global layers."""

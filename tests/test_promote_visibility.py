@@ -1,7 +1,8 @@
 """Tests for promotion visibility (mnemos #20 gap 3).
 
 Tests cover:
-1. `mnemos promote` emits '✻ 🧠 promoted <id> → <target-layer>' on success
+1. `mnemos promote` emits '✻ <target-emoji> promoted <id> → <target-layer>' on success
+   where target-emoji is 💡 (session), 💾 (project), or 🧠 (global)
 2. `mnemos promote --quiet` suppresses the promotion notice
 3. `mnemos consolidate` emits per-promotion notice lines
 4. `mnemos bg-check` emits per-promotion notice lines via event bus
@@ -117,7 +118,12 @@ def _capture_item(repo_root: Path, content: str, layer: str = "session",
 
 class TestPromoteCLIVisibility:
     def test_promote_emits_notice_on_success(self, runner, cli_with_repo, repo_root):
-        """promote must print '✻ 🧠 promoted <id> → <layer>' after success."""
+        """promote must print '✻ <target-emoji> promoted <id> → <layer>' after success.
+
+        Under the emoji-by-layer scheme, the marker emoji reflects the *target*
+        layer (💡 session, 💾 project, 🧠 global). A session→project promotion
+        therefore emits 💾, not 🧠.
+        """
         item_id = _capture_item(repo_root, "Architecture decision: use SQLite for FTS")
         result = runner.invoke(
             cli_with_repo,
@@ -126,7 +132,8 @@ class TestPromoteCLIVisibility:
         assert result.exit_code == 0, result.output
         # Must contain the promotion notice
         assert "✻" in result.output
-        assert "🧠" in result.output
+        # Target layer is project (session→project), so the emoji is 💾.
+        assert "💾" in result.output
         assert "promoted" in result.output.lower()
         assert item_id in result.output
         # Must include target layer (session → project)
@@ -157,7 +164,7 @@ class TestPromoteCLIVisibility:
         )
 
     def test_promote_quiet_suppresses_notice(self, runner, cli_with_repo, repo_root):
-        """promote --quiet must NOT print the ✻ 🧠 notice."""
+        """promote --quiet must NOT print the ✻ <emoji> notice."""
         item_id = _capture_item(repo_root, "Quiet capture test")
         result = runner.invoke(
             cli_with_repo,
@@ -166,8 +173,10 @@ class TestPromoteCLIVisibility:
         assert result.exit_code == 0, result.output
         # The standard 'promoted: <id>' line should still appear
         assert "promoted" in result.output.lower()
-        # But the ✻ 🧠 decoration must be absent
+        # But the ✻ <emoji> decoration must be absent (any layer emoji).
         assert "✻" not in result.output
+        assert "💡" not in result.output
+        assert "💾" not in result.output
         assert "🧠" not in result.output
 
     def test_promote_default_is_not_quiet(self, runner, cli_with_repo, repo_root):
@@ -191,6 +200,8 @@ class TestPromoteCLIVisibility:
         )
         assert result.exit_code != 0
         assert "✻" not in result.output
+        assert "💡" not in result.output
+        assert "💾" not in result.output
         assert "🧠" not in result.output
 
 
@@ -200,7 +211,10 @@ class TestPromoteCLIVisibility:
 
 class TestConsolidateVisibility:
     def test_consolidate_emits_per_promotion_notice(self, runner, cli_with_repo, repo_root):
-        """consolidate must emit ✻ 🧠 promoted <id> → <layer> for each promoted item."""
+        """consolidate must emit ✻ <target-emoji> promoted <id> → <layer> for each promoted item.
+
+        Session→project promotion emits 💾 (the target layer's emoji).
+        """
         # Create items at session layer (eligible for promotion to project)
         id1 = _capture_item(repo_root, "Architecture: hexagonal pattern", item_id="arch-001")
         id2 = _capture_item(repo_root, "Constraint: immutable audit log", item_id="constraint-002")
@@ -211,18 +225,21 @@ class TestConsolidateVisibility:
         assert result.exit_code == 0, result.output
         # Must contain promotion notice lines for each item promoted
         assert "✻" in result.output
-        assert "🧠" in result.output
+        # Target layer is project, so the emoji is 💾.
+        assert "💾" in result.output
         assert "promoted" in result.output.lower()
         # Each promoted item should appear at least once
         assert "→" in result.output
 
     def test_consolidate_no_items_no_notice(self, runner, cli_with_repo, repo_root):
-        """consolidate with no eligible items must emit 0-promotion output with no ✻ 🧠."""
+        """consolidate with no eligible items must emit 0-promotion output with no ✻ <emoji>."""
         result = runner.invoke(cli_with_repo, ["consolidate"],
                                env={"NO_COLOR": "1", "MNEMOS_REPO_ROOT": str(repo_root)})
         assert result.exit_code == 0, result.output
         # With no promotable items, no notice should appear
         assert "✻" not in result.output
+        assert "💡" not in result.output
+        assert "💾" not in result.output
         assert "🧠" not in result.output
 
 
@@ -232,7 +249,10 @@ class TestConsolidateVisibility:
 
 class TestBgCheckVisibility:
     def test_bg_check_emits_promotion_notice(self, runner, cli_with_repo, repo_root, monkeypatch):
-        """bg-check must emit ✻ 🧠 promoted <id> → <layer> for each auto-promoted item."""
+        """bg-check must emit ✻ <target-emoji> promoted <id> → <layer> for each auto-promoted item.
+
+        Session→project promotion emits 💾.
+        """
         # Items that will be auto-promoted
         id1 = _capture_item(repo_root, "BG check test: project decision", item_id="bg-test-001")
 
@@ -245,7 +265,8 @@ class TestBgCheckVisibility:
         # When auto-promotion happens, the notice must appear
         if "bg-test-001" in result.output or "promoted" in result.output.lower():
             assert "✻" in result.output
-            assert "🧠" in result.output
+            # Target layer is project, so the emoji is 💾.
+            assert "💾" in result.output
             assert "→" in result.output
 
 
@@ -275,14 +296,19 @@ class TestClaudeCodeAdapterPromoteFormat:
         assert "test-item-abc-123" in output, f"item_id missing from: {output!r}"
         # Must contain target layer
         assert "project" in output
-        # Must use the ✻ 🧠 prefix
+        # Must use the ✻ <target-emoji> prefix. Target is project → 💾.
         assert "✻" in output
-        assert "🧠" in output
+        assert "💾" in output
         # Must show → separator
         assert "→" in output
 
     def test_on_post_promote_format_matches_spec(self, capsys):
-        """Output must match: ✻ 🧠 promoted <id> → <target-layer>"""
+        """Output must match: ✻ <target-emoji> promoted <id> → <target-layer>
+
+        Under the emoji-by-layer scheme the marker emoji reflects the target
+        layer (💡 session, 💾 project, 🧠 global). A session→project promotion
+        therefore matches 💾.
+        """
         from core.adapters.claude import ClaudeCodeAdapter
 
         adapter = ClaudeCodeAdapter()
@@ -299,8 +325,8 @@ class TestClaudeCodeAdapterPromoteFormat:
         captured = capsys.readouterr()
         output = captured.out.strip()
 
-        # Pattern: ✻ 🧠 promoted <id> → <layer>
-        assert re.search(r"✻\s+🧠\s+promoted\s+spec-item-xyz\s+→\s+project", output), (
+        # Pattern: ✻ 💾 promoted <id> → project  (target is project)
+        assert re.search(r"✻\s+💾\s+promoted\s+spec-item-xyz\s+→\s+project", output), (
             f"Output does not match expected format: {output!r}"
         )
 
