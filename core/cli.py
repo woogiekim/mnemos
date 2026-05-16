@@ -187,7 +187,9 @@ def memory_promote(
     session_id: str | None,
 ) -> None:
     """Promote a memory item to the next (or specified) layer."""
+    from core.adapters.claude import ClaudeCodeAdapter
     gw = _get_gateway()
+    ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
     try:
         new_id = gw.promote(
             item_id=item_id,
@@ -430,7 +432,9 @@ def memory_consolidate() -> None:
     Output:
       Promoted N memories
     """
+    from core.adapters.claude import ClaudeCodeAdapter
     gw = _get_gateway()
+    ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
     try:
         count = gw.consolidate()
         click.echo(f"Promoted {count} memories")
