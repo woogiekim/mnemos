@@ -62,6 +62,20 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
     ],
 }
 
+_STOP_HOOK_TEMPLATE = {
+    "matcher": "",
+    "hooks": [
+        {
+            "type": "command",
+            "command": (
+                'MNEMOS_REPO_ROOT="{repo_root}" mnemos capture '
+                '--layer session --content "session-end" --tag auto-stop '
+                "2>/dev/null || true"
+            ),
+        }
+    ],
+}
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -71,7 +85,12 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
     """Return True if this hook-list entry contains any mnemos command."""
     for h in entry.get("hooks", []):
         cmd = h.get("command", "")
-        if "mnemos ingest-claude-md" in cmd or "mnemos search" in cmd:
+        if (
+            "mnemos ingest-claude-md" in cmd
+            or "mnemos search" in cmd
+            or "mnemos capture" in cmd
+            or "mnemos extract-insight" in cmd  # legacy — removed in Issue #4
+        ):
             return True
     return False
 
@@ -111,7 +130,7 @@ class ClaudeCodeAdapter(HostAdapter):
     Owns:
     - PostToolUse hook in ~/.claude/settings.json
     - UserPromptSubmit hook in ~/.claude/settings.json
-    - Stop hook removal (migration from legacy installs)
+    - Stop hook in ~/.claude/settings.json (captures session-end marker)
     - CLAUDE.md managed block (<!-- mnemos-start --> ... <!-- mnemos-end -->)
     """
 
@@ -166,6 +185,7 @@ class ClaudeCodeAdapter(HostAdapter):
         for hook_type, template in [
             ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
             ("UserPromptSubmit", _USER_PROMPT_SUBMIT_HOOK_TEMPLATE),
+            ("Stop", _STOP_HOOK_TEMPLATE),
         ]:
             hook_list = hooks.get(hook_type, [])
             non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
@@ -259,7 +279,7 @@ class ClaudeCodeAdapter(HostAdapter):
 
         # Collect repo_root from existing entries (prefer first found)
         repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
-        for hook_type in ("PostToolUse", "UserPromptSubmit"):
+        for hook_type in ("PostToolUse", "UserPromptSubmit", "Stop"):
             for entry in hooks.get(hook_type, []):
                 if _is_mnemos_hook_entry(entry):
                     found = _extract_repo_root_from_hook(entry)
@@ -269,28 +289,12 @@ class ClaudeCodeAdapter(HostAdapter):
             if repo_root:
                 break
 
-        # Remove legacy Stop hook (mnemos extract-insight was removed in Issue #4 fix)
-        if "Stop" in hooks:
-            stop_list = hooks["Stop"]
-            has_mnemos_stop = any(
-                any("mnemos" in h.get("command", "") for h in entry.get("hooks", []))
-                for entry in stop_list
-            )
-            if has_mnemos_stop:
-                cleaned_stop = [
-                    e for e in stop_list
-                    if not any("mnemos" in h.get("command", "") for h in e.get("hooks", []))
-                ]
-                changed = True
-                if cleaned_stop:
-                    hooks["Stop"] = cleaned_stop
-                else:
-                    del hooks["Stop"]
-
         # Remove all existing mnemos hook entries and replace with canonical ones
+        # (This also replaces any legacy Stop hook from Issue #4 with the new canonical version)
         for hook_type, template in [
             ("PostToolUse", _POST_TOOL_USE_HOOK_TEMPLATE),
             ("UserPromptSubmit", _USER_PROMPT_SUBMIT_HOOK_TEMPLATE),
+            ("Stop", _STOP_HOOK_TEMPLATE),
         ]:
             hook_list = hooks.get(hook_type, [])
             non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]

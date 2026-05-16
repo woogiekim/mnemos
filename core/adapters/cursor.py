@@ -60,6 +60,11 @@ class CursorAdapter(HostAdapter):
     Owns:
     - cursor rules managed block (<!-- mnemos:start --> ... <!-- mnemos:end -->)
       in ~/.cursor/rules or ~/.cursor/rules.md
+
+    Not supported:
+    - Hook registration (UserPromptSubmit, Stop) — Cursor IDE does not expose
+      a hooks API equivalent to Claude Code's ~/.claude/settings.json hooks.
+      TODO: Add hook support if Cursor adds a hooks configuration system.
     """
 
     @property
