@@ -28,19 +28,25 @@ def _make_claude_home_with_hooks(tmp_path: Path) -> Path:
     claude_dir = home / ".claude"
     claude_dir.mkdir(parents=True)
 
-    # settings.json with both required hooks
+    # settings.json with all required hooks:
+    #   PostToolUse (ingest-claude-md) + PostToolUse (bg-check / PostToolUse.sh)
+    #   + UserPromptSubmit (UserPromptSubmit.sh)
     data = {
         "hooks": {
             "PostToolUse": [
                 {
                     "matcher": "Write|Edit",
                     "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="" mnemos ingest-claude-md'}],
-                }
+                },
+                {
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="" bash "/x/hooks/PostToolUse.sh" 2>/dev/null || true'}],
+                },
             ],
             "UserPromptSubmit": [
                 {
                     "matcher": "",
-                    "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="" mnemos search "${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true'}],
+                    "hooks": [{"type": "command", "command": 'MNEMOS_REPO_ROOT="" bash "/x/hooks/UserPromptSubmit.sh" 2>/dev/null || true'}],
                 }
             ],
         }
