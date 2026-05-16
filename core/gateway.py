@@ -57,12 +57,21 @@ def _resolve_repo_root() -> Path:
     )
 
 
+_DEFAULT_LAYER = "ephemeral"
+
+
 class MemoryGateway:
     """
     Single entry point for all memory lifecycle operations.
 
     All mutations are validated by PolicyEngine, persisted by MemoryStore,
     logged by AuditLogger, and trigger HookDispatcher events.
+
+    On construction a *run_id* and *session_id* are auto-generated (UUID4) so
+    that ephemeral/working items written in this process share a coherent
+    namespace.  Callers may override these per-call via the ``run_id`` and
+    ``session_id`` keyword arguments on :meth:`capture`, :meth:`promote`, and
+    :meth:`demote`.
     """
 
     def __init__(self, repo_root: str | None = None) -> None:
@@ -80,6 +89,9 @@ class MemoryGateway:
             repo_root=self._root,
             fts_index=self._fts,
         )
+        # Auto-generated IDs scoped to this gateway instance (i.e. this process)
+        self._run_id: str = str(uuid.uuid4())
+        self._session_id: str = str(uuid.uuid4())
 
     # ------------------------------------------------------------------ #
     # Internal: silent auto-promotion                                        #
@@ -113,8 +125,8 @@ class MemoryGateway:
 
     def capture(
         self,
-        layer: str,
         content: str,
+        layer: str | None = None,
         item_id: str | None = None,
         tags: list[str] | None = None,
         quality_score: float = DEFAULT_QUALITY_SCORE,
@@ -122,7 +134,23 @@ class MemoryGateway:
         session_id: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
     ) -> str:
-        """Capture a new memory item into the target layer."""
+        """Capture a new memory item into the target layer.
+
+        When *layer* is omitted it defaults to ``"ephemeral"``.  The
+        *run_id* and *session_id* are filled from this gateway instance's
+        auto-generated values when not supplied by the caller, ensuring
+        that ephemeral items always land in a deterministic path for the
+        duration of the process.
+        """
+        if layer is None:
+            layer = _DEFAULT_LAYER
+
+        # Fill dynamic IDs from gateway defaults when not explicitly provided
+        if run_id is None:
+            run_id = self._run_id
+        if session_id is None:
+            session_id = self._session_id
+
         self._policy.validate_capture(layer=layer, item={"content": content})
 
         item_id = item_id or str(uuid.uuid4())
@@ -136,6 +164,8 @@ class MemoryGateway:
             "access_count": 0,
             "quality_score": quality_score,
             "tags": tags or [],
+            "run_id": run_id,
+            "session_id": session_id,
         }
         if extra_metadata:
             metadata.update(extra_metadata)

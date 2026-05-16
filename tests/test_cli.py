@@ -317,3 +317,41 @@ class TestConsolidateCommand:
         result = runner.invoke(cli_with_repo, ["consolidate"])
         assert result.exit_code == 0, result.output
         assert "Promoted 0 memories" in result.output
+
+
+class TestCaptureEphemeralDefault:
+    """CLI tests for ephemeral-first capture default (issue #12)."""
+
+    def test_capture_without_layer_defaults_to_ephemeral(self, runner, cli_with_repo, repo_root):
+        """capture without --layer must write to .agent/runs/.../scratch/ and report ephemeral."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--content", "Ephemeral CLI default test"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "captured" in result.output.lower()
+        assert "→ ephemeral layer" in result.output
+
+        # File must exist somewhere under .agent/runs/{run_id}/scratch/
+        agent_runs = repo_root / ".agent" / "runs"
+        matches = list(agent_runs.rglob("*.md"))
+        assert len(matches) >= 1, f"Expected ephemeral file under {agent_runs}"
+
+    def test_capture_explicit_layer_still_works(self, runner, cli_with_repo, repo_root):
+        """capture with --layer global must still write to wiki/global/."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Explicit global layer"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "→ global layer" in result.output
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert len(matches) >= 1
+
+    def test_capture_layer_is_optional_flag(self, runner, cli_with_repo):
+        """capture must accept --content alone (--layer is now optional)."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--content", "No layer flag provided"],
+        )
+        assert result.exit_code == 0, result.output
