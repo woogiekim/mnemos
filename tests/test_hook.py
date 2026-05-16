@@ -665,3 +665,224 @@ class TestKeywordExtraction:
         assert output.count("Shared result line") <= 1, (
             f"Duplicate result found in output:\n{output}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Search trigger hints in the capture-protocol block (gap 2 — mnemos #20)
+# ---------------------------------------------------------------------------
+
+class TestSearchTriggerHints:
+    """The capture-protocol block must also guide AI toward explicit mid-session search.
+
+    Stats from observability.jsonl show hook_search (118) and explicit search (120)
+    are nearly equal, but AI rarely calls mnemos search when new questions arise
+    mid-session — relying instead on session-start auto-injection. These tests
+    verify the hook now surfaces concrete 'when to search' guidance alongside
+    the existing capture guidance.
+
+    Trigger phrases that should prompt AI to call mnemos search proactively:
+    - Analyzing a bug / error / exception — search related root-cause memories first
+    - Answering 'why was X decided' / 'why does X work this way' — search prior decisions
+    - Before refactoring — search known constraints
+    - Architecture / design questions — search architecture decisions
+    - Constraint check / 'can we' / 'is it allowed' — search project constraints
+    """
+
+    def test_capture_protocol_includes_search_trigger_guidance(self, tmp_path):
+        """The <mnemos-capture-protocol> block must include 'mnemos search' guidance.
+
+        Trigger phrase: any prompt — search guidance is always injected as part
+        of the protocol block so AI has standing instructions for when to search.
+        """
+        rc, output = _run_hook("how does caching work?",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "mnemos search" in output, (
+            "Capture-protocol block must mention 'mnemos search' to guide mid-session search"
+        )
+
+    def test_capture_protocol_mentions_bug_analysis_trigger(self, tmp_path):
+        """Protocol must include 'bug' or 'error' as a trigger to run mnemos search first.
+
+        Expected wording: 'when analyzing a bug' / 'before debugging' / 'error analysis'.
+        """
+        rc, output = _run_hook("why does the parser fail on empty input?",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "bug" in output or "error" in output, (
+            "Protocol must mention bug/error as a search trigger so AI searches "
+            "root-cause memories before starting debugging"
+        )
+
+    def test_capture_protocol_mentions_decision_review_trigger(self, tmp_path):
+        """Protocol must guide AI to search prior decisions before answering 'why' questions.
+
+        Expected wording: 'decision' or 'why was X decided'.
+        """
+        rc, output = _run_hook("why was the session layer designed this way?",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "decision" in output, (
+            "Protocol must tell AI to search prior decisions when answering 'why' questions"
+        )
+
+    def test_capture_protocol_mentions_constraint_trigger(self, tmp_path):
+        """Protocol must remind AI to search known constraints before refactoring.
+
+        Expected wording: 'constraint' in the search-trigger section.
+        """
+        rc, output = _run_hook("I want to refactor the storage layer",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        assert "constraint" in output, (
+            "Protocol must remind AI to search known constraints before refactoring"
+        )
+
+    def test_search_hint_contains_concrete_example_query(self, tmp_path):
+        """The protocol block must show a concrete example mnemos search call.
+
+        A bare 'run mnemos search' is insufficient — AI needs a pattern to match.
+        The hint must show 'mnemos search <topic>' or similar concrete form.
+        """
+        rc, output = _run_hook("explain the event bus architecture",
+                               mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        # The protocol must include a concrete search invocation pattern,
+        # not just a generic mention of 'mnemos search'.
+        assert "mnemos search" in output, (
+            "Protocol must include a concrete 'mnemos search <topic>' example"
+        )
+        # Additionally verify it appears in a search-guidance context,
+        # not only in the capture command context.
+        lines = output.splitlines()
+        search_lines = [l for l in lines if "mnemos search" in l]
+        assert len(search_lines) >= 1, (
+            "Expected at least one 'mnemos search' line in protocol output"
+        )
+
+    def test_search_trigger_guidance_appears_inside_capture_protocol_block(self, tmp_path):
+        """Search trigger guidance must be INSIDE the <mnemos-capture-protocol> block.
+
+        It must not be emitted as a separate free-form block outside the protocol —
+        placing it inside ensures it fires on every prompt turn alongside capture guidance.
+        """
+        rc, output = _run_hook("describe the architecture", mnemos_repo_root=str(tmp_path))
+        assert rc == 0
+        # Extract content inside the protocol block
+        start = output.find("<mnemos-capture-protocol>")
+        end = output.find("</mnemos-capture-protocol>")
+        assert start != -1 and end != -1, "Protocol block not found in output"
+        protocol_content = output[start:end]
+        assert "mnemos search" in protocol_content, (
+            "Search trigger guidance must appear inside <mnemos-capture-protocol> block, "
+            "not outside it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# MNEMOS_BEHAVIOR_BLOCK content checks (gap 2 — mnemos #20)
+# ---------------------------------------------------------------------------
+
+class TestBehaviorBlockSearchTriggers:
+    """MNEMOS_BEHAVIOR_BLOCK (in core/adapters/base.py) must include concrete search triggers.
+
+    Both Claude and Cursor adapters propagate this block to their respective
+    AI-instruction files (CLAUDE.md and cursor rules). The trigger examples
+    must be specific enough for AI to pattern-match them without ambiguity.
+
+    Required trigger examples:
+    1. Bug/error analysis: 'when analyzing a bug, search related root-cause memories first'
+    2. Decision review: 'before answering why X was decided, search prior decisions'
+    3. Pre-refactor: 'before refactoring, search known constraints'
+    """
+
+    def _get_behavior_block(self) -> str:
+        from core.adapters.base import MNEMOS_BEHAVIOR_BLOCK
+        return MNEMOS_BEHAVIOR_BLOCK
+
+    def test_behavior_block_has_search_section(self):
+        """MNEMOS_BEHAVIOR_BLOCK must have a section dedicated to when to search.
+
+        A generic 'run mnemos search <query>' line is insufficient.
+        There must be a structured guidance section with concrete triggers.
+        """
+        block = self._get_behavior_block()
+        # A dedicated heading or structured list for search triggers
+        assert "search" in block.lower(), (
+            "MNEMOS_BEHAVIOR_BLOCK must contain search guidance"
+        )
+
+    def test_behavior_block_has_bug_analysis_trigger(self):
+        """MNEMOS_BEHAVIOR_BLOCK must include bug analysis as an explicit search trigger.
+
+        Expected: 'analyzing a bug' or 'bug analysis' or 'error' in a search-trigger context.
+        This ensures AI pattern-matches bug investigation prompts to a mnemos search call.
+        """
+        block = self._get_behavior_block()
+        block_lower = block.lower()
+        assert "bug" in block_lower or "error" in block_lower, (
+            "MNEMOS_BEHAVIOR_BLOCK must mention 'bug' or 'error' as a search trigger "
+            "so AI searches root-cause memories before debugging"
+        )
+
+    def test_behavior_block_has_decision_review_trigger(self):
+        """MNEMOS_BEHAVIOR_BLOCK must include decision review as an explicit search trigger.
+
+        Expected: 'why was X decided' / 'prior decision' / 'decision review'.
+        This surfaces historical decision context when AI is asked 'why' questions.
+        """
+        block = self._get_behavior_block()
+        block_lower = block.lower()
+        assert "decision" in block_lower or "why was" in block_lower, (
+            "MNEMOS_BEHAVIOR_BLOCK must mention 'decision' as a search trigger "
+            "so AI retrieves prior decisions for 'why was X decided' questions"
+        )
+
+    def test_behavior_block_has_constraint_trigger(self):
+        """MNEMOS_BEHAVIOR_BLOCK must include constraint lookup as an explicit search trigger.
+
+        Expected: 'constraint' or 'refactor' in a search-trigger context.
+        This prevents AI from refactoring in ways that violate captured constraints.
+        """
+        block = self._get_behavior_block()
+        block_lower = block.lower()
+        assert "constraint" in block_lower, (
+            "MNEMOS_BEHAVIOR_BLOCK must mention 'constraint' as a search trigger "
+            "so AI checks constraints before refactoring"
+        )
+
+    def test_behavior_block_triggers_are_concrete_not_generic(self):
+        """Search triggers must be specific phrases, not just 'run mnemos search'.
+
+        Generic 'When asked about past context, run mnemos search' is the existing
+        opening line. The new trigger section must add concrete, pattern-matchable
+        examples that go beyond the generic instruction.
+        """
+        block = self._get_behavior_block()
+        # The block must contain a 'When' + action trigger construction beyond
+        # the generic opening line, or a structured list of trigger cases.
+        # We check for the presence of a second 'search' reference beyond the
+        # opening 'run mnemos search <query>' line.
+        search_occurrences = block.lower().count("mnemos search")
+        assert search_occurrences >= 2, (
+            f"MNEMOS_BEHAVIOR_BLOCK should reference 'mnemos search' at least twice "
+            f"(opening line + trigger examples), found {search_occurrences}"
+        )
+
+    def test_cursor_adapter_propagates_behavior_block(self):
+        """CursorAdapter must use the same MNEMOS_BEHAVIOR_BLOCK as ClaudeCodeAdapter.
+
+        Both adapters import MNEMOS_BEHAVIOR_BLOCK from core.adapters.base, so any
+        update to the block automatically propagates to both CLAUDE.md and cursor rules.
+        """
+        from core.adapters.base import MNEMOS_BEHAVIOR_BLOCK as BASE_BLOCK
+        from core.adapters.cursor import CURSOR_RULES_BLOCK
+        from core.adapters.claude import CLAUDE_MD_BLOCK
+
+        # Both adapter blocks must contain the base behavior block verbatim
+        assert BASE_BLOCK in CURSOR_RULES_BLOCK, (
+            "CursorAdapter's CURSOR_RULES_BLOCK must embed MNEMOS_BEHAVIOR_BLOCK verbatim"
+        )
+        assert BASE_BLOCK in CLAUDE_MD_BLOCK, (
+            "ClaudeCodeAdapter's CLAUDE_MD_BLOCK must embed MNEMOS_BEHAVIOR_BLOCK verbatim"
+        )

@@ -19,6 +19,19 @@ When asked about past context, notes, or decisions, run:
 `mnemos search <query>`
 This searches your personal memory store managed by mnemos.
 
+### When to search (proactive mid-session search)
+Do NOT wait for the user to ask explicitly — search mnemos proactively when:
+- **Analyzing a bug or error**: run `mnemos search <error-keyword>` before debugging.
+  Prior root-cause memories may already explain the failure.
+- **Answering "why was X decided"**: run `mnemos search <topic> decision` first.
+  Prior decisions are captured; surface them before guessing or re-deriving.
+- **Before refactoring**: run `mnemos search <module> constraint` to surface
+  known architecture constraints that must not be violated.
+- **Architecture or design questions**: run `mnemos search <component>` to
+  surface recorded design rationale before giving an opinion.
+- **Constraint checks ("can we do X?")**: run `mnemos search constraint` to
+  retrieve captured project-level limitations before answering.
+
 ### Capturing knowledge
 Capture liberally — when in doubt, capture. Use `mnemos capture "<insight>"` for:
 - Stable project decisions
