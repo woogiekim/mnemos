@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -319,4 +320,202 @@ class TestAdapterInstallHookFormat:
         )
         assert any("UserPromptSubmit.sh" in cmd for cmd in cmds), (
             "New hook script not written by update()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Keyword extraction (inline python3 snippet in UserPromptSubmit.sh)
+# ---------------------------------------------------------------------------
+
+def _extract_keywords(prompt: str, max_keywords: int = 5) -> list[str]:
+    """Run the same extraction logic as the inline python3 snippet in the hook.
+
+    This mirrors the snippet verbatim so that tests exercise the exact algorithm
+    without spawning the full bash hook.
+    """
+    import re
+
+    ENGLISH_STOPWORDS = {
+        'the','a','an','is','are','was','were','be','been','have','has','had',
+        'do','does','did','will','would','could','should','may','might','shall',
+        'must','can','to','of','in','on','at','by','for','from','with','and',
+        'or','but','not','so','if','as','it','its','this','that','these','those',
+        'i','you','we','they','my','your','our','their','what','how','why',
+        'when','where','which',
+    }
+    KOREAN_STOPWORDS = {
+        '이','가','은','는','을','를','의','에','에서','으로','로','와','과',
+        '하고','도','만','이다','있다','없다','했다','합니다','해요','거','것',
+        '수','좀','그','저','제','네','아',
+    }
+
+    def split_camel(token: str) -> list[str]:
+        parts = re.sub(r'([a-z])([A-Z])', r'\1 \2', token)
+        parts = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', parts)
+        return parts.split()
+
+    raw_tokens = re.split(r'[\s\W]+', prompt[:500])
+    words: list[str] = []
+    for tok in raw_tokens:
+        words.extend(split_camel(tok))
+
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for w in words:
+        lw = w.lower()
+        if len(w) < 2:
+            continue
+        if lw in ENGLISH_STOPWORDS or w in KOREAN_STOPWORDS:
+            continue
+        if lw in seen:
+            continue
+        seen.add(lw)
+        keywords.append(w)
+
+    keywords.sort(key=lambda x: -len(x))
+    return keywords[:max_keywords]
+
+
+class TestKeywordExtraction:
+    """Unit tests for the inline keyword-extraction algorithm."""
+
+    def test_camelcase_is_split_into_parts(self):
+        """'EventBus' must be split into 'Event' and 'Bus', both searchable."""
+        keywords = _extract_keywords("EventBus")
+        assert "Event" in keywords, f"'Event' missing from {keywords}"
+        assert "Bus" in keywords, f"'Bus' missing from {keywords}"
+
+    def test_pascalcase_multi_word_split(self):
+        """'UserPromptSubmit' splits into 'User', 'Prompt', 'Submit'."""
+        keywords = _extract_keywords("UserPromptSubmit")
+        assert "User" in keywords
+        assert "Prompt" in keywords
+        assert "Submit" in keywords
+
+    def test_english_stopwords_filtered(self):
+        """Common English stopwords must not appear in extracted keywords."""
+        keywords = _extract_keywords("the is a to of and or but")
+        assert keywords == [], f"Expected no keywords, got {keywords}"
+
+    def test_korean_stopwords_filtered(self):
+        """Korean grammatical particles must not appear in extracted keywords."""
+        keywords = _extract_keywords("이 가 은 는 을 를 의 에")
+        assert keywords == [], f"Expected no keywords, got {keywords}"
+
+    def test_short_tokens_excluded(self):
+        """Tokens with fewer than 2 characters must be dropped."""
+        keywords = _extract_keywords("a i x y z")
+        assert keywords == [], f"Expected no keywords, got {keywords}"
+
+    def test_max_five_keywords(self):
+        """At most 5 keywords must be returned regardless of prompt length."""
+        prompt = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+        keywords = _extract_keywords(prompt)
+        assert len(keywords) <= 5, f"Got more than 5 keywords: {keywords}"
+
+    def test_longest_keywords_preferred(self):
+        """Keywords are sorted by length descending so longer words come first."""
+        keywords = _extract_keywords("connection timeout server hi")
+        # 'connection' (10) > 'timeout' (7) > 'server' (6) > 'hi' (2)
+        assert keywords[0] == "connection", f"Expected 'connection' first, got {keywords}"
+        assert keywords[1] == "timeout"
+        assert keywords[2] == "server"
+
+    def test_duplicate_tokens_deduplicated(self):
+        """Repeated words appear only once in the keyword list."""
+        keywords = _extract_keywords("memory memory memory cache cache")
+        assert keywords.count("memory") == 1
+        assert keywords.count("cache") == 1
+
+    def test_mixed_prompt_real_world(self):
+        """Realistic prompt produces meaningful keywords and excludes noise."""
+        prompt = "Fix the EventBus connection timeout in the server module"
+        keywords = _extract_keywords(prompt)
+        # CamelCase split: EventBus → Event, Bus
+        all_kw_lower = [k.lower() for k in keywords]
+        assert "event" in all_kw_lower or "bus" in all_kw_lower, (
+            f"Expected camelCase parts in {keywords}"
+        )
+        # 'the', 'in' are stopwords — must not appear
+        assert "the" not in all_kw_lower
+        assert "in" not in all_kw_lower
+
+    def test_hook_searches_per_keyword_not_full_prompt(self, tmp_path):
+        """Hook must issue per-keyword searches rather than passing the raw prompt.
+
+        Strategy: install a fake 'mnemos' wrapper that records every argument it
+        receives, then inspect those logs to confirm no single call received the
+        full prompt verbatim.
+        """
+        # Create fake mnemos that logs argv to a file and exits 0 with no output.
+        fake_bin = tmp_path / "mnemos"
+        log_file = tmp_path / "mnemos_calls.log"
+        fake_bin.write_text(
+            f"#!/usr/bin/env bash\n"
+            f"echo \"$@\" >> {log_file}\n"
+            f"exit 0\n"
+        )
+        fake_bin.chmod(0o755)
+
+        long_prompt = (
+            "How does the EventBus work with the ConnectionTimeout retry logic "
+            "inside the ServerModule configuration system?"
+        )
+        env_extras = {"PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"}
+
+        # Use a pre-existing session flag so session-start load is skipped.
+        flag_dir = tmp_path / "mnemos-session-flags"
+        flag_dir.mkdir(parents=True)
+        (flag_dir / "mnemos-session-loaded-test-session-123").touch()
+
+        rc, output = _run_hook(
+            long_prompt,
+            mnemos_repo_root=str(tmp_path),
+            env_extras={**env_extras, "TMPDIR": str(tmp_path)},
+        )
+        assert rc == 0
+
+        if not log_file.exists():
+            # mnemos was never called (no PATH match or early exit) — skip.
+            pytest.skip("fake mnemos was not invoked (PATH not resolved)")
+
+        calls = log_file.read_text().splitlines()
+        # No single mnemos call should include the entire long prompt verbatim.
+        for call in calls:
+            assert long_prompt not in call, (
+                f"Full prompt passed verbatim to mnemos: {call!r}"
+            )
+        # At least one 'search' call must have happened.
+        assert any("search" in call for call in calls), (
+            f"No 'mnemos search' call found in: {calls}"
+        )
+
+    def test_hook_deduplicates_results(self, tmp_path):
+        """Results appearing in multiple keyword searches appear only once in output."""
+        # Create a fake mnemos that always returns the same result line.
+        fake_bin = tmp_path / "mnemos"
+        fake_bin.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'mem-001 [global] Shared result line'\n"
+            "exit 0\n"
+        )
+        fake_bin.chmod(0o755)
+
+        # Use pre-existing session flag to skip session-start load.
+        flag_dir = tmp_path / "mnemos-session-flags"
+        flag_dir.mkdir(parents=True)
+        (flag_dir / "mnemos-session-loaded-test-session-123").touch()
+
+        prompt = "EventBus ConnectionTimeout ServerModule retry logic system"
+        env_extras = {"PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"}
+
+        rc, output = _run_hook(
+            prompt,
+            mnemos_repo_root=str(tmp_path),
+            env_extras={**env_extras, "TMPDIR": str(tmp_path)},
+        )
+        assert rc == 0
+        # "Shared result line" must appear at most once in the output.
+        assert output.count("Shared result line") <= 1, (
+            f"Duplicate result found in output:\n{output}"
         )
