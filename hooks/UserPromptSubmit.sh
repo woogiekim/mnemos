@@ -428,7 +428,8 @@ echo "  - surprising findings, root causes discovered, constraints identified"
 echo "  - anything a future session would benefit from knowing"
 echo "Do NOT capture: trivial yes/no answers, simple file lookups, or steps already"
 echo "visible in the code or git history."
-echo "Notify the user inline: ✻ 🧠 <brief description> (session)"
+echo "Only after \`mnemos capture\` returns a captured ID, notify inline: ✻ 🧠 <brief description> (session)"
+echo "NEVER emit ✻ 🧠 without a preceding successful mnemos capture tool call."
 echo "</mnemos-capture-protocol>"
 
 exit 0
