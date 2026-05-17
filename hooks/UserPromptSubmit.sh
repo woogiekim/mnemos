@@ -19,8 +19,8 @@
 #   4. Per-prompt active search: extract key terms from the prompt and run
 #      `mnemos search` to surface relevant memories (top 5 results).
 #   5. Per-prompt capture reminder: inject a <mnemos-capture-protocol> block that
-#      instructs Claude to call `mnemos capture --quiet --session-id <id>` after
-#      each response turn so captures share the same session_id as hook_search
+#      instructs Claude to call `mnemos capture --session-id <id>` after each
+#      response turn so captures share the same session_id as hook_search
 #      events (observability correlation). The SESSION_ID from the hook input
 #      is also exported as MNEMOS_SESSION_ID for the CLI's env-var fallback.
 #   6. Observability: log every hook invocation, search call, and session-start
@@ -156,7 +156,7 @@ fi
 # /compact special case
 # ---------------------------------------------------------------------------
 if [ "${PROMPT}" = "/compact" ]; then
-  echo "[mnemos] /compact detected — before compacting, capture the key insights, decisions, and context from this session using mnemos capture --quiet. Run mnemos capture --quiet for each significant item now."
+  echo "[mnemos] /compact detected — before compacting, capture the key insights, decisions, and context from this session using mnemos capture. Run mnemos capture for each significant item now."
   exit 0
 fi
 
@@ -510,21 +510,18 @@ fi
 # ---------------------------------------------------------------------------
 # Capture protocol reminder — injected on every prompt turn.
 #
-# This block tells Claude to proactively call `mnemos capture` after
+# This block tells the AI to proactively call `mnemos capture` after
 # each response AND to call `mnemos search` when handling bug analysis,
 # decision review, or root-cause lookup mid-session.
 # Emitted unconditionally (even when no search results were found) because
 # the reminder should fire regardless of whether past memories were surfaced.
 #
-# Notification grammar (new in this commit):
-#   ✻ 💡 <brief>   — session layer
-#   ✻ 💾 <brief>   — project layer
-#   ✻ 🧠 <brief>   — global layer
-#
-# The (layer) text suffix is dropped.  During the 2-week grace period the
-# Stop hook's regex (hooks/Stop.sh) accepts BOTH forms:
-#   ✻ 💡 <brief>            ← new emoji-only form
-#   ✻ 🧠 <brief> (session)  ← legacy suffix form (parsed but not emitted)
+# Method E (closes #22): the mnemos capture CLI output IS the notification.
+# When mnemos capture runs, it prints the colorized ✻ <emoji> <brief> [id: <uuid>]
+# line directly to stdout. This appears in the AI's tool result and is visible
+# to the user. The AI must NOT write any ✻ ... notification text in its own
+# response text — the CLI already produced the canonical notice. Duplicating it
+# is forbidden.
 # ---------------------------------------------------------------------------
 echo ""
 echo "<mnemos-capture-protocol>"
@@ -535,7 +532,7 @@ echo "  - Before refactoring: run \`mnemos search <module> constraint\`."
 echo "  - Architecture/design question: run \`mnemos search <component>\`."
 echo ""
 echo "After responding, proactively capture new insights using:"
-echo "  mnemos capture --content \"<insight>\" --quiet --layer session --session-id \"${SESSION_ID}\""
+echo "  mnemos capture --content \"<insight>\" --layer session --session-id \"${SESSION_ID}\""
 echo "Capture liberally — when in doubt, capture. Aim for at least 1 capture per"
 echo "substantive response. Capture anything from:"
 echo "  - decisions, user preferences, architecture choices, workflow patterns"
@@ -556,14 +553,11 @@ echo ""
 echo "Use --layer transient for captures like 'test capture for protocol verification',"
 echo "'테스트 캡처', or any throwaway check that would pollute the session layer."
 echo ""
-echo "After \`mnemos capture\` returns \`captured: <uuid>\`, notify inline in this EXACT format:"
-echo "  ✻ 💡 <brief description> [id: <uuid>]   ← session"
-echo "  ✻ 💾 <brief description> [id: <uuid>]   ← project"
-echo "  ✻ 🧠 <brief description> [id: <uuid>]   ← global"
-echo "  ✻ ♻️ <brief description> [id: <uuid>]   ← transient (throwaway; Stop hook ignores)"
-echo "Use the emoji that matches the capture layer: 💡 session · 💾 project · 🧠 global · ♻️ transient"
-echo "The [id: <uuid>] suffix is MANDATORY and must be the real uuid printed by the tool call."
-echo "Without a real id from a tool call, the notification format is invalid — never fabricate or omit the id."
+echo "IMPORTANT — notification rule (Method E, closes #22):"
+echo "The mnemos capture CLI prints a colorized ✻ <emoji> <brief> notification line"
+echo "directly to stdout — visible in your tool result. That CLI output IS the"
+echo "canonical notification. DO NOT write any ✻ ... notification text in your own"
+echo "response text. Duplicating the CLI output as AI-authored text is forbidden."
 echo "</mnemos-capture-protocol>"
 
 exit 0

@@ -624,5 +624,6 @@ class ClaudeCodeAdapter(HostAdapter):
         if layer not in self._NOTIFY_CAPTURE_LAYERS:
             return
         content_preview = payload.get("content_preview", "")
+        item_id = payload.get("item_id", "")
         no_color = "NO_COLOR" in os.environ
-        print(capture_notice(content_preview, layer, no_color=no_color))
+        print(capture_notice(content_preview, layer, item_id=item_id, no_color=no_color))

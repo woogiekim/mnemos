@@ -225,13 +225,24 @@ class TestCaptureProtocol:
         assert "</mnemos-capture-protocol>" in output
 
     def test_capture_protocol_contains_command(self, tmp_path):
-        """The capture protocol block must include the mnemos capture command."""
+        """The capture protocol block must include the mnemos capture command.
+
+        Method E (closes #22): the capture command no longer uses --quiet because
+        the CLI stdout IS the notification. Without --quiet, the CLI emits both
+        the machine-readable 'captured: <uuid>' and the human-friendly notification.
+        The protocol still includes --layer session and --session-id.
+        """
         rc, output = _run_hook("explain the architecture",
                                mnemos_repo_root=str(tmp_path))
         assert rc == 0
         assert "mnemos capture" in output
-        assert "--quiet" in output
         assert "--layer session" in output
+        # Method E: --quiet is no longer in the protocol's example capture command
+        # (the CLI needs to emit the notification, which --quiet would suppress)
+        assert "--quiet" not in output, (
+            "Method E: capture protocol must NOT use --quiet; "
+            "the CLI stdout IS the notification and --quiet would suppress it"
+        )
 
     def test_capture_protocol_emitted_even_without_search_results(self, tmp_path):
         """The capture protocol block must fire even when no search results are found."""
@@ -267,49 +278,74 @@ class TestCaptureProtocol:
         assert "root cause" in output
         assert "constraint" in output
 
-    def test_capture_protocol_prohibits_notification_without_tool_call(self, tmp_path):
-        """Protocol must require a real capture id in the ✻ 🧠 notification format,
-        making fake notifications structurally impossible (Method A, closes #19).
-        Replaces the text-only prohibition from #17 (Method C)."""
+    def test_capture_protocol_prohibits_ai_written_notification(self, tmp_path):
+        """Protocol must PROHIBIT AI from writing ✻ ... notification text (Method E, closes #22).
+
+        Method E removes AI's responsibility for writing the notification entirely.
+        The CLI's own stdout IS the notification. The protocol must include an explicit
+        prohibition against duplicating the CLI output as AI-authored text.
+
+        Replaces Method A (#19) which still allowed AI to write the notification
+        (just requiring a mandatory [id: <uuid>] suffix — still bypassable).
+        """
         rc, output = _run_hook("explain this system", mnemos_repo_root=str(tmp_path))
         assert rc == 0
-        # Old wording (Method C / #17) must be gone — replaced by Method A
+        # Old Method-C wording must be gone
         assert "NEVER emit" not in output, (
-            "Old Method-C wording 'NEVER emit' must be replaced by Method-A id enforcement"
+            "Old Method-C wording 'NEVER emit' must not be present"
         )
-        # Method A: notification format must include [id: <uuid>] suffix
-        assert "[id:" in output, (
-            "Protocol must require [id: <uuid>] suffix in ✻ 🧠 notification (Method A, #19)"
+        # Old Method-A wording (mandatory id format in notification) must be gone:
+        # Under Method E, AI never writes the notification at all.
+        assert "[id: <uuid>]" not in output, (
+            "Method-A [id: <uuid>] format template must be removed under Method E; "
+            "AI is prohibited from writing any ✻ notification"
+        )
+        # Method E prohibition must be present
+        assert "DO NOT" in output or "forbidden" in output or "prohibited" in output, (
+            "Protocol must contain an explicit prohibition (DO NOT / forbidden / prohibited) "
+            "against AI writing ✻ ... notification text (Method E)"
         )
         assert "mnemos capture" in output
 
-    def test_capture_protocol_notification_gated_on_captured_id(self, tmp_path):
-        """Protocol must state that notification is only allowed after mnemos capture
-        returns a captured ID — not as a freestanding text emission."""
+    def test_capture_protocol_notification_is_cli_output(self, tmp_path):
+        """Protocol must state that the CLI output IS the notification (Method E).
+
+        The architectural shift: notification is the CLI's stdout, not AI text.
+        """
         rc, output = _run_hook("describe the architecture", mnemos_repo_root=str(tmp_path))
         assert rc == 0
-        # Wording must make the gate explicit: captured ID must precede notification
-        assert "captured: <uuid>" in output or "returns a captured" in output, (
-            "Protocol must gate the notification on a confirmed capture ID from mnemos capture"
+        # Protocol must explain that CLI output is the canonical notification
+        assert "CLI" in output or "tool result" in output or "stdout" in output, (
+            "Protocol must explain that the mnemos capture CLI output IS the notification "
+            "(Method E — CLI stdout is the canonical notification channel)"
         )
 
-    def test_capture_protocol_id_suffix_is_mandatory(self, tmp_path):
-        """Protocol must declare the [id: <uuid>] suffix MANDATORY so AI cannot omit it
-        (Method A enforcement, closes #19)."""
+    def test_capture_protocol_no_mandatory_id_suffix_instruction(self, tmp_path):
+        """Protocol must NOT instruct AI to include MANDATORY [id: <uuid>] suffix (Method E).
+
+        Under Method E, the CLI prints the notification (with the real id) directly.
+        AI is prohibited from writing any notification at all — so the MANDATORY
+        id-suffix instruction from Method A (#19) is no longer needed or correct.
+        """
         rc, output = _run_hook("describe the system design", mnemos_repo_root=str(tmp_path))
         assert rc == 0
-        assert "MANDATORY" in output, (
-            "Protocol must declare [id: <uuid>] suffix as MANDATORY to prevent fabrication"
+        assert "MANDATORY" not in output, (
+            "Method-A 'MANDATORY' id-suffix instruction must be removed under Method E; "
+            "AI is prohibited from writing any ✻ notification"
         )
 
-    def test_capture_protocol_id_format_in_exact_notification(self, tmp_path):
-        """Protocol must show the EXACT notification format with [id: <uuid>] suffix
-        so there is no ambiguity about how to format the inline notification."""
+    def test_capture_protocol_no_notification_format_template(self, tmp_path):
+        """Protocol must NOT include a notification format template for AI to follow (Method E).
+
+        Under Method E, AI writes no notification — the CLI does. Providing a
+        format template would imply AI should write the notification, which is forbidden.
+        """
         rc, output = _run_hook("what is the capture flow?", mnemos_repo_root=str(tmp_path))
         assert rc == 0
-        # The format line must appear verbatim (or with ✻ 🧠 marker and [id:])
-        assert "[id: <uuid>]" in output, (
-            "Protocol must include the exact format '(session) [id: <uuid>]' as a template"
+        # The exact Method-A format string must not appear
+        assert "[id: <uuid>]" not in output, (
+            "Method-A [id: <uuid>] notification format template must be removed; "
+            "under Method E AI never writes the notification"
         )
 
     def test_capture_protocol_no_old_method_c_wording(self, tmp_path):

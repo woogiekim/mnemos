@@ -618,10 +618,25 @@ class TestMnemosBehaviorBlockParity:
         assert "Should I capture this?" in MNEMOS_BEHAVIOR_BLOCK
 
     def test_behavior_block_capture_pattern_has_notify_and_delete_guidance(self):
-        """Capture interaction pattern must specify notify format and delete-on-request."""
-        assert "mnemos capture --quiet" in MNEMOS_BEHAVIOR_BLOCK
-        assert "(<layer>)" in MNEMOS_BEHAVIOR_BLOCK
+        """Capture interaction pattern must specify Method E notification rule and delete-on-request.
+
+        Method E (closes #22): AI must not write ✻ notifications — the CLI does.
+        The behavior block must include this prohibition and delete-on-request guidance.
+        Pre-Method-E: asserted 'mnemos capture --quiet' (AI used --quiet to suppress CLI notice).
+        Method E: --quiet is no longer the right pattern; AI calls mnemos capture without --quiet
+        so the CLI can emit its canonical notification.
+        """
+        # Under Method E, capture command does NOT use --quiet (CLI notification must fire)
+        assert "mnemos capture --quiet" not in MNEMOS_BEHAVIOR_BLOCK, (
+            "Method E: --quiet should NOT be in capture examples; "
+            "the CLI notification requires non-quiet mode"
+        )
+        # The delete-on-request guidance is preserved
         assert "mnemos delete" in MNEMOS_BEHAVIOR_BLOCK
+        # Method E prohibition must be present
+        assert "DO NOT" in MNEMOS_BEHAVIOR_BLOCK or "forbidden" in MNEMOS_BEHAVIOR_BLOCK, (
+            "Method E: prohibition against AI-written notifications must be in MNEMOS_BEHAVIOR_BLOCK"
+        )
 
     def test_behavior_block_notification_only_for_persistent_layers(self):
         """Notification must only apply to session/project/global; ephemeral/working are silent."""

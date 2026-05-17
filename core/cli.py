@@ -67,11 +67,21 @@ def memory_capture(
             preview = content[:60]
             click.echo(f"[mnemos] Skipped (duplicate): \"{preview}\"")
         else:
-            click.echo(f"captured: {captured_id}")
             if not quiet:
+                # Method E: CLI stdout IS the notification.
+                # Without --quiet: emit both the machine-readable id line AND
+                # the human-friendly notification with the real [id: <uuid>].
+                # AI must NOT duplicate this output — the tool result is the notice.
                 preview = content[:60]
                 suffix = "..." if len(content) > 60 else ""
-                click.echo(capture_notice(f"{preview}{suffix}", effective_layer, no_color=no_color))
+                click.echo(f"captured: {captured_id}")
+                click.echo(capture_notice(f"{preview}{suffix}", effective_layer,
+                                          item_id=captured_id, no_color=no_color))
+            else:
+                # --quiet: suppress everything (reserved for scripts / migrate flows).
+                # No captured: line, no notification. Used internally by hooks that
+                # want silent operation.
+                pass
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)

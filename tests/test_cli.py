@@ -553,10 +553,25 @@ class TestCaptureANSIOutput:
 
 
 class TestCaptureQuietFlag:
-    """Tests for --quiet flag on the capture command."""
+    """Tests for --quiet flag on the capture command.
+
+    Method E (closes #22): reversed --quiet semantics.
+
+    Without --quiet (default):
+        The CLI emits BOTH the machine-readable 'captured: <uuid>' line AND
+        the human-friendly '✻ <emoji> <brief> [id: <uuid>]' notification.
+        This CLI output IS the canonical notification — AI must not duplicate it.
+
+    With --quiet:
+        Suppresses ALL output (both 'captured:' and the notification line).
+        Reserved for scripts / migrate flows that manage their own output.
+    """
 
     def test_capture_quiet_suppresses_notice(self, runner, cli_with_repo):
-        """--quiet must suppress the capture_notice line (no ✻ 🧠)."""
+        """--quiet must suppress the capture_notice line (no ✻ 🧠).
+
+        Method E: --quiet suppresses everything including the notification.
+        """
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "Quiet flag test", "--quiet"],
@@ -565,25 +580,39 @@ class TestCaptureQuietFlag:
         assert "🧠" not in result.output
         assert "✻" not in result.output
 
-    def test_capture_quiet_still_prints_id(self, runner, cli_with_repo):
-        """--quiet must still output 'captured: <id>'."""
+    def test_capture_quiet_suppresses_captured_id_line(self, runner, cli_with_repo):
+        """--quiet must suppress the 'captured: <id>' line too (Method E behavior).
+
+        Under Method E, --quiet is reserved for scripts and suppresses all stdout.
+        Unlike the pre-Method-E behavior where --quiet still printed 'captured:',
+        the new contract is: --quiet = no output at all.
+        """
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "Quiet ID output test", "--quiet"],
         )
         assert result.exit_code == 0, result.output
-        assert result.output.strip().startswith("captured:")
+        # --quiet must produce no output at all
+        assert result.output.strip() == "", (
+            "--quiet should suppress all output (Method E); got: " + repr(result.output)
+        )
 
-    def test_capture_quiet_output_is_only_id_line(self, runner, cli_with_repo):
-        """--quiet output must contain exactly one line: the captured ID."""
+    def test_capture_quiet_produces_no_output(self, runner, cli_with_repo):
+        """--quiet must produce zero lines of output (Method E).
+
+        Pre-Method-E tests asserted exactly one line ('captured: <id>').
+        Under Method E, --quiet suppresses everything — the capture still
+        happens, but nothing is printed to stdout.
+        """
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--layer", "global", "--content", "Single line output test", "--quiet"],
         )
         assert result.exit_code == 0, result.output
         lines = [l for l in result.output.splitlines() if l.strip()]
-        assert len(lines) == 1
-        assert lines[0].startswith("captured:")
+        assert len(lines) == 0, (
+            "--quiet should produce no output under Method E; got: " + repr(result.output)
+        )
 
     def test_capture_without_quiet_still_shows_notice(self, runner, cli_with_repo):
         """Without --quiet, capture_notice line must still be present."""
@@ -596,13 +625,72 @@ class TestCaptureQuietFlag:
         assert "✻" in result.output
 
     def test_capture_quiet_with_ephemeral_layer(self, runner, cli_with_repo):
-        """--quiet must suppress notice for ephemeral layer too."""
+        """--quiet must suppress all output for ephemeral layer too (Method E)."""
         result = runner.invoke(
             cli_with_repo,
             ["capture", "--content", "Ephemeral quiet test", "--quiet"],
         )
         assert result.exit_code == 0, result.output
         assert "🧠" not in result.output
-        lines = [l for l in result.output.splitlines() if l.strip()]
-        assert len(lines) == 1
-        assert lines[0].startswith("captured:")
+        assert result.output.strip() == "", (
+            "--quiet should produce no output under Method E"
+        )
+
+    # ------------------------------------------------------------------
+    # Method E specific: without --quiet, notification includes [id: <uuid>]
+    # ------------------------------------------------------------------
+
+    def test_capture_without_quiet_emits_notification_line(self, runner, cli_with_repo):
+        """Without --quiet, capture must emit the ✻ <emoji> notification line (Method E).
+
+        The CLI output IS the canonical notification. AI must not duplicate it.
+        """
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "session", "--content", "Method E notification test",
+             "--no-color", "--id", "method-e-001"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "✻" in result.output
+        assert "💡" in result.output  # session layer emoji
+
+    def test_capture_without_quiet_notification_includes_id_suffix(self, runner, cli_with_repo):
+        """Without --quiet, the notification line must include [id: <uuid>] suffix (Method E).
+
+        The [id: <uuid>] suffix proves the capture actually executed and the id
+        is real — AI text output cannot fabricate this because it comes from the
+        tool call result.
+        """
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "ID suffix test", "--no-color",
+             "--id", "method-e-id-suffix-001"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "[id: method-e-id-suffix-001]" in result.output, (
+            "Notification line must include [id: <uuid>] suffix under Method E; "
+            "got: " + repr(result.output)
+        )
+
+    def test_capture_without_quiet_emits_both_captured_line_and_notification(self, runner, cli_with_repo):
+        """Without --quiet, capture must emit BOTH 'captured: <id>' AND the notification.
+
+        Method E makes the CLI stdout the canonical notification channel. Both
+        lines must be present so the AI's tool result shows the id clearly AND
+        the human-friendly notice.
+        """
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "project", "--content", "Both lines test", "--no-color",
+             "--id", "method-e-both-001"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "captured: method-e-both-001" in result.output, (
+            "Must emit 'captured: <id>' line"
+        )
+        assert "✻" in result.output and "💾" in result.output, (
+            "Must emit notification line with project emoji 💾"
+        )
+        assert "[id: method-e-both-001]" in result.output, (
+            "Notification must carry [id: <uuid>] suffix"
+        )

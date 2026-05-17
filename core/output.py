@@ -36,13 +36,18 @@ def _layer_emoji(layer: str) -> str:
     return LAYER_EMOJI.get(layer, "🧠")
 
 
-def capture_notice(content: str, layer: str, *, no_color: bool = False) -> str:
+def capture_notice(content: str, layer: str, item_id: str = "", *, no_color: bool = False) -> str:
     """Return a styled capture notice using the emoji-based grammar.
 
-    New format (this commit):
-        ``✻ 💡 <content>``  (session)
-        ``✻ 💾 <content>``  (project)
-        ``✻ 🧠 <content>``  (global / default)
+    Format (Method E — CLI is the canonical notification):
+        ``✻ 💡 <content> [id: <uuid>]``  (session)
+        ``✻ 💾 <content> [id: <uuid>]``  (project)
+        ``✻ 🧠 <content> [id: <uuid>]``  (global / default)
+
+    The ``[id: <uuid>]`` suffix is appended when *item_id* is non-empty.
+    This suffix is the canonical proof that the CLI executed the capture —
+    AI text output cannot fabricate it because the real uuid comes from the
+    tool call result.
 
     Legacy format (2-week grace period):
         ``✻ 🧠 <content> (layer)``
@@ -56,7 +61,8 @@ def capture_notice(content: str, layer: str, *, no_color: bool = False) -> str:
     *no_color* is True.
     """
     emoji = _layer_emoji(layer)
-    text = f"✻ {emoji} {content}"
+    id_suffix = f" [id: {item_id}]" if item_id else ""
+    text = f"✻ {emoji} {content}{id_suffix}"
     if no_color or "NO_COLOR" in os.environ:
         return text
     color = LAYER_COLOR.get(layer, "\033[90m")
