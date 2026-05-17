@@ -13,15 +13,24 @@ Example ``mnemos.yml``::
     storage:
       backend: obsidian
       vault_path: ~/Documents/ObsidianVault
+      sync:
+        enabled: false          # opt-in master switch — safe default
+        remote: origin
+        branch: main
+        mode: auto              # auto | manual
+        auto_pull_on_capture: true
+        auto_push_after_commit: true
+        commit_message_template: "mnemos: {layer} {id} ({timestamp})"
+        pull_rate_limit_seconds: 30
 
-Multi-host sync is out of scope for this PR.  The vault path is whatever
-the user configures; iCloud / git-based sync is the user's responsibility.
-See the README for guidance.
+Multi-host sync is available for the Obsidian backend when
+``storage.sync.enabled: true``.  The default backend (MemoryStore) never
+grows sync wiring — see :class:`SyncConfig` for the full field catalogue.
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +39,51 @@ try:
     _HAS_YAML = True
 except ImportError:  # pragma: no cover
     _HAS_YAML = False
+
+
+#: Default commit message template — supports {layer}, {id}, {timestamp}.
+DEFAULT_COMMIT_MESSAGE_TEMPLATE = "mnemos: {layer} {id} ({timestamp})"
+
+#: Number of seconds to skip a pull when the last successful pull is recent.
+DEFAULT_PULL_RATE_LIMIT_SECONDS = 30
+
+
+@dataclass
+class SyncConfig:
+    """Resolved ``storage.sync.*`` configuration.
+
+    All fields have safe defaults so callers can always read them without
+    checking whether the ``sync:`` block was present in the YAML file.
+    """
+
+    #: Master switch.  When ``False`` (the default) no sync hooks run and
+    #: the ObsidianBackend behaves exactly as before #24.
+    enabled: bool = False
+
+    #: Remote name for pull/push (default: ``"origin"``).
+    remote: str = "origin"
+
+    #: Branch to pull from / push to (default: ``"main"``).
+    branch: str = "main"
+
+    #: ``"auto"`` (hooks fire automatically) or ``"manual"`` (user calls
+    #: ``mnemos sync pull/push`` explicitly).
+    mode: str = "auto"
+
+    #: When ``True`` and ``mode == "auto"``, a pull is attempted before each
+    #: write if the rate-limit window has expired.
+    auto_pull_on_capture: bool = True
+
+    #: When ``True`` and a commit was actually created, push immediately.
+    auto_push_after_commit: bool = True
+
+    #: Python :meth:`str.format` template for commit messages.
+    #: Supported placeholders: ``{layer}``, ``{id}``, ``{timestamp}``.
+    commit_message_template: str = DEFAULT_COMMIT_MESSAGE_TEMPLATE
+
+    #: Minimum number of seconds between automatic pulls.  A pull is skipped
+    #: when the last successful pull occurred within this window.
+    pull_rate_limit_seconds: int = DEFAULT_PULL_RATE_LIMIT_SECONDS
 
 
 @dataclass
@@ -41,6 +95,9 @@ class BackendConfig:
 
     #: Absolute path to the Obsidian vault (``None`` when backend != obsidian).
     vault_path: str | None = None
+
+    #: Sync configuration (always present; ``enabled=False`` by default).
+    sync: SyncConfig = field(default_factory=SyncConfig)
 
 
 def _load_yaml_config(repo_root: str | None = None) -> dict[str, Any]:
@@ -62,6 +119,44 @@ def _load_yaml_config(repo_root: str | None = None) -> dict[str, Any]:
             except Exception:
                 pass
     return {}
+
+
+def _parse_sync_config(sync_raw: Any) -> SyncConfig:
+    """Parse the ``storage.sync`` sub-dict into a :class:`SyncConfig`.
+
+    Missing keys fall back to the dataclass defaults.  Unknown keys are
+    silently ignored so future schema additions remain forward-compatible.
+    """
+    if not isinstance(sync_raw, dict):
+        return SyncConfig()
+
+    def _bool(v: Any, default: bool) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes")
+        return default
+
+    def _int(v: Any, default: int) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+    return SyncConfig(
+        enabled=_bool(sync_raw.get("enabled"), False),
+        remote=str(sync_raw.get("remote", "origin")),
+        branch=str(sync_raw.get("branch", "main")),
+        mode=str(sync_raw.get("mode", "auto")),
+        auto_pull_on_capture=_bool(sync_raw.get("auto_pull_on_capture"), True),
+        auto_push_after_commit=_bool(sync_raw.get("auto_push_after_commit"), True),
+        commit_message_template=str(
+            sync_raw.get("commit_message_template", DEFAULT_COMMIT_MESSAGE_TEMPLATE)
+        ),
+        pull_rate_limit_seconds=_int(
+            sync_raw.get("pull_rate_limit_seconds"), DEFAULT_PULL_RATE_LIMIT_SECONDS
+        ),
+    )
 
 
 def get_backend_config(repo_root: str | None = None) -> BackendConfig:
@@ -89,4 +184,7 @@ def get_backend_config(repo_root: str | None = None) -> BackendConfig:
         if raw_vp:
             vault_path = str(Path(str(raw_vp)).expanduser().resolve())
 
-    return BackendConfig(backend=backend_name, vault_path=vault_path)
+    # Resolve sync config (only meaningful for obsidian; always populated)
+    sync = _parse_sync_config(storage_cfg.get("sync"))
+
+    return BackendConfig(backend=backend_name, vault_path=vault_path, sync=sync)
