@@ -162,6 +162,13 @@ def sync_source_to_install(repo_root: str, install_root: Optional[Path] = None) 
         dst = install_root / dir_name
         if not src.is_dir():
             continue
+        # Skip when source and destination are the same path (editable install)
+        try:
+            if src.resolve() == dst.resolve():
+                synced.append(dir_name)
+                continue
+        except OSError:
+            pass
         shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
         synced.append(dir_name)
 
