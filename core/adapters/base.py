@@ -71,23 +71,28 @@ to a higher layer only when the information clearly belongs there from the start
 
 Example commands:
 ```
-mnemos capture --quiet --content "Architecture: hexagonal pattern" --layer project
-mnemos capture --quiet --content "User preference: TDD required" --layer global
-mnemos capture --quiet --content "Found root cause of auth bug" --layer session
+mnemos capture --content "Architecture: hexagonal pattern" --layer project
+mnemos capture --content "User preference: TDD required" --layer global
+mnemos capture --content "Found root cause of auth bug" --layer session
 ```
 
 ### Capture interaction pattern
 - Capture proactively — do NOT ask permission before calling `mnemos capture`
-- Always use `mnemos capture --quiet` when capturing
 - After capturing, notify in your own response text:
-  - **session, project, global**: `✻ 🧠 <brief description> (<layer>)`
+  - **session, project, global**: `✻ <emoji> <brief description> (<layer>)`
   - **ephemeral, working**: no notification
 - If the user says the capture is unnecessary, delete it: `mnemos delete <id>`
 - Never prompt "Should I capture this?" — make the judgment and act
 
+**Notification rule (Method E):** The `mnemos capture` CLI prints the
+`✻ <emoji> <brief> [id: <uuid>]` notification line to stdout automatically.
+That CLI output IS the notification. DO NOT write any `✻ ...` notification
+text in your own response — duplicating the CLI output as AI-authored text
+is forbidden and impossible to distinguish from fabrication.
+
 ### /compact — automatic session capture
 When [mnemos] /compact detected appears in context:
-- Immediately run `mnemos capture --quiet` for each significant insight, decision,
+- Immediately run `mnemos capture` for each significant insight, decision,
   or piece of context from the current session that has not already been captured
 - Do this BEFORE the compact summary is generated
 - Be thorough: this is the last chance to preserve session knowledge"""
