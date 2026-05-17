@@ -553,6 +553,63 @@ class TestMemoryForgetCommand:
         assert result.exit_code == 0, result.output
 
 
+class TestMemoryDeleteCommand:
+    """Tests for `mnemos delete` CLI command (issue #33)."""
+
+    def test_delete_removes_item(self, runner, cli_with_repo, repo_root):
+        """delete must remove the item from the store."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "delete me", "--id", "del-001"],
+        )
+        result = runner.invoke(cli_with_repo, ["delete", "del-001"])
+        assert result.exit_code == 0, result.output
+        assert "deleted: del-001" in result.output
+
+        # Item must no longer exist
+        matches = list((repo_root / "wiki" / "global").glob("del-001.md"))
+        assert len(matches) == 0
+
+    def test_delete_no_archive_required(self, runner, cli_with_repo, repo_root):
+        """delete must succeed on a non-archived item (unlike 'forget')."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "transient capture", "--id", "del-002"],
+        )
+        # Item is in 'stored' stage — forget would fail, delete must succeed
+        result = runner.invoke(cli_with_repo, ["delete", "del-002"])
+        assert result.exit_code == 0, result.output
+        assert "deleted: del-002" in result.output
+
+    def test_delete_nonexistent_item_exits_nonzero(self, runner, cli_with_repo):
+        """delete on a missing item must exit with a non-zero code."""
+        result = runner.invoke(cli_with_repo, ["delete", "nonexistent-xyz-999"])
+        assert result.exit_code != 0
+        assert "error" in result.output.lower()
+
+    def test_delete_item_not_in_list_after_deletion(self, runner, cli_with_repo):
+        """item must not appear in 'list' output after deletion."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "gone after delete", "--id", "del-003"],
+        )
+        runner.invoke(cli_with_repo, ["delete", "del-003"])
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert "del-003" not in result.output
+
+    def test_delete_ephemeral_item(self, runner, cli_with_repo, repo_root):
+        """delete must work on ephemeral-layer items."""
+        capture_result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "ephemeral", "--content", "ephemeral transient",
+             "--id", "del-eph-001", "--run-id", "test-run"],
+        )
+        assert capture_result.exit_code == 0, capture_result.output
+        result = runner.invoke(cli_with_repo, ["delete", "del-eph-001"])
+        assert result.exit_code == 0, result.output
+        assert "deleted: del-eph-001" in result.output
+
+
 class TestConsolidateCommand:
     """Tests for `mnemos consolidate` CLI command (Part 2 of issue #11)."""
 

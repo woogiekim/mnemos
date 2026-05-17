@@ -226,6 +226,50 @@ class TestForget:
         assert not any(item_id in m.name for m in matches)
 
 
+class TestDelete:
+    """Tests for MemoryGateway.delete (issue #33)."""
+
+    def test_delete_removes_item(self, gateway, repo_root):
+        """delete must remove the item file from the store."""
+        item_id = gateway.capture(
+            layer="global",
+            content="To be deleted unconditionally",
+            run_id="run-test",
+        )
+        gateway.delete(item_id=item_id)
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert not any(item_id in m.name for m in matches)
+
+    def test_delete_no_archive_required(self, gateway, repo_root):
+        """delete must succeed on a non-archived item (unlike forget)."""
+        from core.policy import PolicyViolationError
+        item_id = gateway.capture(
+            layer="global",
+            content="Non-archived transient item",
+            run_id="run-test",
+        )
+        # forget would raise; delete must not
+        gateway.delete(item_id=item_id)
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert not any(item_id in m.name for m in matches)
+
+    def test_delete_nonexistent_raises_file_not_found(self, gateway):
+        """delete on a missing item_id must raise FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            gateway.delete(item_id="does-not-exist-xyz-999")
+
+    def test_delete_removes_from_fts_index(self, gateway):
+        """delete must remove the item from the FTS index."""
+        item_id = gateway.capture(
+            layer="global",
+            content="unique-fts-delete-probe-content-xyz",
+            run_id="run-test",
+        )
+        gateway.delete(item_id=item_id)
+        results = gateway.search("unique-fts-delete-probe-content-xyz")
+        assert not any(r.get("item_id") == item_id for r in results)
+
+
 class TestAuditLog:
     def test_all_mutations_are_logged(self, gateway, repo_root):
         """Every mutation (capture, archive) must append to log.jsonl."""

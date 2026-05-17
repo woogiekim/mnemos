@@ -432,6 +432,27 @@ def memory_forget(item_id: str, force: bool) -> None:
         sys.exit(1)
 
 
+@cli.command("delete")
+@click.argument("item_id")
+def memory_delete(item_id: str) -> None:
+    """Unconditionally delete a memory item by ID.
+
+    Unlike the 'forget' command, 'delete' does not require the item to be
+    archived first.  Use it to remove transient captures (ephemeral/session
+    layer) that should be cleaned up immediately.
+
+    \b
+      mnemos delete <ITEM_ID>
+    """
+    gw = _get_gateway()
+    try:
+        gw.delete(item_id=item_id)
+        click.echo(f"deleted: {item_id}")
+    except FileNotFoundError:
+        click.echo(f"error: item '{item_id}' not found", err=True)
+        sys.exit(1)
+
+
 @cli.command("doctor")
 def doctor_cmd() -> None:
     """Check all detected host adapters for missing hooks and auto-repair them.
