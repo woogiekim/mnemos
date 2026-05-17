@@ -88,6 +88,78 @@ class TestVectorFallback:
         assert results == []
 
 
+class TestFTSCompoundTerms:
+    """Tests for compound technical term handling (issue #30).
+
+    Covers queries containing colons (e.g. ``crew:run``) and hyphens
+    (e.g. ``agent-crew``).  The FTS index must normalise such terms to
+    space-separated tokens so that documents are found even when the
+    full compound form is absent from the content.
+    """
+
+    def test_search_colon_term_matches_exact_compound(self, fts_index):
+        """Searching 'crew:run' finds a document that contains 'crew:run'."""
+        fts_index.index_item(
+            item_id="colon-exact",
+            content="Use crew:run to launch the agent pipeline.",
+            metadata={},
+        )
+        results = fts_index.search("crew:run")
+        assert any(r["item_id"] == "colon-exact" for r in results)
+
+    def test_search_colon_term_matches_space_separated_content(self, fts_index):
+        """Searching 'crew:run' also finds docs where 'crew' and 'run' appear separately."""
+        fts_index.index_item(
+            item_id="colon-space",
+            content="The crew system is used to run agent tasks across the pipeline.",
+            metadata={},
+        )
+        results = fts_index.search("crew:run")
+        assert any(r["item_id"] == "colon-space" for r in results)
+
+    def test_search_hyphen_term_matches_exact_compound(self, fts_index):
+        """Searching 'agent-crew' finds a document that contains 'agent-crew'."""
+        fts_index.index_item(
+            item_id="hyphen-exact",
+            content="The agent-crew system manages parallel task execution.",
+            metadata={},
+        )
+        results = fts_index.search("agent-crew")
+        assert any(r["item_id"] == "hyphen-exact" for r in results)
+
+    def test_search_hyphen_term_matches_space_separated_content(self, fts_index):
+        """Searching 'agent-crew' also finds docs where 'agent' and 'crew' appear separately."""
+        fts_index.index_item(
+            item_id="hyphen-space",
+            content="Each agent in the crew is responsible for a specific pipeline stage.",
+            metadata={},
+        )
+        results = fts_index.search("agent-crew")
+        assert any(r["item_id"] == "hyphen-space" for r in results)
+
+    def test_search_compound_no_operationalerror(self, fts_index):
+        """Searching compound terms must not raise OperationalError."""
+        # Both crew:run and agent-crew would raise OperationalError without sanitisation.
+        fts_index.index_item(
+            item_id="compound-safe",
+            content="Documentation for the crew pipeline management system.",
+            metadata={},
+        )
+        # These calls must complete without exception.
+        fts_index.search("crew:run")
+        fts_index.search("agent-crew")
+
+    def test_normalise_compound_terms_helper(self):
+        """_normalise_compound_terms replaces colons and hyphens with spaces."""
+        from core.fts import _normalise_compound_terms
+
+        assert _normalise_compound_terms("crew:run") == "crew run"
+        assert _normalise_compound_terms("agent-crew") == "agent crew"
+        assert _normalise_compound_terms("foo:bar-baz") == "foo bar baz"
+        assert _normalise_compound_terms("no_special_chars") == "no_special_chars"
+        assert _normalise_compound_terms("plain words only") == "plain words only"
+
+
 class TestSearchMiddleware:
     def test_search_middleware_uses_fts_first(self, tmp_path):
         """SearchMiddleware returns FTS results when items are indexed."""
