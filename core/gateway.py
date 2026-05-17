@@ -212,6 +212,119 @@ class MemoryGateway:
     # Capture                                                               #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Auto-classify                                                         #
+    # ------------------------------------------------------------------ #
+
+    def auto_classify(self, item_id: str, content: str) -> list[str]:
+        """Derive and assign at least one tag automatically from *content*.
+
+        Tags are derived from simple keyword matching across several
+        semantic categories.  At least one tag is always assigned — the
+        catch-all ``"general"`` tag is appended when no category keyword
+        matches.
+
+        The method is idempotent: tags that already exist on the item are
+        preserved; only genuinely new tags are added.
+
+        Returns the list of newly-added tags (may be empty if all derived
+        tags were already present).
+        """
+        import re
+
+        text = content.lower()
+
+        # Keyword → tag mapping (ordered; first match wins per category).
+        CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
+            ("architecture", [
+                "architecture", "design pattern", "hexagonal", "ddd",
+                "domain model", "microservice", "monolith", "service",
+                "protocol", "interface", "abstraction",
+            ]),
+            ("decision", [
+                "decided", "decision", "decided to", "we chose", "we will use",
+                "chosen", "rationale", "trade-off", "tradeoff",
+            ]),
+            ("constraint", [
+                "constraint", "must not", "must always", "never", "forbidden",
+                "required by", "enforced", "invariant", "rule:",
+            ]),
+            ("bug", [
+                "bug", "error", "exception", "traceback", "crash", "failure",
+                "root cause", "fix:", "workaround",
+            ]),
+            ("performance", [
+                "performance", "latency", "throughput", "slow", "fast",
+                "cache", "index", "query", "benchmark", "ms", "seconds",
+            ]),
+            ("security", [
+                "security", "auth", "authentication", "authorisation",
+                "authorization", "token", "secret", "credential", "csrf",
+                "xss", "injection",
+            ]),
+            ("testing", [
+                "test", "pytest", "unittest", "assertion", "mock", "fixture",
+                "tdd", "coverage", "spec", "should ",
+            ]),
+            ("workflow", [
+                "workflow", "pipeline", "step", "phase", "process", "hook",
+                "script", "automation", "ci", "cd", "deploy",
+            ]),
+            ("preference", [
+                "prefer", "preference", "user wants", "always use",
+                "from now on", "in this project", "convention",
+            ]),
+            ("project", [
+                "project", "feature", "milestone", "sprint", "backlog",
+                "issue", "ticket", "pr", "pull request",
+            ]),
+        ]
+
+        # Collect matched categories
+        matched: list[str] = []
+        for tag_label, keywords in CATEGORY_KEYWORDS:
+            pattern = r"|".join(re.escape(kw) for kw in keywords)
+            if re.search(pattern, text):
+                matched.append(tag_label)
+
+        # Guarantee at least one tag
+        if not matched:
+            matched = ["general"]
+
+        # Read current tags and add only new ones
+        try:
+            item = self._store.read(item_id)
+            existing_tags: list[str] = list(item.get("tags") or [])
+        except Exception:
+            existing_tags = []
+
+        new_tags = [t for t in matched if t not in existing_tags]
+        if new_tags:
+            all_tags = existing_tags + new_tags
+            try:
+                item = self._store.read(item_id)
+                self._store.update(
+                    item["_path"],
+                    metadata_updates={"tags": all_tags, "stage": "classified"},
+                )
+                self._logger.append(
+                    "auto_classify",
+                    item_id,
+                    item.get("layer", "unknown"),
+                    {"tags_added": new_tags},
+                )
+                # Update FTS index with new tags
+                self._fts.index_item(
+                    item_id=item_id,
+                    content=item.get("content", ""),
+                    metadata={"layer": item.get("layer", ""), "tags": all_tags},
+                )
+            except Exception:
+                # Auto-classify is best-effort — never fail a capture
+                pass
+
+        return new_tags
+
     def capture(
         self,
         content: str,
@@ -222,6 +335,7 @@ class MemoryGateway:
         run_id: str | None = None,
         session_id: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        no_classify: bool = False,
     ) -> str | None:
         """Capture a new memory item into the target layer.
 
@@ -335,6 +449,12 @@ class MemoryGateway:
             tags=tags or [],
             session_id=session_id,
         )
+
+        # Auto-classify: derive tags automatically after write, unless opted out.
+        # This runs after the observability log so the initial capture event
+        # reflects pre-classify state; classify adds tags in a separate update.
+        if not no_classify:
+            self.auto_classify(item_id=item_id, content=content)
 
         return item_id
 
