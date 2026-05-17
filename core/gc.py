@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from core.store import MemoryStore
-from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -281,74 +280,44 @@ def compute_garbage_score(
 # Record builder
 # ---------------------------------------------------------------------------
 
-def _build_record(path: Path, store: MemoryStore, staleness_hours: float, now: datetime.datetime) -> MemoryRecord | None:
-    """Parse *path* and return a :class:`MemoryRecord`, or None on error."""
+def _build_record(item: dict[str, Any], layer: str, staleness_hours: float, now: datetime.datetime) -> MemoryRecord | None:
+    """Build a :class:`MemoryRecord` from an already-parsed item dict.
+
+    The *item* dict must contain at minimum the ``_path`` key (absolute path
+    as a string) as yielded by :meth:`~core.store.MemoryStore.iter_layer_items`.
+    """
     try:
-        item = store._parse_file(path)
+        raw_path = item.get("_path", "")
+        path = Path(raw_path) if raw_path else Path()
+
+        created_at = _parse_dt(item.get("created_at"))
+        last_access_at = _parse_dt(item.get("last_access_at"))
+        access_count = int(item.get("access_count", 0))
+        quality = float(item.get("quality_score", 0.8))
+        stage = str(item.get("stage", "stored"))
+        # Prefer the layer recorded in the item's metadata; fall back to the
+        # caller-supplied layer (the layer we iterated over).
+        resolved_layer = str(item.get("layer") or layer)
+        item_id = str(item.get("id") or path.stem)
+        content_preview = str(item.get("content", ""))[:80]
+
+        score, breakdown = compute_garbage_score(item, staleness_hours=staleness_hours, now=now)
+
+        return MemoryRecord(
+            item_id=item_id,
+            layer=resolved_layer,
+            path=str(path),
+            created_at=created_at,
+            last_access_at=last_access_at,
+            access_count=access_count,
+            quality_score=quality,
+            stage=stage,
+            content_preview=content_preview,
+            garbage_score=score,
+            score_breakdown=breakdown,
+        )
     except Exception:
         return None
-
-    created_at = _parse_dt(item.get("created_at"))
-    last_access_at = _parse_dt(item.get("last_access_at"))
-    access_count = int(item.get("access_count", 0))
-    quality = float(item.get("quality_score", 0.8))
-    stage = str(item.get("stage", "stored"))
-    layer = str(item.get("layer", path.parent.parent.name))
-    item_id = str(item.get("id") or path.stem)
-    content_preview = str(item.get("content", ""))[:80]
-
-    score, breakdown = compute_garbage_score(item, staleness_hours=staleness_hours, now=now)
-
-    return MemoryRecord(
-        item_id=item_id,
-        layer=layer,
-        path=str(path),
-        created_at=created_at,
-        last_access_at=last_access_at,
-        access_count=access_count,
-        quality_score=quality,
-        stage=stage,
-        content_preview=content_preview,
-        garbage_score=score,
-        score_breakdown=breakdown,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Path enumeration helpers (mirrors gateway.py / consolidate() pattern)
-# ---------------------------------------------------------------------------
-
-def _iter_layer_paths(repo_root: Path, layer: str) -> Iterator[Path]:
-    """Yield all .md file paths for a given layer."""
-    if layer == "transient":
-        # Flat directory — no sub-namespacing by run_id or session_id.
-        transient_dir = repo_root / TRANSIENT_PATH
-        if transient_dir.exists():
-            yield from transient_dir.glob("*.md")
-    elif layer == "ephemeral":
-        agent_runs = repo_root / ".agent" / "runs"
-        if agent_runs.exists():
-            for rd in agent_runs.iterdir():
-                if rd.is_dir():
-                    scratch = rd / "scratch"
-                    if scratch.exists():
-                        yield from scratch.glob("*.md")
-    elif layer == "working":
-        agent_runs = repo_root / ".agent" / "runs"
-        if agent_runs.exists():
-            for rd in agent_runs.iterdir():
-                if rd.is_dir():
-                    working_dir = rd / "working"
-                    if working_dir.exists():
-                        yield from working_dir.glob("*.md")
-    elif layer == "session":
-        agent_sessions = repo_root / ".agent" / "sessions"
-        if agent_sessions.exists():
-            yield from agent_sessions.rglob("*.md")
-    elif layer in LAYER_STATIC_PATHS:
-        layer_dir = repo_root / LAYER_STATIC_PATHS[layer]
-        if layer_dir.exists():
-            yield from layer_dir.glob("*.md")
 
 
 # ---------------------------------------------------------------------------
@@ -424,8 +393,8 @@ class GarbageCollector:
         for layer in self.layers:
             region = GCRegion(layer=layer)
             layer_staleness = self._effective_staleness_hours(layer)
-            for path in _iter_layer_paths(self._root, layer):
-                record = _build_record(path, self._store, layer_staleness, now)
+            for item in self._store.iter_layer_items(layer):
+                record = _build_record(item, layer, layer_staleness, now)
                 if record is not None:
                     region.records.append(record)
             regions.append(region)

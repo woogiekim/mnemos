@@ -122,6 +122,7 @@ class MemoryGateway:
         self._search = SearchMiddleware(
             repo_root=self._root,
             fts_index=self._fts,
+            store=self._store,
         )
         # Auto-generated IDs scoped to this gateway instance (i.e. this process)
         self._run_id: str = str(uuid.uuid4())
@@ -596,31 +597,9 @@ class MemoryGateway:
         all_layers = static_layers + [l for l in dynamic_layers if l not in static_layers]
 
         for layer in all_layers:
-            # For dynamic layers that need run_id/session_id, scan the
-            # underlying directories directly to find all items.
-            if layer in ("ephemeral", "working"):
-                agent_runs = Path(self._root) / ".agent" / "runs"
-                if not agent_runs.exists():
-                    continue
-                run_dirs = [d for d in agent_runs.iterdir() if d.is_dir()]
-                sub = "scratch" if layer == "ephemeral" else "working"
-                paths = []
-                for rd in run_dirs:
-                    layer_dir = rd / sub
-                    if layer_dir.exists():
-                        paths.extend(layer_dir.glob("*.md"))
-            elif layer == "session":
-                agent_sessions = Path(self._root) / ".agent" / "sessions"
-                if not agent_sessions.exists():
-                    continue
-                paths = list(agent_sessions.rglob("*.md"))
-            else:
-                paths = list(self._store.list_layer(layer))
-
-            for item_path in paths:
+            for item in self._store.iter_layer_items(layer):
                 try:
-                    item = self._store._parse_file(item_path)
-                    item_id = item.get("id") or item_path.stem
+                    item_id = item.get("id") or Path(item["_path"]).stem
                     if not self._policy.check_promotion_eligible(item):
                         continue
                     next_layer = self._policy.get_next_layer(item.get("layer", ""))
@@ -658,37 +637,12 @@ class MemoryGateway:
             if limit is not None and len(results) >= limit:
                 break
 
-            paths: list[Path] = []
-            if layer == "ephemeral":
-                agent_runs = Path(self._root) / ".agent" / "runs"
-                if agent_runs.exists():
-                    for rd in agent_runs.iterdir():
-                        if rd.is_dir():
-                            scratch = rd / "scratch"
-                            if scratch.exists():
-                                paths.extend(scratch.glob("*.md"))
-            elif layer == "working":
-                agent_runs = Path(self._root) / ".agent" / "runs"
-                if agent_runs.exists():
-                    for rd in agent_runs.iterdir():
-                        if rd.is_dir():
-                            working_dir = rd / "working"
-                            if working_dir.exists():
-                                paths.extend(working_dir.glob("*.md"))
-            elif layer == "session":
-                agent_sessions = Path(self._root) / ".agent" / "sessions"
-                if agent_sessions.exists():
-                    paths = list(agent_sessions.rglob("*.md"))
-            else:
-                paths = list(self._store.list_layer(layer))
-
-            for item_path in paths:
+            for item in self._store.iter_layer_items(layer):
                 if limit is not None and len(results) >= limit:
                     break
                 try:
-                    item = self._store._parse_file(item_path)
                     results.append({
-                        "item_id": item.get("id") or item_path.stem,
+                        "item_id": item.get("id") or Path(item["_path"]).stem,
                         "layer": item.get("layer", layer),
                         "content": item.get("content", ""),
                         "tags": item.get("tags", []),

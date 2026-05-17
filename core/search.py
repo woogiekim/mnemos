@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from core.fts import FTSIndex
 from core.layers import LAYER_STATIC_PATHS
 from core.vector import VectorBackend
+
+if TYPE_CHECKING:
+    from core.store import StorageBackend
 
 
 class SearchMiddleware:
@@ -22,10 +25,12 @@ class SearchMiddleware:
         repo_root: str,
         fts_index: FTSIndex | None = None,
         vector_backend: VectorBackend | None = None,
+        store: "StorageBackend | None" = None,
     ) -> None:
         self._root = Path(repo_root)
         self._fts = fts_index or FTSIndex(db_path=str(self._root / ".agent" / "state" / "fts.db"))
         self._vector = vector_backend or VectorBackend()
+        self._store = store
 
     def search(
         self,
@@ -82,20 +87,33 @@ class SearchMiddleware:
         layers: list[str] | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Python pathlib grep fallback — searches markdown files for query text."""
-        results = []
-        search_dirs = self._get_search_dirs(layers)
+        """Python pathlib grep fallback — searches markdown files for query text.
 
+        When a :class:`~core.store.StorageBackend` was supplied at construction,
+        iteration goes through ``store.iter_layer_items`` so the storage
+        abstraction is honoured.  Without a store the method falls back to
+        direct filesystem globbing over the static layers (preserving the
+        original behaviour for callers that do not yet pass a store).
+        """
+        results: list[dict[str, Any]] = []
         query_lower = query.lower()
-        for search_dir in search_dirs:
-            if not search_dir.exists():
-                continue
-            for md_file in search_dir.glob("*.md"):
-                try:
-                    text = md_file.read_text(encoding="utf-8", errors="ignore")
+
+        if self._store is not None:
+            # Route through the StorageBackend Protocol.
+            search_layers = list(LAYER_STATIC_PATHS.keys()) if layers is None else [
+                l for l in layers if l in LAYER_STATIC_PATHS
+            ]
+            for layer in search_layers:
+                for item in self._store.iter_layer_items(layer):
+                    content = item.get("content", "")
+                    # Also search YAML front-matter by serialising the full file text.
+                    raw_path = item.get("_path", "")
+                    try:
+                        text = Path(raw_path).read_text(encoding="utf-8", errors="ignore") if raw_path else content
+                    except OSError:
+                        text = content
                     if query_lower in text.lower():
-                        # Try to extract item_id from file stem
-                        item_id = md_file.stem
+                        item_id = item.get("id") or Path(raw_path).stem if raw_path else ""
                         results.append(
                             {
                                 "item_id": item_id,
@@ -107,13 +125,40 @@ class SearchMiddleware:
                         )
                         if len(results) >= limit:
                             return results
-                except OSError:
+        else:
+            # Legacy path — direct filesystem globbing over static layers.
+            search_dirs = self._get_search_dirs(layers)
+            for search_dir in search_dirs:
+                if not search_dir.exists():
                     continue
+                for md_file in search_dir.glob("*.md"):
+                    try:
+                        text = md_file.read_text(encoding="utf-8", errors="ignore")
+                        if query_lower in text.lower():
+                            item_id = md_file.stem
+                            results.append(
+                                {
+                                    "item_id": item_id,
+                                    "content": text[:500],
+                                    "metadata": {},
+                                    "score": None,
+                                    "source": "grep",
+                                }
+                            )
+                            if len(results) >= limit:
+                                return results
+                    except OSError:
+                        continue
 
         return results
 
     def _get_search_dirs(self, layers: list[str] | None) -> list[Path]:
-        """Return directories to search based on layer filter."""
+        """Return directories to search based on layer filter.
+
+        This method is used only on the legacy (no-store) path and is kept
+        for backward compatibility.  New callers should pass a
+        :class:`~core.store.StorageBackend` to the constructor instead.
+        """
         all_dirs = {layer: self._root / path for layer, path in LAYER_STATIC_PATHS.items()}
         if layers is None:
             return list(all_dirs.values())
