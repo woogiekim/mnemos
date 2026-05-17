@@ -978,3 +978,81 @@ class TestCaptureQuietFlag:
         assert "[id: method-e-both-001]" in result.output, (
             "Notification must carry [id: <uuid>] suffix"
         )
+
+
+class TestAuditLimitAlias:
+    """Tests for --limit as an alias for --tail on the audit command (closes #31).
+
+    Users expect --limit based on convention from psql, gh, docker logs, etc.
+    Both --tail and --limit must control the same entry count, with --limit
+    taking precedence when both are supplied.
+    """
+
+    def _setup_obs_entries(self, repo_root, count: int = 10) -> None:
+        """Write synthetic observability.jsonl entries to the test repo."""
+        import json as _json
+        from datetime import datetime, timezone
+
+        # Observability log lives at wiki/observability.jsonl (MemoryGateway path).
+        obs_path = repo_root / "wiki" / "observability.jsonl"
+        obs_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for i in range(count):
+            entry = {
+                "ts": f"2026-05-17T10:00:{i:02d}Z",
+                "event": "capture",
+                "agent": "test",
+                "session_id": "sess-001",
+                "memory_id": f"item-{i:03d}",
+                "layer": "global",
+                "tags": [],
+            }
+            lines.append(_json.dumps(entry))
+        obs_path.write_text("\n".join(lines) + "\n")
+
+    def test_audit_limit_alias_exits_zero(self, runner, cli_with_repo, repo_root):
+        """--limit must be accepted without error (exit code 0)."""
+        self._setup_obs_entries(repo_root, count=10)
+        result = runner.invoke(cli_with_repo, ["audit", "--limit", "5"])
+        assert result.exit_code == 0, result.output
+
+    def test_audit_tail_still_works(self, runner, cli_with_repo, repo_root):
+        """--tail must still be accepted without regression (exit code 0)."""
+        self._setup_obs_entries(repo_root, count=10)
+        result = runner.invoke(cli_with_repo, ["audit", "--tail", "5"])
+        assert result.exit_code == 0, result.output
+
+    def test_audit_limit_returns_same_count_as_tail(self, runner, cli_with_repo, repo_root):
+        """--limit N and --tail N must return the same number of entries."""
+        self._setup_obs_entries(repo_root, count=10)
+        result_tail = runner.invoke(cli_with_repo, ["audit", "--tail", "3"])
+        result_limit = runner.invoke(cli_with_repo, ["audit", "--limit", "3"])
+        assert result_tail.exit_code == 0, result_tail.output
+        assert result_limit.exit_code == 0, result_limit.output
+        # Both should show the same entry count footer
+        assert "3 entries" in result_tail.output
+        assert "3 entries" in result_limit.output
+
+    def test_audit_limit_overrides_tail_default(self, runner, cli_with_repo, repo_root):
+        """--limit must override the default --tail value (20)."""
+        self._setup_obs_entries(repo_root, count=10)
+        # With 10 entries, --limit 5 should return 5 (not the default 20)
+        result = runner.invoke(cli_with_repo, ["audit", "--limit", "5"])
+        assert result.exit_code == 0, result.output
+        assert "5 entries" in result.output
+
+    def test_audit_limit_when_both_provided_limit_wins(self, runner, cli_with_repo, repo_root):
+        """When both --limit and --tail are supplied, --limit takes precedence."""
+        self._setup_obs_entries(repo_root, count=10)
+        # --limit 3 should win over --tail 7
+        result = runner.invoke(cli_with_repo, ["audit", "--tail", "7", "--limit", "3"])
+        assert result.exit_code == 0, result.output
+        assert "3 entries" in result.output
+
+    def test_audit_limit_with_json_flag(self, runner, cli_with_repo, repo_root):
+        """--limit must also work with --json output mode."""
+        self._setup_obs_entries(repo_root, count=10)
+        result = runner.invoke(cli_with_repo, ["audit", "--limit", "4", "--json"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.strip().splitlines() if l.strip()]
+        assert len(lines) == 4, f"Expected 4 JSON lines, got {len(lines)}: {result.output}"

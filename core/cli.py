@@ -869,27 +869,33 @@ def bg_check_cmd(
 
 @cli.command("audit")
 @click.option("--tail", "tail", default=20, type=int, help="Number of most recent entries to show (default: 20).")
+@click.option("--limit", "limit", default=None, type=int, help="Alias for --tail (convention from psql, gh, docker logs, etc.).")
 @click.option("--session", "session_id", default=None, help="Filter by session ID.")
 @click.option("--event", "events", default=None, help="Comma-separated event type filter (e.g. hook_search,capture).")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output raw JSON lines instead of a table.")
-def audit_cmd(tail: int, session_id: str | None, events: str | None, as_json: bool) -> None:
+def audit_cmd(tail: int, limit: int | None, session_id: str | None, events: str | None, as_json: bool) -> None:
     """Show recent observability log entries (hook calls, captures, searches).
 
     \b
     Examples:
       mnemos audit                         # last 20 events
       mnemos audit --tail 50               # last 50 events
+      mnemos audit --limit 50              # same as --tail (conventional alias)
       mnemos audit --session SESSION_ID    # filter by session
       mnemos audit --event hook_search,capture  # filter by event type
       mnemos audit --json                  # raw JSONL output
     """
+    # --limit is a conventional alias for --tail (psql, gh, docker logs, etc.)
+    # When --limit is provided it takes precedence over the --tail default.
+    effective_tail = limit if limit is not None else tail
+
     gw = _get_gateway()
     obs = gw.observability
 
     event_list = [e.strip() for e in events.split(",")] if events else None
 
     entries = obs.read_entries(
-        tail=tail,
+        tail=effective_tail,
         session_id=session_id,
         events=event_list,
     )
