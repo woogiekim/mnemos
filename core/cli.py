@@ -973,3 +973,179 @@ def memory_ingest_claude_md(
                 f"{len(dedup['skipped'])} skipped "
                 f"({total} file(s) processed)"
             )
+
+
+@cli.command("migrate")
+@click.option(
+    "--from",
+    "from_backend",
+    required=True,
+    type=click.Choice(["default", "obsidian"], case_sensitive=False),
+    help="Source backend (default or obsidian).",
+)
+@click.option(
+    "--to",
+    "to_backend",
+    required=True,
+    type=click.Choice(["default", "obsidian"], case_sensitive=False),
+    help="Target backend (default or obsidian).",
+)
+@click.option(
+    "--vault-path",
+    "vault_path",
+    required=True,
+    help="Path to the Obsidian vault (required for both obsidian source and target).",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Print what would be migrated without writing anything.",
+)
+def memory_migrate(
+    from_backend: str,
+    to_backend: str,
+    vault_path: str,
+    dry_run: bool,
+) -> None:
+    """Migrate memory items between the default backend and an Obsidian vault.
+
+    \b
+    Directions:
+      mnemos migrate --from default --to obsidian --vault-path ~/vault
+      mnemos migrate --from obsidian --to default --vault-path ~/vault
+
+    \b
+    Idempotent: items whose (id, content_hash) already match in the target are
+    skipped.  Use --dry-run to preview what would be migrated.
+
+    \b
+    Multi-host sync is out of scope.  The vault path is whatever you configure;
+    iCloud / git-based sync is your responsibility.
+    """
+    from pathlib import Path as _Path
+    from core.store import MemoryStore
+    from core.obsidian import ObsidianBackend, OBSIDIAN_LAYERS
+    from core.fts import FTSIndex
+    from core.layers import LAYER_STATIC_PATHS
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    resolved_vault = str(_Path(vault_path).expanduser().resolve())
+
+    # ── Build source and target backends ──────────────────────────────────
+    state_dir = _Path(repo_root) / ".agent" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fts = FTSIndex(db_path=str(state_dir / "fts.db"))
+
+    def make_backend(name: str):
+        if name == "obsidian":
+            return ObsidianBackend(vault_path=resolved_vault, fts=fts)
+        return MemoryStore(repo_root=repo_root)
+
+    src = make_backend(from_backend)
+    dst = make_backend(to_backend)
+
+    # ── Determine all layers to iterate ───────────────────────────────────
+    all_layers = OBSIDIAN_LAYERS  # covers all known layer names
+
+    # ── Build a (id, content_hash) index of the target ────────────────────
+    existing: dict[str, str] = {}  # id → content_hash
+    for layer in all_layers:
+        try:
+            for item in dst.iter_layer_items(layer):
+                item_id = item.get("id", "")
+                h = item.get("content_hash", "")
+                if item_id:
+                    existing[item_id] = h
+        except Exception:
+            pass
+
+    # ── Migrate ───────────────────────────────────────────────────────────
+    total_migrated = 0
+    total_skipped = 0
+    planned: list[tuple[str, str, str]] = []  # (layer, item_id, action)
+
+    for layer in all_layers:
+        try:
+            items = list(src.iter_layer_items(layer))
+        except Exception:
+            continue
+        for item in items:
+            item_id = item.get("id", "")
+            if not item_id:
+                continue
+            content = item.get("content", "")
+            existing_hash = existing.get(item_id)
+
+            # Compute source content_hash
+            import hashlib, unicodedata, re as _re
+            nfkc = unicodedata.normalize("NFKC", content)
+            src_hash = hashlib.sha256(
+                _re.sub(r"\s+", " ", nfkc.strip()).lower().encode("utf-8")
+            ).hexdigest()
+
+            if existing_hash == src_hash:
+                total_skipped += 1
+                planned.append((layer, item_id, "skip"))
+                continue
+
+            planned.append((layer, item_id, "migrate"))
+            total_migrated += 1
+
+    if dry_run:
+        click.echo(
+            f"[dry-run] Would migrate {total_migrated} item(s) "
+            f"from {from_backend} → {to_backend} (vault: {resolved_vault})"
+        )
+        for layer, item_id, action in planned:
+            if action == "migrate":
+                click.echo(f"  would migrate [{layer}] {item_id}")
+        if total_skipped:
+            click.echo(f"  {total_skipped} item(s) already up-to-date (would skip)")
+        return
+
+    # ── Execute writes ────────────────────────────────────────────────────
+    actual_migrated = 0
+    actual_skipped = 0
+    for layer in all_layers:
+        try:
+            items = list(src.iter_layer_items(layer))
+        except Exception:
+            continue
+        for item in items:
+            item_id = item.get("id", "")
+            if not item_id:
+                continue
+            content = item.get("content", "")
+
+            import hashlib, unicodedata, re as _re
+            nfkc = unicodedata.normalize("NFKC", content)
+            src_hash = hashlib.sha256(
+                _re.sub(r"\s+", " ", nfkc.strip()).lower().encode("utf-8")
+            ).hexdigest()
+
+            if existing.get(item_id) == src_hash:
+                actual_skipped += 1
+                continue
+
+            # Build metadata (strip internal keys)
+            meta = {k: v for k, v in item.items() if k not in ("content", "_path")}
+            meta.setdefault("id", item_id)
+            meta.setdefault("layer", layer)
+            try:
+                dst.write(
+                    layer=layer,
+                    item_id=item_id,
+                    content=content,
+                    metadata=meta,
+                )
+                actual_migrated += 1
+            except Exception as exc:
+                click.echo(f"  warning: failed to migrate {item_id}: {exc}", err=True)
+
+    click.echo(
+        f"Migrated {actual_migrated} item(s) from {from_backend} → {to_backend}"
+    )
+    if actual_skipped:
+        click.echo(f"Skipped {actual_skipped} already up-to-date item(s)")
