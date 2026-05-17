@@ -200,12 +200,20 @@ def memory_capture(
     default=False,
     help="When used with --all, skip items that already have at least one tag.",
 )
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Preview which tags would be applied without modifying any items.",
+)
 def memory_classify(
     item_id: str | None,
     tag: str | None,
     layer: str | None,
     classify_all: bool,
     untagged_only: bool,
+    dry_run: bool,
 ) -> None:
     """Classify/tag a captured memory item.
 
@@ -217,6 +225,9 @@ def memory_classify(
 
     Backfill mode — auto-classify only untagged items:
       mnemos classify --all --untagged
+
+    Backfill mode — preview without applying:
+      mnemos classify --all --dry-run
     """
     gw = _get_gateway()
 
@@ -245,14 +256,23 @@ def memory_classify(
                     new_tags = gw.auto_classify(item_id=iid, content=content)
                     if new_tags:
                         classified_count += 1
-                        click.echo(f"  classified: {iid} → {new_tags}")
+                        if dry_run:
+                            click.echo(f"[dry-run] would classify: {iid} → {new_tags}")
+                        else:
+                            click.echo(f"  classified: {iid} → {new_tags}")
             except Exception:
                 continue
 
-        click.echo(
-            f"[mnemos classify] {classified_count} item(s) classified"
-            + (f", {skipped_count} skipped (already tagged)" if untagged_only else "")
-        )
+        if dry_run:
+            click.echo(
+                f"[dry-run] {classified_count} item(s) would be classified"
+                + (f", {skipped_count} skipped (already tagged)" if untagged_only else "")
+            )
+        else:
+            click.echo(
+                f"[mnemos classify] {classified_count} item(s) classified"
+                + (f", {skipped_count} skipped (already tagged)" if untagged_only else "")
+            )
         return
 
     # Single-item mode
