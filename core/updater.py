@@ -123,6 +123,49 @@ def git_pull(repo_root: str) -> None:
     _run(["git", "pull", "--rebase", "origin", "main"], cwd=repo_root)
 
 
+def _stash_if_dirty(repo_root: str) -> bool:
+    """Stash local changes in repo_root if the working tree is dirty.
+
+    Returns True if a stash was created (so the caller can pop it later).
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    stash_result = subprocess.run(
+        ["git", "stash", "--include-untracked"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if stash_result.returncode == 0 and "No local changes to save" not in stash_result.stdout:
+        print(f"stashed local changes in {repo_root}")
+        return True
+    return False
+
+
+def _stash_pop(repo_root: str) -> None:
+    """Pop the most recent stash in repo_root, ignoring errors."""
+    result = subprocess.run(
+        ["git", "stash", "pop"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"restored stashed changes in {repo_root}")
+    else:
+        print(
+            f"warning: git stash pop failed — your changes are saved in the stash.\n"
+            f"  Run: cd {repo_root} && git stash pop",
+            file=sys.stderr,
+        )
+
+
 def pipx_reinstall() -> None:
     """Run pipx reinstall mnemos."""
     _run(["pipx", "reinstall", "mnemos"])
@@ -419,10 +462,13 @@ def run_update(
     # -- 1. git pull ---------------------------------------------------------
     if not skip_git_pull:
         print("── git pull --rebase origin main ─────────────────────────────")
+        # Auto-stash any local changes before pulling, restore after.
+        stashed = _stash_if_dirty(repo_root)
         try:
             git_pull(repo_root)
         except subprocess.CalledProcessError as exc:
-            print(f"warning: git pull failed — {exc}", file=sys.stderr)
+            cmd_str = " ".join(exc.cmd) if isinstance(exc.cmd, list) else str(exc.cmd)
+            print(f"warning: git pull failed — '{cmd_str}' exited with code {exc.returncode}", file=sys.stderr)
             print(
                 f"\nTo recover manually:\n"
                 f"  cd {repo_root} && git pull --rebase origin main\n"
@@ -432,6 +478,9 @@ def run_update(
                 file=sys.stderr,
             )
             exit_code = 1
+        finally:
+            if stashed:
+                _stash_pop(repo_root)
 
     # -- 1b. sync updated source directories to install location -------------
     # git pull updates the dev repo but ~/.mnemos/core/ and ~/.mnemos/agents/

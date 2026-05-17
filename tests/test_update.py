@@ -16,6 +16,8 @@ from core.updater import (
     update_settings_json,
     sync_source_to_install,
     _run_bg_check_quiet,
+    _stash_if_dirty,
+    _stash_pop,
 )
 
 
@@ -932,3 +934,272 @@ class TestGitPullRecoveryMessage:
 
         captured = capsys.readouterr()
         assert str(tmp_path) in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Issue #41 — CalledProcessError warning message format
+# ---------------------------------------------------------------------------
+
+class TestGitPullWarningFormat:
+    """run_update() must emit a clean warning string (not Python list repr) on failure."""
+
+    def test_warning_does_not_contain_list_repr(self, tmp_path, monkeypatch, capsys):
+        """The warning must show the command as a plain string, not ['git', 'pull', ...]."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        # Must NOT contain list repr like "['git', 'pull', ...]"
+        assert "['" not in captured.err, (
+            "Warning message must not contain Python list repr"
+        )
+
+    def test_warning_contains_plain_command_string(self, tmp_path, monkeypatch, capsys):
+        """The warning must show the command as a space-joined string."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        assert "git pull --rebase origin main" in captured.err
+        assert "exited with code 128" in captured.err
+
+    def test_warning_works_with_string_cmd(self, tmp_path, monkeypatch, capsys):
+        """The warning must also handle exc.cmd being a plain string (not a list)."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd="git pull"
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        assert "git pull" in captured.err
+        assert "exited with code 1" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Issue #39 — auto-stash dirty working tree before git pull
+# ---------------------------------------------------------------------------
+
+class TestAutoStashBeforePull:
+    """_stash_if_dirty and _stash_pop helpers, and run_update auto-stash integration."""
+
+    def test_stash_if_dirty_returns_false_when_clean(self, tmp_path, monkeypatch):
+        """_stash_if_dirty must return False when git status --porcelain is empty."""
+        import subprocess as sp
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            if cmd == ["git", "status", "--porcelain"]:
+                result.returncode = 0
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        assert _stash_if_dirty(str(tmp_path)) is False
+
+    def test_stash_if_dirty_returns_true_and_stashes_when_dirty(self, tmp_path, monkeypatch):
+        """_stash_if_dirty must call git stash and return True when tree is dirty."""
+        import subprocess as sp
+
+        stash_called = []
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            if cmd == ["git", "status", "--porcelain"]:
+                result.returncode = 0
+                result.stdout = " M core/updater.py\n"
+            elif cmd == ["git", "stash", "--include-untracked"]:
+                stash_called.append(True)
+                result.returncode = 0
+                result.stdout = "Saved working directory and index state WIP on main"
+            else:
+                result.returncode = 0
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        result = _stash_if_dirty(str(tmp_path))
+        assert result is True
+        assert stash_called, "git stash must have been called"
+
+    def test_stash_if_dirty_returns_false_when_stash_says_no_changes(self, tmp_path, monkeypatch):
+        """_stash_if_dirty returns False when git stash reports 'No local changes to save'."""
+        import subprocess as sp
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            if cmd == ["git", "status", "--porcelain"]:
+                result.returncode = 0
+                result.stdout = " M file.py\n"
+            elif cmd == ["git", "stash", "--include-untracked"]:
+                result.returncode = 0
+                result.stdout = "No local changes to save"
+            else:
+                result.returncode = 0
+                result.stdout = ""
+            return result
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        assert _stash_if_dirty(str(tmp_path)) is False
+
+    def test_stash_pop_prints_success(self, tmp_path, monkeypatch, capsys):
+        """_stash_pop must print a success message when git stash pop succeeds."""
+        import subprocess as sp
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            return result
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        _stash_pop(str(tmp_path))
+        captured = capsys.readouterr()
+        assert "restored stashed changes" in captured.out
+
+    def test_stash_pop_prints_warning_on_failure(self, tmp_path, monkeypatch, capsys):
+        """_stash_pop must print a warning to stderr when git stash pop fails."""
+        import subprocess as sp
+
+        def fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.returncode = 1
+            result.stdout = ""
+            return result
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        _stash_pop(str(tmp_path))
+        captured = capsys.readouterr()
+        assert "warning: git stash pop failed" in captured.err
+        assert "git stash pop" in captured.err
+
+    def test_run_update_stashes_before_pull_when_dirty(self, tmp_path, monkeypatch, capsys):
+        """run_update must call _stash_if_dirty before git_pull when skip_git_pull=False."""
+        import subprocess
+        from core import updater as updater_module
+
+        call_order: list[str] = []
+
+        def fake_stash_if_dirty(repo_root):
+            call_order.append("stash")
+            return True
+
+        def fake_git_pull(repo_root):
+            call_order.append("pull")
+
+        def fake_stash_pop(repo_root):
+            call_order.append("pop")
+
+        monkeypatch.setattr(updater_module, "_stash_if_dirty", fake_stash_if_dirty)
+        monkeypatch.setattr(updater_module, "git_pull", fake_git_pull)
+        monkeypatch.setattr(updater_module, "_stash_pop", fake_stash_pop)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        assert call_order.index("stash") < call_order.index("pull"), (
+            "_stash_if_dirty must be called before git_pull"
+        )
+        assert "pop" in call_order, "_stash_pop must be called after pull"
+
+    def test_run_update_pops_stash_even_if_pull_fails(self, tmp_path, monkeypatch, capsys):
+        """run_update must call _stash_pop even when git_pull raises (finally block)."""
+        import subprocess
+        from core import updater as updater_module
+
+        pop_called = []
+
+        def fake_stash_if_dirty(repo_root):
+            return True
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        def fake_stash_pop(repo_root):
+            pop_called.append(True)
+
+        monkeypatch.setattr(updater_module, "_stash_if_dirty", fake_stash_if_dirty)
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_stash_pop", fake_stash_pop)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        assert exit_code == 1
+        assert pop_called, "_stash_pop must be called even when git_pull fails"
+
+    def test_run_update_skips_stash_when_skip_git_pull(self, tmp_path, monkeypatch):
+        """run_update must not call _stash_if_dirty when skip_git_pull=True."""
+        from core import updater as updater_module
+
+        stash_called = []
+
+        def fake_stash_if_dirty(repo_root):
+            stash_called.append(True)
+            return False
+
+        monkeypatch.setattr(updater_module, "_stash_if_dirty", fake_stash_if_dirty)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=True,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        assert not stash_called, "_stash_if_dirty must not be called when skip_git_pull=True"
