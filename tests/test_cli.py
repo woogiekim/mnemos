@@ -282,6 +282,168 @@ class TestMemorySearchCommand:
         )
 
 
+class TestListTruncation:
+    """Tests for list command truncation behaviour (--full / --width)."""
+
+    LONG_CONTENT = "A" * 100  # 100 chars, exceeds default width of 80
+
+    def test_list_default_truncates_at_80_with_ellipsis(self, runner, cli_with_repo):
+        """list default output must truncate content at 80 chars and append '...'."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-list-001"],
+        )
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if "trunc-list-001" in l]
+        assert len(lines) == 1, f"Expected one result line, got: {result.output}"
+        line = lines[0]
+        # Should end with '...' and content portion should be exactly 80 chars
+        assert line.endswith("..."), f"Expected '...' suffix, got: {line!r}"
+        # The 80-char truncated portion must appear in the line
+        assert self.LONG_CONTENT[:80] in line
+
+    def test_list_default_no_ellipsis_when_content_fits(self, runner, cli_with_repo):
+        """list must NOT append '...' when content length == width (boundary)."""
+        exact_content = "B" * 80  # exactly 80 chars
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", exact_content, "--id", "trunc-list-exact"],
+        )
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if "trunc-list-exact" in l]
+        assert len(lines) == 1
+        assert not lines[0].endswith("..."), f"Should not end with '...' for exact-width content: {lines[0]!r}"
+
+    def test_list_full_shows_complete_content(self, runner, cli_with_repo):
+        """--full must show complete content without any truncation."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-list-full"],
+        )
+        result = runner.invoke(cli_with_repo, ["list", "--full"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if "trunc-list-full" in l]
+        assert len(lines) == 1
+        assert self.LONG_CONTENT in lines[0], "Full content must appear untruncated"
+        assert not lines[0].endswith("..."), "--full must not add ellipsis"
+
+    def test_list_width_option_widens_preview(self, runner, cli_with_repo):
+        """--width 200 must truncate at 200 chars, not 80."""
+        content_200 = "C" * 150  # 150 chars, fits in 200, exceeds 80
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", content_200, "--id", "trunc-list-width"],
+        )
+        # Default: should truncate at 80
+        result_default = runner.invoke(cli_with_repo, ["list"])
+        lines_default = [l for l in result_default.output.splitlines() if "trunc-list-width" in l]
+        assert lines_default[0].endswith("..."), "Default must truncate 150-char content at 80"
+
+        # --width 200: 150 chars fits in 200, no ellipsis
+        result_wide = runner.invoke(cli_with_repo, ["list", "--width", "200"])
+        assert result_wide.exit_code == 0, result_wide.output
+        lines_wide = [l for l in result_wide.output.splitlines() if "trunc-list-width" in l]
+        assert len(lines_wide) == 1
+        assert content_200 in lines_wide[0], "--width 200 must show full content for 150-char item"
+        assert not lines_wide[0].endswith("..."), "--width 200 must not add ellipsis for 150-char item"
+
+    def test_list_width_option_truncates_beyond_width(self, runner, cli_with_repo):
+        """--width 40 must truncate at 40 chars with '...'."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-list-w40"],
+        )
+        result = runner.invoke(cli_with_repo, ["list", "--width", "40"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if "trunc-list-w40" in l]
+        assert len(lines) == 1
+        assert lines[0].endswith("..."), "--width 40 must truncate 100-char content and add '...'"
+        assert self.LONG_CONTENT[:40] in lines[0]
+
+
+class TestSearchTruncation:
+    """Tests for search command truncation behaviour (--full / --width).
+
+    Note: search result ``content`` is the full YAML file text (frontmatter +
+    body), which is always longer than 80 chars and contains newlines.  The
+    truncation tests therefore verify the *presence* of the ``...`` marker in
+    the overall output block and the *absence* of it under ``--full``, rather
+    than asserting which particular output line ends with ``...``.
+    """
+
+    LONG_CONTENT = "unique-search-trunc-marker " + "X" * 80  # > 80 chars, searchable
+
+    def test_search_default_truncates_with_ellipsis(self, runner, cli_with_repo):
+        """search default output must truncate the YAML file text and append '...'."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-srch-001"],
+        )
+        result = runner.invoke(cli_with_repo, ["search", "unique-search-trunc-marker"])
+        assert result.exit_code == 0, result.output
+        # The truncated preview must end with '...' somewhere in the output block
+        # before the '[mnemos]' footer.
+        body = result.output.split("[mnemos]")[0]
+        assert "..." in body, (
+            f"Expected '...' in output body (content > 80 chars should be truncated): {result.output!r}"
+        )
+
+    def test_search_full_shows_complete_content(self, runner, cli_with_repo):
+        """--full must show the complete YAML file text without any '...' truncation."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-srch-full"],
+        )
+        result = runner.invoke(cli_with_repo, ["search", "--full", "unique-search-trunc-marker"])
+        assert result.exit_code == 0, result.output
+        # The memory content must appear untruncated somewhere in the output
+        assert self.LONG_CONTENT in result.output, (
+            "--full must include complete original content in output"
+        )
+        # No '...' truncation marker should appear in the body
+        body = result.output.split("[mnemos]")[0]
+        assert "..." not in body, f"--full must not add ellipsis: {result.output!r}"
+
+    def test_search_width_widens_truncation_point(self, runner, cli_with_repo):
+        """--width 500 must show more content than the default 80-char truncation."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-srch-width"],
+        )
+        # Default: shorter preview
+        result_default = runner.invoke(cli_with_repo, ["search", "unique-search-trunc-marker"])
+        body_default = result_default.output.split("[mnemos]")[0]
+
+        # --width 500: the YAML file text is ~300 chars so it fits; no ellipsis
+        result_wide = runner.invoke(cli_with_repo, ["search", "--width", "500", "unique-search-trunc-marker"])
+        assert result_wide.exit_code == 0, result_wide.output
+        body_wide = result_wide.output.split("[mnemos]")[0]
+
+        # The wider preview must show more content (longer body)
+        assert len(body_wide) >= len(body_default), (
+            "--width 500 body should be at least as long as default body"
+        )
+        # With width 500 the full YAML text fits → no ellipsis
+        assert "..." not in body_wide, (
+            f"--width 500 should not truncate a ~300-char file: {result_wide.output!r}"
+        )
+
+    def test_search_narrow_width_truncates_with_ellipsis(self, runner, cli_with_repo):
+        """--width 40 must truncate the file text at 40 chars and add '...'."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.LONG_CONTENT, "--id", "trunc-srch-w40"],
+        )
+        result = runner.invoke(cli_with_repo, ["search", "--width", "40", "unique-search-trunc-marker"])
+        assert result.exit_code == 0, result.output
+        body = result.output.split("[mnemos]")[0]
+        assert "..." in body, (
+            f"--width 40 must truncate long file text and add '...': {result.output!r}"
+        )
+
+
 class TestMemoryPromoteCommand:
     def test_memory_promote_command(self, runner, cli_with_repo, repo_root):
         """promote must move item to next layer."""
