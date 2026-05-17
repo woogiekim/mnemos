@@ -21,11 +21,17 @@ _AGENT_DIRS = [
     ".agent/reports",
     ".agent/tools",
     ".agent/workflows/hooks",
+    ".agent/transient",
 ]
 
 _DEFAULT_CONFIG: dict = {
     "repo_root": ".",
     "layers": {
+        "transient": {
+            "path_template": ".agent/transient/",
+            "promotes_to": None,
+            "promotion": {"age_hours": 0, "access_count": 0, "quality_score": 0.0},
+        },
         "ephemeral": {
             "path_template": ".agent/runs/{run_id}/scratch/",
             "promotes_to": "working",
@@ -56,6 +62,13 @@ _DEFAULT_CONFIG: dict = {
     "archive": {
         "allowed_stages": ["stored", "retrieved", "used", "validated"],
     },
+}
+
+#: Transient layer definition used for policy migration (backfill on update).
+_TRANSIENT_LAYER_DEF: dict = {
+    "path_template": ".agent/transient/",
+    "promotes_to": None,
+    "promotion": {"age_hours": 0, "access_count": 0, "quality_score": 0.0},
 }
 
 _GITIGNORE_BLOCK = """\
@@ -154,6 +167,42 @@ def install(path: Path, home: Optional[Path] = None) -> None:
             messages = adapter.install(home)
             for msg in messages:
                 print(msg)
+
+
+def migrate_policy_transient(repo_root: Path) -> bool:
+    """Add the transient layer to an existing wiki/policy.yaml if absent.
+
+    Called by ``mnemos update`` so that installations created before the
+    transient layer was added receive the new layer definition automatically.
+
+    Returns:
+        True  — policy was updated (transient was missing and has been added).
+        False — no change needed (transient already present or file absent).
+    """
+    policy_path = repo_root / "wiki" / "policy.yaml"
+    if not policy_path.exists():
+        return False
+
+    with policy_path.open("r", encoding="utf-8") as f:
+        policy_data = yaml.safe_load(f) or {}
+
+    layers = policy_data.get("layers", {})
+    if "transient" in layers:
+        return False  # already present — nothing to do
+
+    # Prepend transient so it appears first (shortest GC window reads cleanly).
+    updated_layers: dict = {"transient": _TRANSIENT_LAYER_DEF}
+    updated_layers.update(layers)
+    policy_data["layers"] = updated_layers
+
+    # Ensure the storage directory exists alongside the policy update.
+    transient_dir = repo_root / ".agent" / "transient"
+    transient_dir.mkdir(parents=True, exist_ok=True)
+
+    with policy_path.open("w", encoding="utf-8") as f:
+        yaml.dump(policy_data, f, default_flow_style=False, sort_keys=False)
+
+    return True
 
 
 def _install_zshrc(home: Path, repo_root: str) -> None:

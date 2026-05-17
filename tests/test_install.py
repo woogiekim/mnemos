@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from core.install import install, _WIKI_DIRS, _AGENT_DIRS, _GITIGNORE_BLOCK
+from core.install import install, migrate_policy_transient, _WIKI_DIRS, _AGENT_DIRS, _GITIGNORE_BLOCK
 from core.cli import cli
 
 
@@ -37,7 +37,64 @@ def test_install_writes_policy_yaml(tmp_path):
     assert policy_path.exists()
     policy = yaml.safe_load(policy_path.read_text())
     assert "layers" in policy
-    assert set(policy["layers"].keys()) == {"ephemeral", "working", "session", "project", "global"}
+    assert set(policy["layers"].keys()) == {"transient", "ephemeral", "working", "session", "project", "global"}
+
+
+def test_install_policy_transient_layer_config(tmp_path):
+    """transient layer must have no promotes_to and a flat path template."""
+    install(tmp_path)
+    policy = yaml.safe_load((tmp_path / "wiki" / "policy.yaml").read_text())
+    transient = policy["layers"]["transient"]
+    assert transient["path_template"] == ".agent/transient/"
+    assert transient["promotes_to"] is None
+
+
+def test_install_creates_transient_dir(tmp_path):
+    """install() must create .agent/transient/ alongside other agent dirs."""
+    install(tmp_path)
+    assert (tmp_path / ".agent" / "transient").is_dir()
+
+
+def test_migrate_policy_transient_adds_layer(tmp_path):
+    """migrate_policy_transient() inserts transient into a pre-existing policy."""
+    # Scaffold a policy without transient (mirrors pre-fix installations).
+    policy_path = tmp_path / "wiki" / "policy.yaml"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    old_policy = {
+        "layers": {
+            "ephemeral": {"path_template": ".agent/runs/{run_id}/scratch/", "promotes_to": "working"},
+            "global": {"path_template": "wiki/global/", "promotes_to": None},
+        },
+        "forget": {"requires_archived": True},
+    }
+    with policy_path.open("w") as f:
+        yaml.dump(old_policy, f)
+
+    changed = migrate_policy_transient(tmp_path)
+    assert changed is True
+
+    updated = yaml.safe_load(policy_path.read_text())
+    assert "transient" in updated["layers"]
+    assert updated["layers"]["transient"]["path_template"] == ".agent/transient/"
+    assert updated["layers"]["transient"]["promotes_to"] is None
+    # Original layers must be preserved
+    assert "ephemeral" in updated["layers"]
+    assert "global" in updated["layers"]
+    # .agent/transient directory must be created
+    assert (tmp_path / ".agent" / "transient").is_dir()
+
+
+def test_migrate_policy_transient_idempotent(tmp_path):
+    """migrate_policy_transient() returns False when transient already exists."""
+    install(tmp_path)  # fresh install already includes transient
+    changed = migrate_policy_transient(tmp_path)
+    assert changed is False
+
+
+def test_migrate_policy_transient_missing_file(tmp_path):
+    """migrate_policy_transient() returns False gracefully when policy.yaml is absent."""
+    changed = migrate_policy_transient(tmp_path)
+    assert changed is False
 
 
 def test_install_writes_agents_md(tmp_path):
