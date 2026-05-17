@@ -1203,3 +1203,144 @@ class TestAutoStashBeforePull:
         )
 
         assert not stash_called, "_stash_if_dirty must not be called when skip_git_pull=True"
+
+
+# ---------------------------------------------------------------------------
+# Issue #44 — run_update must abort immediately when git pull fails
+# ---------------------------------------------------------------------------
+
+class TestAbortOnGitPullFailure:
+    """run_update() must return 1 and skip sync/pipx/config when git pull fails."""
+
+    def test_sync_not_called_when_git_pull_fails(self, tmp_path, monkeypatch):
+        """When git_pull raises CalledProcessError, sync_source_to_install must not be called."""
+        import subprocess
+        from core import updater as updater_module
+
+        sync_called = []
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        def fake_sync(repo_root, install_root=None):
+            sync_called.append(True)
+            return []
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "sync_source_to_install", fake_sync)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=False,
+            home=tmp_path,
+        )
+
+        assert exit_code == 1
+        assert not sync_called, "sync_source_to_install must not be called when git pull fails"
+
+    def test_pipx_not_called_when_git_pull_fails(self, tmp_path, monkeypatch):
+        """When git_pull raises CalledProcessError, pipx_reinstall must not be called."""
+        import subprocess
+        from core import updater as updater_module
+
+        pipx_called = []
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        def fake_pipx():
+            pipx_called.append(True)
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "pipx_reinstall", fake_pipx)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=False,
+            home=tmp_path,
+        )
+
+        assert exit_code == 1
+        assert not pipx_called, "pipx_reinstall must not be called when git pull fails"
+
+    def test_aborted_message_printed_when_git_pull_fails(self, tmp_path, monkeypatch, capsys):
+        """When git_pull raises CalledProcessError, '── update aborted' must be printed."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        assert "update aborted" in captured.out
+
+    def test_unsafe_stale_source_message_in_stderr(self, tmp_path, monkeypatch, capsys):
+        """The failure message must warn that installing from stale source is unsafe."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=128, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        assert "stale source" in captured.err.lower() or "potentially stale" in captured.err
+
+    def test_skip_git_pull_true_continues_normally(self, tmp_path, monkeypatch):
+        """When skip_git_pull=True, execution continues through sync and pipx normally."""
+        from core import updater as updater_module
+
+        call_order: list[str] = []
+
+        def fake_sync(repo_root, install_root=None):
+            call_order.append("sync")
+            return ["core"]
+
+        def fake_pipx():
+            call_order.append("pipx")
+
+        monkeypatch.setattr(updater_module, "sync_source_to_install", fake_sync)
+        monkeypatch.setattr(updater_module, "pipx_reinstall", fake_pipx)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=True,
+            skip_pipx=False,
+            home=tmp_path,
+        )
+
+        assert exit_code == 0
+        assert "sync" in call_order, "sync_source_to_install must be called when skip_git_pull=True"
+        assert "pipx" in call_order, "pipx_reinstall must be called when skip_git_pull=True"
