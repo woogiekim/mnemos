@@ -44,8 +44,9 @@ def cli() -> None:
 
 
 @cli.command("capture")
+@click.argument("content_arg", required=False, default=None, metavar="[CONTENT]")
 @click.option("--layer", default=None, help="Target memory layer (default: ephemeral).")
-@click.option("--content", required=True, help="Content to capture.")
+@click.option("--content", default=None, help="Content to capture.")
 @click.option("--id", "item_id", default=None, help="Optional item ID.")
 @click.option("--tag", "tags", multiple=True, help="Tags to attach (repeatable).")
 @click.option("--quality-score", default=0.8, type=float, help="Quality score (0.0–1.0).")
@@ -61,8 +62,9 @@ def cli() -> None:
     help="Skip automatic tag classification after capture.",
 )
 def memory_capture(
+    content_arg: str | None,
     layer: str | None,
-    content: str,
+    content: str | None,
     item_id: str | None,
     tags: tuple[str, ...],
     quality_score: float,
@@ -72,7 +74,20 @@ def memory_capture(
     quiet: bool,
     no_classify: bool,
 ) -> None:
-    """Capture a new memory item into the target layer (default: ephemeral)."""
+    """Capture a new memory item into the target layer (default: ephemeral).
+
+    Content may be supplied as a positional argument or via --content:
+
+    \b
+      mnemos capture "some insight"
+      mnemos capture --content "some insight"
+    """
+    # Resolve content: --content flag takes precedence over positional argument.
+    if content is None:
+        content = content_arg
+    if not content:
+        raise click.UsageError("Missing content. Pass it as a positional argument or via --content.")
+
     # Defensive fallback: if --session-id was not passed, check env var set by
     # the UserPromptSubmit hook so observability correlation still works even
     # when Claude omits the flag from the injected capture protocol command.

@@ -596,6 +596,73 @@ class TestCaptureEphemeralDefault:
         assert result.exit_code == 0, result.output
 
 
+class TestCapturePositionalArg:
+    """Tests for positional content argument in capture command (issue #28)."""
+
+    def test_capture_positional_arg_works(self, runner, cli_with_repo, repo_root):
+        """capture with a positional argument must store an item and print its ID."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "Positional content argument test"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "captured" in result.output.lower()
+
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert len(matches) >= 1
+
+    def test_capture_positional_arg_without_layer(self, runner, cli_with_repo, repo_root):
+        """capture with positional argument and no --layer must default to ephemeral."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "Positional no layer test"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "captured" in result.output.lower()
+
+    def test_capture_flag_overrides_positional(self, runner, cli_with_repo, repo_root):
+        """--content flag must take precedence over positional argument."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "Flag content", "Positional content"],
+        )
+        assert result.exit_code == 0, result.output
+        # The --content flag wins; the item should be stored
+        assert "captured" in result.output.lower()
+
+        # Confirm the item content is the flag value, not the positional
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert len(matches) >= 1
+        file_text = matches[0].read_text()
+        assert "Flag content" in file_text
+        assert "Positional content" not in file_text
+
+    def test_capture_no_content_shows_error(self, runner, cli_with_repo):
+        """capture with no content (no positional arg and no --content) must exit nonzero."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global"],
+        )
+        assert result.exit_code != 0
+
+    def test_capture_positional_with_flags(self, runner, cli_with_repo, repo_root):
+        """capture positional arg must work alongside other flags like --quiet and --id."""
+        result = runner.invoke(
+            cli_with_repo,
+            [
+                "capture",
+                "--layer", "global",
+                "--id", "pos-arg-001",
+                "--quiet",
+                "Quiet positional content",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # --quiet suppresses output; file must still be created
+        matches = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert len(matches) >= 1
+
+
 class TestCaptureANSIOutput:
     """Tests for colored italic ANSI output in capture command (issue #15)."""
 
