@@ -139,6 +139,7 @@ def memory_capture(
 @click.option("--layer", default=None, help="Layer hint (optional).")
 @click.option(
     "--all",
+    "--auto",
     "classify_all",
     is_flag=True,
     default=False,
@@ -315,7 +316,7 @@ def memory_update(item_id: str, content: str) -> None:
 
 @cli.command("promote")
 @click.argument("item_id")
-@click.option("--target-layer", default=None, help="Target layer (default: next layer).")
+@click.option("--target-layer", "--layer", default=None, help="Target layer (default: next layer).")
 @click.option("--run-id", default=None, help="Run ID.")
 @click.option("--session-id", default=None, help="Session ID.")
 @click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress promotion notification output.")
@@ -603,7 +604,14 @@ def memory_log(op: str, item_id: str, layer: str, meta: str | None) -> None:
 
 
 @cli.command("consolidate")
-def memory_consolidate() -> None:
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Preview promotions without applying them.",
+)
+def memory_consolidate(dry_run: bool) -> None:
     """Sweep all memories and auto-promote eligible ones per policy.yaml.
 
     \b
@@ -619,8 +627,16 @@ def memory_consolidate() -> None:
     gw = _get_gateway()
     ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
     try:
-        count = gw.consolidate()
-        click.echo(f"Promoted {count} memories")
+        import inspect
+        sig = inspect.signature(gw.consolidate)
+        if "dry_run" in sig.parameters:
+            count = gw.consolidate(dry_run=dry_run)
+        else:
+            count = gw.consolidate()
+        if dry_run:
+            click.echo(f"[dry-run] Would promote {count} memories")
+        else:
+            click.echo(f"Promoted {count} memories")
     except Exception as exc:
         click.echo(f"error: {exc}", err=True)
         sys.exit(1)
