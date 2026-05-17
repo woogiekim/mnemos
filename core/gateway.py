@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from core.policy import PolicyEngine, PolicyViolationError
-from core.store import MemoryStore
+from core.store import MemoryStore, StorageBackend
 from core.log import AuditLogger
 from core.hooks import HookDispatcher
 from core.events import EventBus
 from core.fts import FTSIndex
 from core.observability import ObservabilityLogger
 from core.search import SearchMiddleware
+from core.config import get_backend_config
 
 
 DEFAULT_QUALITY_SCORE = 0.8
@@ -110,7 +111,6 @@ class MemoryGateway:
         self._root = str(repo_root) if repo_root else str(_resolve_repo_root())
         policy_path = str(Path(self._root) / "wiki" / "policy.yaml")
         self._policy = PolicyEngine(policy_path=policy_path)
-        self._store = MemoryStore(repo_root=self._root)
         self._logger = AuditLogger(repo_root=self._root)
         self._hooks = HookDispatcher(repo_root=self._root)
         self._event_bus: EventBus = EventBus()
@@ -119,6 +119,27 @@ class MemoryGateway:
         state_dir.mkdir(parents=True, exist_ok=True)
         fts_db = str(state_dir / "fts.db")
         self._fts = FTSIndex(db_path=fts_db)
+
+        # ── Backend selection ──────────────────────────────────────────────
+        # Priority: MNEMOS_BACKEND env var > mnemos.yml storage.backend > default
+        # The default backend (MemoryStore) is unchanged and remains opt-in.
+        backend_cfg = get_backend_config(repo_root=self._root)
+        if backend_cfg.backend == "obsidian":
+            from core.obsidian import ObsidianBackend
+            vault_path = backend_cfg.vault_path
+            if not vault_path:
+                raise ValueError(
+                    "MNEMOS_BACKEND=obsidian requires storage.vault_path in "
+                    "mnemos.yml (or set MNEMOS_VAULT_PATH env var)"
+                )
+            self._store: StorageBackend = ObsidianBackend(
+                vault_path=vault_path,
+                fts=self._fts,
+            )
+        else:
+            # Default: existing MemoryStore — behaviour is unchanged
+            self._store = MemoryStore(repo_root=self._root)
+
         self._search = SearchMiddleware(
             repo_root=self._root,
             fts_index=self._fts,
