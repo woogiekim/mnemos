@@ -78,17 +78,14 @@ mnemos capture --content "Found root cause of auth bug" --layer session
 
 ### Capture interaction pattern
 - Capture proactively — do NOT ask permission before calling `mnemos capture`
-- After capturing, notify in your own response text:
-  - **session, project, global**: `✻ <emoji> <brief description> (<layer>)`
-  - **ephemeral, working**: no notification
 - If the user says the capture is unnecessary, delete it: `mnemos delete <id>`
 - Never prompt "Should I capture this?" — make the judgment and act
 
 **Notification rule (Method E):** The `mnemos capture` CLI prints the
 `✻ <emoji> <brief> [id: <uuid>]` notification line to stdout automatically.
-That CLI output IS the notification. DO NOT write any `✻ ...` notification
-text in your own response — duplicating the CLI output as AI-authored text
-is forbidden and impossible to distinguish from fabrication.
+That CLI output IS the canonical notification. DO NOT write any `✻ ...`
+notification text in your own response — duplicating the CLI output as
+AI-authored text is forbidden and impossible to distinguish from fabrication.
 
 ### /compact — automatic session capture
 When [mnemos] /compact detected appears in context:

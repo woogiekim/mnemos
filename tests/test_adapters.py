@@ -638,11 +638,23 @@ class TestMnemosBehaviorBlockParity:
             "Method E: prohibition against AI-written notifications must be in MNEMOS_BEHAVIOR_BLOCK"
         )
 
-    def test_behavior_block_notification_only_for_persistent_layers(self):
-        """Notification must only apply to session/project/global; ephemeral/working are silent."""
-        assert "session, project, global" in MNEMOS_BEHAVIOR_BLOCK
-        assert "ephemeral, working" in MNEMOS_BEHAVIOR_BLOCK
-        assert "no notification" in MNEMOS_BEHAVIOR_BLOCK
+    def test_behavior_block_method_e_is_canonical_notification(self):
+        """Method E: CLI stdout is the sole notification channel — no per-layer AI text.
+
+        Pre-Method-E, the behavior block told AI to write per-layer notification text
+        (session/project/global: ✻ ... / ephemeral: silent). Method E removes that
+        per-layer distinction entirely because the CLI handles notification for all
+        captured items uniformly. The block must NOT contain the contradictory
+        per-layer AI-written notification guidance.
+        """
+        # Method E: AI is not responsible for per-layer notification text
+        assert "After capturing, notify in your own response text" not in MNEMOS_BEHAVIOR_BLOCK, (
+            "Method E: AI must not be instructed to write notification text; CLI handles it"
+        )
+        # Method E prohibition must still be present
+        assert "DO NOT" in MNEMOS_BEHAVIOR_BLOCK or "forbidden" in MNEMOS_BEHAVIOR_BLOCK, (
+            "Method E: prohibition against AI-written notifications must be in MNEMOS_BEHAVIOR_BLOCK"
+        )
 
 
 # ---------------------------------------------------------------------------
