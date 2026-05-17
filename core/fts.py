@@ -14,6 +14,31 @@ from core.korean import expand_query
 # "agent" MINUS "crew" rather than a phrase, causing an OperationalError.
 _FTS5_SPECIAL_RE = re.compile(r'[-+*^":()\[\]{}|&!]')
 
+# Characters used as separators in compound technical terms that should be
+# normalised to spaces so FTS5 can match the component tokens.  Colons and
+# hyphens are the two most common: ``crew:run`` and ``agent-crew``.
+_COMPOUND_SEPARATOR_RE = re.compile(r'[:\-]')
+
+
+def _normalise_compound_terms(query: str) -> str:
+    """Replace colons and hyphens with spaces to normalise compound technical terms.
+
+    Converts terms like ``crew:run`` and ``agent-crew`` into ``crew run`` and
+    ``agent crew`` respectively, so that FTS5 can match documents containing
+    those component tokens even when the full compound form is not present
+    verbatim in the index.
+
+    Examples
+    --------
+    >>> _normalise_compound_terms("crew:run")
+    'crew run'
+    >>> _normalise_compound_terms("agent-crew")
+    'agent crew'
+    >>> _normalise_compound_terms("fix agent-crew and crew:run issues")
+    'fix agent crew and crew run issues'
+    """
+    return _COMPOUND_SEPARATOR_RE.sub(" ", query)
+
 
 def _sanitise_fts_variant(variant: str) -> str:
     """Wrap tokens containing FTS5 special characters in double quotes.
@@ -93,6 +118,13 @@ class FTSIndex:
         different query form, both variants are searched and results are merged
         (deduped by item_id) so that ``니모스를`` matches the same documents
         as ``mnemos``.
+
+        Compound technical terms containing colons or hyphens (e.g. ``crew:run``,
+        ``agent-crew``) are also normalised by replacing those separators with
+        spaces.  This produces an additional query variant so that FTS5 can match
+        documents that contain the component tokens even when the full compound
+        form is absent.  Both the original (quoted) and normalised forms are
+        searched and results are merged.
         """
         if not query.strip():
             return []
@@ -100,11 +132,28 @@ class FTSIndex:
         # Expand Korean query into one or two variants (deduped).
         query_variants = expand_query(query)
 
+        # For each variant, also add a compound-normalised form (colon / hyphen
+        # replaced with spaces).  This widens recall for queries like "crew:run"
+        # or "agent-crew" without discarding the original phrase form.
+        expanded_variants: list[str] = []
+        seen_variants: set[str] = set()
+        for v in query_variants:
+            if v not in seen_variants:
+                expanded_variants.append(v)
+                seen_variants.add(v)
+            normalised = _normalise_compound_terms(v)
+            # Only add the normalised form when it differs from the original
+            # (i.e. the query actually contained colons or hyphens).
+            normalised_stripped = " ".join(normalised.split())  # collapse whitespace
+            if normalised_stripped and normalised_stripped not in seen_variants:
+                expanded_variants.append(normalised_stripped)
+                seen_variants.add(normalised_stripped)
+
         seen_ids: set[str] = set()
         results: list[dict[str, Any]] = []
 
         with self._connect() as conn:
-            for variant in query_variants:
+            for variant in expanded_variants:
                 if not variant.strip():
                     continue
                 # Sanitise the variant: wrap tokens with FTS5 special chars
