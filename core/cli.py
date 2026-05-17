@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -11,6 +12,53 @@ import click
 from core.gateway import MemoryGateway
 from core.output import capture_notice
 from core.policy import PolicyViolationError
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap sync helper (stdlib-only — no core.* imports)
+# ---------------------------------------------------------------------------
+
+_BOOTSTRAP_SYNC_DIRS = ("core", "agents")
+
+
+def _bootstrap_sync_source(repo_root: str | None) -> None:
+    """Copy updated source directories from the dev repo to the install location.
+
+    This function uses only stdlib (shutil, pathlib) so it can run at the very
+    start of ``update_cmd``, BEFORE any ``from core.* import ...`` calls.  That
+    ordering ensures newly-added functions (e.g. ``migrate_policy_transient``) are
+    present in ``~/.mnemos/core/`` even when the currently-running binary loaded a
+    stale copy — the "bootstrap problem" where a fresh git pull updates the dev
+    repo but the runtime location is never refreshed.
+
+    Args:
+        repo_root: Path to the mnemos dev repo.  When ``None`` or empty the sync
+            is silently skipped (no repo root known, nothing to copy from).
+    """
+    if not repo_root:
+        return
+
+    install_root = Path.home() / ".mnemos"
+    repo_path = Path(repo_root)
+
+    for dir_name in _BOOTSTRAP_SYNC_DIRS:
+        src = repo_path / dir_name
+        dst = install_root / dir_name
+        if not src.is_dir():
+            continue
+        # Skip when source and destination resolve to the same path (editable
+        # install where the dev tree IS the runtime location).
+        try:
+            if src.resolve() == dst.resolve():
+                continue
+        except OSError:
+            pass
+        try:
+            shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+        except Exception:
+            # Non-fatal: if the copy fails the rest of the update still runs;
+            # the user will see the original import error as a warning.
+            pass
 
 
 def _get_gateway() -> MemoryGateway:
@@ -541,6 +589,13 @@ def update_cmd(repo_root: str | None, skip_git_pull: bool, skip_pipx: bool) -> N
            ~/.cursor/rules               (<!-- mnemos:start --> block)
       4. Print a unified diff of each changed block.
     """
+    # Bootstrap sync — must run BEFORE any core.* imports so that newly-added
+    # functions (e.g. migrate_policy_transient) are present in the runtime
+    # ~/.mnemos/core/ even when the running binary loaded a stale copy.
+    # Uses only stdlib (shutil, pathlib) to avoid the very import-failure it
+    # is designed to prevent.
+    _bootstrap_sync_source(repo_root or os.environ.get("MNEMOS_REPO_ROOT"))
+
     from core.updater import run_update
 
     exit_code = run_update(

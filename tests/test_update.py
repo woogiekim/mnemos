@@ -709,3 +709,165 @@ class TestRunUpdateBgCheckStep:
         )
 
         assert exit_code == 0, "bg-check failure must not change update exit code"
+
+
+# ---------------------------------------------------------------------------
+# _bootstrap_sync_source (bootstrap fix — Issue #N)
+# ---------------------------------------------------------------------------
+
+class TestBootstrapSyncSource:
+    """Tests for the pre-import bootstrap sync added to update_cmd in cli.py.
+
+    The bootstrap problem: when the user runs ``mnemos update``, Python loads
+    ``~/.mnemos/core/cli.py`` (potentially stale).  Any new function added to
+    the dev repo (e.g. ``migrate_policy_transient``) won't exist in the runtime
+    ``~/.mnemos/core/`` until a sync is performed.  The sync must happen BEFORE
+    any ``from core.* import ...`` call inside ``update_cmd``.
+
+    ``_bootstrap_sync_source`` satisfies this requirement because it uses only
+    stdlib (shutil, pathlib) and runs at the very top of ``update_cmd``.
+    """
+
+    def _make_repo(self, base: Path, dirs: dict[str, list[tuple[str, str]]]) -> Path:
+        """Create a minimal fake source repo.
+
+        dirs maps dir_name → list of (relative_path, content) tuples.
+        """
+        repo = base / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        for dir_name, files in dirs.items():
+            d = repo / dir_name
+            d.mkdir(exist_ok=True)
+            for rel, content in files:
+                f = d / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(content)
+        return repo
+
+    def test_copies_core_and_agents_to_install(self, tmp_path, monkeypatch):
+        """_bootstrap_sync_source must copy core/ and agents/ to ~/.mnemos/."""
+        from core.cli import _bootstrap_sync_source
+
+        repo = self._make_repo(tmp_path, {
+            "core": [("install.py", "def migrate_policy_transient(): pass\n")],
+            "agents": [("writer.py", "# writer\n")],
+        })
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        _bootstrap_sync_source(str(repo))
+
+        assert (fake_mnemos / "core" / "install.py").exists()
+        assert (fake_mnemos / "agents" / "writer.py").exists()
+
+    def test_new_function_is_importable_after_sync(self, tmp_path, monkeypatch):
+        """After _bootstrap_sync_source, a newly-added function in core/ must be importable."""
+        from core.cli import _bootstrap_sync_source
+
+        new_func_code = "def migrate_policy_transient(root): return True\n"
+        repo = self._make_repo(tmp_path, {
+            "core": [("install.py", new_func_code)],
+        })
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        _bootstrap_sync_source(str(repo))
+
+        dest = fake_mnemos / "core" / "install.py"
+        assert dest.exists()
+        assert "migrate_policy_transient" in dest.read_text()
+
+    def test_noop_when_repo_root_is_none(self, tmp_path, monkeypatch):
+        """When repo_root is None the function must silently return without raising."""
+        from core.cli import _bootstrap_sync_source
+
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        # Must not raise
+        _bootstrap_sync_source(None)
+        # Nothing was copied
+        assert not (fake_mnemos / "core").exists()
+
+    def test_noop_when_repo_root_is_empty_string(self, tmp_path, monkeypatch):
+        """When repo_root is '' the function must silently return."""
+        from core.cli import _bootstrap_sync_source
+
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        _bootstrap_sync_source("")
+        assert not (fake_mnemos / "core").exists()
+
+    def test_skips_same_path_resolve(self, tmp_path, monkeypatch):
+        """When src.resolve() == dst.resolve() (editable install), skip without error."""
+        from core.cli import _bootstrap_sync_source
+
+        # Arrange: fake_home/.mnemos/core IS the repo's core/ directory (symlink)
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        repo = tmp_path / "repo"
+        repo_core = repo / "core"
+        repo_core.mkdir(parents=True)
+        (repo_core / "cli.py").write_text("# cli\n")
+
+        # Make dst point to the same place as src via symlink
+        (fake_mnemos / "core").symlink_to(repo_core.resolve())
+
+        # Must not raise and must not overwrite
+        _bootstrap_sync_source(str(repo))
+        # The symlink must still point to the original location (unchanged)
+        assert (fake_mnemos / "core").is_symlink()
+
+    def test_update_cmd_calls_bootstrap_sync_before_run_update(self, tmp_path, monkeypatch):
+        """update_cmd must call _bootstrap_sync_source before from core.updater import run_update."""
+        from core import cli as cli_module
+        from core import updater as updater_module
+
+        call_order: list[str] = []
+
+        original_bootstrap = cli_module._bootstrap_sync_source
+
+        def spy_bootstrap(repo_root):
+            call_order.append("bootstrap")
+
+        monkeypatch.setattr(cli_module, "_bootstrap_sync_source", spy_bootstrap)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli_module.cli,
+            ["update", "--skip-git-pull", "--skip-pipx",
+             "--repo-root", str(tmp_path)],
+        )
+
+        assert "bootstrap" in call_order, "_bootstrap_sync_source was never called"
+
+    def test_copy_failure_is_non_fatal(self, tmp_path, monkeypatch):
+        """A copy failure in _bootstrap_sync_source must not raise — the rest of update should run."""
+        from core.cli import _bootstrap_sync_source
+        import shutil as shutil_module
+
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        repo = self._make_repo(tmp_path, {"core": [("cli.py", "# cli\n")]})
+
+        # Patch shutil.copytree to raise
+        monkeypatch.setattr(shutil_module, "copytree", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")))
+
+        # Must not raise
+        _bootstrap_sync_source(str(repo))
