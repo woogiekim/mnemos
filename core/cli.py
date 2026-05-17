@@ -552,6 +552,28 @@ def memory_consolidate() -> None:
     default=False,
     help="Include score breakdowns in the output.",
 )
+@click.option(
+    "--install-daemon",
+    "install_daemon",
+    is_flag=True,
+    default=False,
+    help=(
+        "macOS only: install a launchd plist at "
+        "~/Library/LaunchAgents/com.mnemos.gc.plist that runs "
+        "mnemos bg-check --quiet daily at 3 AM. "
+        "GC log is written to ~/.mnemos/.logs/gc.log."
+    ),
+)
+@click.option(
+    "--uninstall-daemon",
+    "uninstall_daemon",
+    is_flag=True,
+    default=False,
+    help=(
+        "macOS only: unload and remove the launchd plist installed by "
+        "--install-daemon."
+    ),
+)
 def memory_gc(
     dry_run: bool,
     layers: str | None,
@@ -559,6 +581,8 @@ def memory_gc(
     staleness_hours: float | None,
     limit: int | None,
     verbose: bool,
+    install_daemon: bool,
+    uninstall_daemon: bool,
 ) -> None:
     """Run G1GC-style garbage collection on memory layers.
 
@@ -576,6 +600,8 @@ def memory_gc(
       mnemos gc --dry-run
       mnemos gc --layer ephemeral,working --threshold 0.6
       mnemos gc --staleness-hours 48 --limit 50 --verbose
+      mnemos gc --install-daemon      # install macOS launchd daily GC
+      mnemos gc --uninstall-daemon    # remove the launchd daemon
     """
     from core.gc import (
         GarbageCollector,
@@ -583,6 +609,12 @@ def memory_gc(
         DEFAULT_GC_THRESHOLD,
         DEFAULT_LIMIT,
     )
+
+    # ── Daemon install/uninstall (macOS launchd) ─────────────────────────────
+    if install_daemon or uninstall_daemon:
+        from core.daemon import manage_gc_daemon
+        manage_gc_daemon(install=install_daemon, uninstall=uninstall_daemon)
+        return
 
     gw = _get_gateway()
     repo_root = gw._root
@@ -664,6 +696,16 @@ def memory_gc(
     default=False,
     help="Print a summary even when there is no activity.",
 )
+@click.option(
+    "--quiet",
+    "quiet",
+    is_flag=True,
+    default=False,
+    help=(
+        "Suppress all output (including the background-activity context block). "
+        "Useful when called from daemons or crew:update where stdout must stay clean."
+    ),
+)
 def bg_check_cmd(
     interval_minutes: int | None,
     gc_disabled: bool,
@@ -671,6 +713,7 @@ def bg_check_cmd(
     dedup_disabled: bool,
     force: bool,
     verbose: bool,
+    quiet: bool,
 ) -> None:
     """Run autonomous background maintenance (GC + auto-promote + dedup).
 
@@ -681,12 +724,14 @@ def bg_check_cmd(
 
     When activity occurs, a <mnemos-context type="background-activity"> block
     is emitted to stdout so Claude sees a brief summary injected into context.
+    Pass --quiet to suppress all output (useful in daemons and crew:update).
 
     \b
     Examples:
       mnemos bg-check                   # throttled, silent unless active
       mnemos bg-check --force --verbose # always run, always print summary
       mnemos bg-check --no-gc           # skip GC phase
+      mnemos bg-check --quiet           # completely silent (daemon / update use)
     """
     from core.bg import (
         run_background_check,
@@ -706,6 +751,10 @@ def bg_check_cmd(
         dedup_enabled=not dedup_disabled,
         force=force or (interval_minutes == 0),
     )
+
+    if quiet:
+        # --quiet: suppress all output regardless of activity
+        return
 
     if not result.ran:
         # Throttled — completely silent (no output)
