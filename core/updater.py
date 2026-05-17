@@ -322,6 +322,31 @@ def update_cursor_rules(cursor_dir: Path) -> tuple[bool, str]:
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
+def _run_bg_check_quiet() -> None:
+    """Run ``mnemos bg-check --quiet`` in-process.
+
+    Invokes :func:`core.bg.run_background_check` directly (no subprocess) so
+    the update step works even when the newly-reinstalled ``mnemos`` binary is
+    not yet on PATH.  Output is suppressed because --quiet is the intended
+    behaviour in update context.
+    """
+    from core.bg import run_background_check
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT")
+    if not repo_root:
+        # Fall back to the repo root inferred from this module's location
+        repo_root = str(Path(__file__).resolve().parents[1])
+
+    # Force a run (bypass throttle) so the update always triggers maintenance.
+    run_background_check(
+        repo_root=repo_root,
+        force=True,
+        gc_enabled=True,
+        auto_promote_enabled=True,
+        dedup_enabled=True,
+    )
+
+
 def run_update(
     repo_root: Optional[str] = None,
     skip_git_pull: bool = False,
@@ -378,6 +403,16 @@ def run_update(
                 f"warning: {adapter.name} adapter update failed — {exc}",
                 file=sys.stderr,
             )
+
+    # -- 4. Run bg-check --quiet (GC + auto-promote + dedup) ----------------
+    # This step runs silently so the update summary stays readable. Failures
+    # are non-fatal — they are reported as warnings and do not change exit_code.
+    print("\n── running mnemos bg-check --quiet ───────────────────────────────")
+    try:
+        _run_bg_check_quiet()
+        print("bg-check: complete")
+    except Exception as exc:
+        print(f"warning: bg-check failed — {exc}", file=sys.stderr)
 
     print("\n── update complete ───────────────────────────────────────────────")
     return exit_code

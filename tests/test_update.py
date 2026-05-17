@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -13,6 +14,7 @@ from core.updater import (
     update_claude_md,
     update_cursor_rules,
     update_settings_json,
+    _run_bg_check_quiet,
 )
 
 
@@ -469,3 +471,93 @@ class TestUpdateCliCommand:
         content = claude_md.read_text()
         assert "old content" not in content
         assert "<!-- mnemos-start -->" in content
+
+
+# ---------------------------------------------------------------------------
+# _run_bg_check_quiet  (new: crew:update hook, Issue #27)
+# ---------------------------------------------------------------------------
+
+class TestRunBgCheckQuiet:
+    def test_calls_run_background_check(self, tmp_path, monkeypatch):
+        """_run_bg_check_quiet must invoke run_background_check with force=True."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+
+        called_kwargs: dict = {}
+
+        def fake_bg_check(repo_root, **kwargs):
+            called_kwargs.update(kwargs)
+            called_kwargs["repo_root"] = repo_root
+            from core.bg import BackgroundCheckResult
+            return BackgroundCheckResult(ran=True)
+
+        with patch("core.bg.run_background_check", side_effect=fake_bg_check):
+            _run_bg_check_quiet()
+
+        assert called_kwargs.get("force") is True, "bg-check must run with force=True"
+
+    def test_force_true_bypasses_throttle(self, tmp_path, monkeypatch):
+        """The update hook must bypass the throttle (force=True)."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+
+        from core.bg import BackgroundCheckResult
+        with patch("core.bg.run_background_check", return_value=BackgroundCheckResult(ran=True)) as mock:
+            _run_bg_check_quiet()
+
+        _, kwargs = mock.call_args
+        assert kwargs.get("force") is True
+
+    def test_gc_enabled_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+        from core.bg import BackgroundCheckResult
+        with patch("core.bg.run_background_check", return_value=BackgroundCheckResult(ran=True)) as mock:
+            _run_bg_check_quiet()
+        _, kwargs = mock.call_args
+        assert kwargs.get("gc_enabled") is True
+
+    def test_exception_propagates_to_caller(self, tmp_path, monkeypatch):
+        """_run_bg_check_quiet propagates exceptions; run_update handles them non-fatally."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+        with patch("core.bg.run_background_check", side_effect=RuntimeError("bang")):
+            # _run_bg_check_quiet itself may raise — it is run_update that catches it
+            with pytest.raises(RuntimeError, match="bang"):
+                _run_bg_check_quiet()
+
+
+class TestRunUpdateBgCheckStep:
+    """Verify that run_update calls _run_bg_check_quiet as its last step."""
+
+    def test_bg_check_is_called_during_update(self, tmp_path, monkeypatch):
+        """run_update must call _run_bg_check_quiet when skip flags are set."""
+        from core import updater as updater_module
+
+        bg_check_called = []
+
+        def fake_bg_check_quiet():
+            bg_check_called.append(True)
+
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", fake_bg_check_quiet)
+
+        updater_module.run_update(
+            skip_git_pull=True,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        assert bg_check_called, "run_update must call _run_bg_check_quiet"
+
+    def test_bg_check_failure_does_not_affect_exit_code(self, tmp_path, monkeypatch):
+        """A failing bg-check must not change run_update's exit code."""
+        from core import updater as updater_module
+
+        def failing_bg_check():
+            raise RuntimeError("bg-check exploded")
+
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", failing_bg_check)
+
+        exit_code = updater_module.run_update(
+            skip_git_pull=True,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        assert exit_code == 0, "bg-check failure must not change update exit code"
