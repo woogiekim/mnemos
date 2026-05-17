@@ -162,6 +162,59 @@ class TestPromote:
         matches = list((repo_root / "wiki" / "global").glob("*.md"))
         assert len(matches) >= 1
 
+    def test_promote_force_bypasses_age_policy(self, tmp_path):
+        """force=True must succeed even when age < threshold (issue #42)."""
+        import yaml
+        from core.policy import PolicyViolationError
+
+        # Build a repo with a strict age threshold
+        wiki = tmp_path / "wiki"
+        for d in ["global", "projects", "entities", "claims", "topics"]:
+            (wiki / d).mkdir(parents=True)
+        agent = tmp_path / ".agent"
+        for d in ["runs", "sessions", "state", "reports", "tools"]:
+            (agent / d).mkdir(parents=True)
+        (agent / "workflows" / "hooks").mkdir(parents=True)
+
+        strict_policy = {
+            "layers": {
+                "project": {
+                    "path_template": "wiki/projects/",
+                    "promotes_to": "global",
+                    "promotion": {
+                        "age_hours": 9999.0,  # impossibly high threshold
+                        "access_count": 0,
+                        "quality_score": 0.0,
+                    },
+                },
+                "global": {
+                    "path_template": "wiki/global/",
+                    "promotes_to": None,
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+            },
+            "forget": {"requires_archived": True},
+            "archive": {"allowed_stages": ["stored", "retrieved", "used", "validated"]},
+        }
+        (wiki / "policy.yaml").write_text(yaml.dump(strict_policy))
+        (wiki / "log.md").write_text("# Log\n")
+        (wiki / "log.jsonl").write_text("")
+
+        from core.gateway import MemoryGateway
+        gw = MemoryGateway(repo_root=str(tmp_path))
+
+        item_id = gw.capture(layer="project", content="Force-promote me", run_id="run-force")
+
+        # Without force, policy age check must reject it
+        with pytest.raises(PolicyViolationError):
+            gw.promote(item_id=item_id)
+
+        # With force=True, promotion must succeed despite the age violation
+        new_id = gw.promote(item_id=item_id, force=True)
+        assert new_id is not None
+        matches = list((tmp_path / "wiki" / "global").glob("*.md"))
+        assert len(matches) >= 1
+
 
 class TestDemote:
     def test_demote_moves_item_to_lower_layer(self, gateway, repo_root):

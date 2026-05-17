@@ -369,6 +369,13 @@ def memory_update(item_id: str, content: str) -> None:
 @click.option("--session-id", default=None, help="Session ID.")
 @click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress promotion notification output.")
 @click.option("--no-color", "no_color", is_flag=True, default=False, help="Disable ANSI color output.")
+@click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help="Bypass age and policy checks (use with caution).",
+)
 def memory_promote(
     item_id: str,
     target_layer: str | None,
@@ -376,6 +383,7 @@ def memory_promote(
     session_id: str | None,
     quiet: bool,
     no_color: bool,
+    force: bool,
 ) -> None:
     """Promote a memory item to the next (or specified) layer.
 
@@ -393,11 +401,18 @@ def memory_promote(
         if effective_target is None:
             effective_target = gw._policy.get_next_layer(current_layer)
 
+        if force:
+            click.echo(
+                "warning: forcing promotion — age/policy checks bypassed",
+                err=True,
+            )
+
         new_id = gw.promote(
             item_id=item_id,
             target_layer=target_layer,
             run_id=run_id,
             session_id=session_id,
+            force=force,
         )
         click.echo(f"promoted: {new_id}")
         if not quiet:
@@ -464,7 +479,7 @@ def memory_archive(item_id: str) -> None:
 
 @cli.command("forget")
 @click.argument("item_id")
-@click.option("--force", is_flag=True, default=False, help="Skip confirmation prompt.")
+@click.option("--force", "--yes", "-y", "force", is_flag=True, default=False, help="Skip confirmation prompt (also: --yes / -y).")
 def memory_forget(item_id: str, force: bool) -> None:
     """Hard-delete a memory item (requires archived state)."""
     gw = _get_gateway()

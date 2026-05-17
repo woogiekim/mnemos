@@ -552,6 +552,57 @@ class TestMemoryForgetCommand:
         )
         assert result.exit_code == 0, result.output
 
+    def test_memory_forget_yes_alias_works(self, runner, cli_with_repo, repo_root):
+        """--yes is an alias for --force and must succeed the same way (issue #43)."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "yes alias forget", "--id", "forget-003"],
+        )
+        runner.invoke(cli_with_repo, ["archive", "forget-003"])
+        result = runner.invoke(cli_with_repo, ["forget", "--yes", "forget-003"])
+        assert result.exit_code == 0, result.output
+        assert "forgotten: forget-003" in result.output
+
+    def test_memory_forget_y_short_alias_works(self, runner, cli_with_repo, repo_root):
+        """-y short flag is an alias for --force and must succeed (issue #43)."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "y alias forget", "--id", "forget-004"],
+        )
+        runner.invoke(cli_with_repo, ["archive", "forget-004"])
+        result = runner.invoke(cli_with_repo, ["forget", "-y", "forget-004"])
+        assert result.exit_code == 0, result.output
+        assert "forgotten: forget-004" in result.output
+
+
+class TestMemoryPromoteForceCommand:
+    """Tests for `mnemos promote --force` (issue #42)."""
+
+    def test_promote_force_flag_is_accepted(self, runner, cli_with_repo, repo_root):
+        """--force flag must be accepted by the promote command."""
+        cap_result = runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "project", "--content", "Force promote me", "--id", "promo-force-001"],
+        )
+        assert cap_result.exit_code == 0, cap_result.output
+
+        result = runner.invoke(cli_with_repo, ["promote", "--force", "promo-force-001"])
+        assert result.exit_code == 0, result.output
+        assert "promoted: promo-force-001" in result.output
+
+    def test_promote_force_emits_warning(self, runner, cli_with_repo, repo_root):
+        """--force must emit a warning (captured in combined output)."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "project", "--content", "Force warn test", "--id", "promo-force-002"],
+        )
+        result = runner.invoke(
+            cli_with_repo,
+            ["promote", "--force", "promo-force-002"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "warning" in result.output.lower()
+
 
 class TestMemoryDeleteCommand:
     """Tests for `mnemos delete` CLI command (issue #33)."""
