@@ -18,6 +18,7 @@ import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -125,6 +126,46 @@ def git_pull(repo_root: str) -> None:
 def pipx_reinstall() -> None:
     """Run pipx reinstall mnemos."""
     _run(["pipx", "reinstall", "mnemos"])
+
+
+# ---------------------------------------------------------------------------
+# Step 1b — sync updated source directories to the install location
+# ---------------------------------------------------------------------------
+
+_SYNC_DIRS = ("core", "agents")
+
+
+def sync_source_to_install(repo_root: str, install_root: Optional[Path] = None) -> list[str]:
+    """Copy updated source directories from repo_root to the install location.
+
+    After ``git pull`` updates the dev repo, the editable-install target
+    (``~/.mnemos/core/`` and ``~/.mnemos/agents/``) must be refreshed so the
+    running binary loads the new code.
+
+    Args:
+        repo_root: Path to the source dev repo (e.g. ~/Development/mnemos).
+        install_root: Override the install location.  Defaults to ``~/.mnemos``.
+
+    Returns:
+        List of directory paths that were synced (relative names such as
+        ``"core"`` and ``"agents"``).  Directories that are absent in
+        ``repo_root`` are silently skipped.
+    """
+    if install_root is None:
+        install_root = Path.home() / ".mnemos"
+
+    repo_path = Path(repo_root)
+    synced: list[str] = []
+
+    for dir_name in _SYNC_DIRS:
+        src = repo_path / dir_name
+        dst = install_root / dir_name
+        if not src.is_dir():
+            continue
+        shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+        synced.append(dir_name)
+
+    return synced
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +417,20 @@ def run_update(
         except subprocess.CalledProcessError as exc:
             print(f"warning: git pull failed — {exc}", file=sys.stderr)
             exit_code = 1
+
+    # -- 1b. sync updated source directories to install location -------------
+    # git pull updates the dev repo but ~/.mnemos/core/ and ~/.mnemos/agents/
+    # are separate copies that must be refreshed so the running binary loads
+    # the new code.  This step is always attempted when repo_root is known.
+    print("\n── syncing source directories to install location ───────────────")
+    try:
+        synced = sync_source_to_install(repo_root, install_root=home / ".mnemos")
+        if synced:
+            print(f"synced: {', '.join(synced)}")
+        else:
+            print("sync: nothing to sync (source directories not found)")
+    except Exception as exc:
+        print(f"warning: sync failed — {exc}", file=sys.stderr)
 
     # -- 2. pipx reinstall ---------------------------------------------------
     if not skip_pipx:

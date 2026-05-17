@@ -14,6 +14,7 @@ from core.updater import (
     update_claude_md,
     update_cursor_rules,
     update_settings_json,
+    sync_source_to_install,
     _run_bg_check_quiet,
 )
 
@@ -416,6 +417,153 @@ class TestUpdateCursorRules:
         assert "# Keep me" in content
         assert "# Keep me too" in content
         assert "old" not in content
+
+
+# ---------------------------------------------------------------------------
+# sync_source_to_install
+# ---------------------------------------------------------------------------
+
+class TestSyncSourceToInstall:
+    """Tests for sync_source_to_install() — the post-git-pull copy step."""
+
+    def _make_repo(self, base: Path, dirs: dict[str, list[str]]) -> Path:
+        """Create a fake source repo under base with given dirs and files.
+
+        dirs maps dir_name → list of relative file paths (with content '# file').
+        """
+        repo = base / "repo"
+        repo.mkdir()
+        for dir_name, files in dirs.items():
+            d = repo / dir_name
+            d.mkdir()
+            for rel in files:
+                f = d / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(f"# {rel}\n")
+        return repo
+
+    def test_copies_core_and_agents_dirs(self, tmp_path):
+        repo = self._make_repo(tmp_path, {
+            "core": ["updater.py", "cli.py"],
+            "agents": ["writer.py"],
+        })
+        install_root = tmp_path / "install"
+        install_root.mkdir()
+
+        synced = sync_source_to_install(str(repo), install_root=install_root)
+
+        assert set(synced) == {"core", "agents"}
+        assert (install_root / "core" / "updater.py").exists()
+        assert (install_root / "core" / "cli.py").exists()
+        assert (install_root / "agents" / "writer.py").exists()
+
+    def test_overwrites_stale_files(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"core": ["updater.py"]})
+        install_root = tmp_path / "install"
+        (install_root / "core").mkdir(parents=True)
+        stale = install_root / "core" / "updater.py"
+        stale.write_text("# stale version\n")
+
+        sync_source_to_install(str(repo), install_root=install_root)
+
+        assert stale.read_text() == "# updater.py\n"
+
+    def test_skips_missing_source_dir(self, tmp_path):
+        """If agents/ doesn't exist in the repo, it is silently skipped."""
+        repo = self._make_repo(tmp_path, {"core": ["cli.py"]})
+        install_root = tmp_path / "install"
+        install_root.mkdir()
+
+        synced = sync_source_to_install(str(repo), install_root=install_root)
+
+        assert synced == ["core"]
+        assert not (install_root / "agents").exists()
+
+    def test_returns_empty_when_no_source_dirs(self, tmp_path):
+        """Repo with no core/ or agents/ returns an empty list."""
+        repo = tmp_path / "empty_repo"
+        repo.mkdir()
+        install_root = tmp_path / "install"
+        install_root.mkdir()
+
+        synced = sync_source_to_install(str(repo), install_root=install_root)
+
+        assert synced == []
+
+    def test_preserves_existing_install_files_not_in_source(self, tmp_path):
+        """Files in install_root that are not in the source are kept (dirs_exist_ok)."""
+        repo = self._make_repo(tmp_path, {"core": ["new_module.py"]})
+        install_root = tmp_path / "install"
+        existing = install_root / "core" / "old_module.py"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("# old but kept\n")
+
+        sync_source_to_install(str(repo), install_root=install_root)
+
+        # New file is present
+        assert (install_root / "core" / "new_module.py").exists()
+        # Old file that was not in source is still present (copytree merges, not replaces)
+        assert existing.exists()
+
+    def test_default_install_root_uses_home_mnemos(self, tmp_path, monkeypatch):
+        """When install_root is None, defaults to Path.home() / '.mnemos'."""
+        fake_home = tmp_path / "fakehome"
+        fake_mnemos = fake_home / ".mnemos"
+        fake_mnemos.mkdir(parents=True)
+        repo = self._make_repo(tmp_path, {"core": ["cli.py"]})
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        synced = sync_source_to_install(str(repo), install_root=None)
+
+        assert "core" in synced
+        assert (fake_mnemos / "core" / "cli.py").exists()
+
+    def test_run_update_syncs_before_pipx(self, tmp_path, monkeypatch):
+        """run_update() must call sync_source_to_install before pipx_reinstall."""
+        from core import updater as updater_module
+
+        call_order: list[str] = []
+
+        def fake_sync(repo_root, install_root=None):
+            call_order.append("sync")
+            return ["core"]
+
+        def fake_pipx():
+            call_order.append("pipx")
+
+        monkeypatch.setattr(updater_module, "sync_source_to_install", fake_sync)
+        monkeypatch.setattr(updater_module, "pipx_reinstall", fake_pipx)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=True,
+            home=tmp_path,
+        )
+
+        assert call_order.index("sync") < call_order.index("pipx"), (
+            "sync_source_to_install must run before pipx_reinstall"
+        )
+
+    def test_run_update_sync_failure_does_not_affect_exit_code(self, tmp_path, monkeypatch):
+        """A failing sync must not change run_update's exit code."""
+        from core import updater as updater_module
+
+        def failing_sync(repo_root, install_root=None):
+            raise RuntimeError("sync exploded")
+
+        monkeypatch.setattr(updater_module, "sync_source_to_install", failing_sync)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=True,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        assert exit_code == 0, "sync failure must not change update exit code"
 
 
 # ---------------------------------------------------------------------------
