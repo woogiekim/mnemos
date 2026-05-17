@@ -54,7 +54,6 @@ from core.gc import (
     DEFAULT_STALENESS_HOURS,
     DEFAULT_GC_THRESHOLD,
     DEFAULT_LIMIT,
-    _iter_layer_paths,
 )
 from core.store import MemoryStore
 
@@ -285,19 +284,16 @@ def find_duplicates(
     hash_to_items: dict[str, list[dict[str, Any]]] = {}
 
     for layer in scan_layers:
-        for path in _iter_layer_paths(Path(repo_root), layer):
-            try:
-                item = store._parse_file(path)
-            except Exception:
-                continue
+        for item in store.iter_layer_items(layer):
             content = item.get("content", "")
             if not content.strip():
                 continue
             h = _content_hash(content)
+            raw_path = item.get("_path", "")
             record = {
-                "item_id": str(item.get("id") or path.stem),
+                "item_id": str(item.get("id") or Path(raw_path).stem if raw_path else ""),
                 "layer": str(item.get("layer", layer)),
-                "path": str(path),
+                "path": raw_path,
                 "content_preview": content[:80],
                 "stage": str(item.get("stage", "stored")),
             }

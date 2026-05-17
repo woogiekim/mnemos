@@ -2,11 +2,92 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 import frontmatter
 
 from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
+
+
+# ---------------------------------------------------------------------------
+# Storage abstraction — Dependency-Inversion Protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class StorageBackend(Protocol):
+    """Protocol that every storage backend must satisfy.
+
+    :class:`MemoryStore` is the default filesystem implementation.
+    A future Obsidian adapter (PR-B) will provide an alternative implementation
+    without touching any caller that depends on this interface.
+
+    All methods that accept ``run_id`` / ``session_id`` accept ``None`` as
+    "use the default namespace".  Implementations may ignore those parameters
+    when the underlying storage does not support sub-namespacing.
+    """
+
+    def write(
+        self,
+        layer: str,
+        item_id: str,
+        content: str,
+        metadata: dict[str, Any],
+        run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Path:
+        """Persist a memory item and return its storage path."""
+        ...
+
+    def read(self, item_id_or_path: str) -> dict[str, Any]:
+        """Return a memory item dict (``content`` + front-matter keys + ``_path``)."""
+        ...
+
+    def update(
+        self,
+        item_id_or_path: str,
+        content: str | None = None,
+        metadata_updates: dict[str, Any] | None = None,
+    ) -> Path:
+        """Update content and/or metadata of an existing item."""
+        ...
+
+    def delete(self, item_id_or_path: str) -> None:
+        """Remove a memory item."""
+        ...
+
+    def list_layer(
+        self,
+        layer: str,
+        run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Iterator[Path]:
+        """Yield all item *paths* in the given layer."""
+        ...
+
+    def parse_file(self, path: Path) -> dict[str, Any]:
+        """Parse a single memory file and return its dict representation."""
+        ...
+
+    def iter_layer_items(
+        self,
+        layer: str,
+        run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield parsed item dicts for every item in *layer*.
+
+        Each yielded dict contains all YAML front-matter keys plus ``content``
+        and ``_path`` (the absolute path as a string).  Dynamic layers
+        (``ephemeral``, ``working``, ``session``) scan *all* run / session
+        sub-directories when ``run_id`` / ``session_id`` is ``None``.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Filesystem implementation
+# ---------------------------------------------------------------------------
 
 
 class MemoryStore:
@@ -90,6 +171,14 @@ class MemoryStore:
         result["_path"] = str(path)
         return result
 
+    def parse_file(self, path: Path) -> dict[str, Any]:
+        """Public alias for :meth:`_parse_file`.
+
+        Part of the :class:`StorageBackend` Protocol surface.  Callers should
+        prefer this over the private ``_parse_file`` name.
+        """
+        return self._parse_file(path)
+
     def _find_by_id(self, item_id: str) -> Iterator[Path]:
         """Search all known layer directories for a file matching item_id."""
         search_dirs = [self._root / path for path in LAYER_STATIC_PATHS.values()]
@@ -142,6 +231,64 @@ class MemoryStore:
             return
         if layer_dir.exists():
             yield from layer_dir.glob("*.md")
+
+    def iter_layer_items(
+        self,
+        layer: str,
+        run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield parsed item dicts for every item in *layer*.
+
+        Dynamic layers (``ephemeral``, ``working``, ``session``) scan *all*
+        run / session sub-directories when ``run_id`` / ``session_id`` is
+        ``None``, mirroring the behaviour previously hard-coded in
+        ``gateway.consolidate``, ``gateway.list_all``, and ``gc._iter_layer_paths``.
+
+        Each yielded dict contains all YAML front-matter keys plus ``content``
+        and ``_path`` (absolute path as a string).
+        """
+        if layer in ("ephemeral", "working"):
+            agent_runs = self._root / ".agent" / "runs"
+            if not agent_runs.exists():
+                return
+            sub = "scratch" if layer == "ephemeral" else "working"
+            for rd in agent_runs.iterdir():
+                if not rd.is_dir():
+                    continue
+                layer_dir = rd / sub
+                if layer_dir.exists():
+                    for md_file in layer_dir.glob("*.md"):
+                        try:
+                            yield self._parse_file(md_file)
+                        except Exception:
+                            continue
+        elif layer == "session":
+            agent_sessions = self._root / ".agent" / "sessions"
+            if not agent_sessions.exists():
+                return
+            for md_file in agent_sessions.rglob("*.md"):
+                try:
+                    yield self._parse_file(md_file)
+                except Exception:
+                    continue
+        elif layer == "transient":
+            transient_dir = self._root / TRANSIENT_PATH
+            if transient_dir.exists():
+                for md_file in transient_dir.glob("*.md"):
+                    try:
+                        yield self._parse_file(md_file)
+                    except Exception:
+                        continue
+        elif layer in LAYER_STATIC_PATHS:
+            layer_dir = self._root / LAYER_STATIC_PATHS[layer]
+            if layer_dir.exists():
+                for md_file in layer_dir.glob("*.md"):
+                    try:
+                        yield self._parse_file(md_file)
+                    except Exception:
+                        continue
+        # Unknown layers yield nothing (consistent with list_layer).
 
     def update(
         self,
