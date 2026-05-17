@@ -716,6 +716,31 @@ class MemoryGateway:
         self._event_bus.emit("post-forget", {"item_id": item_id})
 
     # ------------------------------------------------------------------ #
+    # Delete                                                                #
+    # ------------------------------------------------------------------ #
+
+    def delete(self, item_id: str) -> None:
+        """Unconditionally hard-delete a memory item by ID.
+
+        Unlike :meth:`forget`, ``delete`` does not require the item to be in the
+        ``archived`` stage first.  It is intended for AI cleanup workflows where
+        a transient capture (ephemeral/session layer) should be removed
+        immediately without going through the archive lifecycle step.
+
+        The item is removed from the backing store, the FTS index, and an audit
+        log entry is written.
+        """
+        item = self._store.read(item_id)
+        layer = item.get("layer", "unknown")
+
+        self._store.delete(item["_path"])
+        self._fts.remove(item_id)
+
+        self._logger.append("delete", item_id, layer)
+        self._hooks.fire("post-delete", {"item_id": item_id})
+        self._event_bus.emit("post-delete", {"item_id": item_id, "layer": layer})
+
+    # ------------------------------------------------------------------ #
     # Consolidate                                                           #
     # ------------------------------------------------------------------ #
 
