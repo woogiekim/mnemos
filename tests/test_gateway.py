@@ -241,9 +241,11 @@ class TestAuditLog:
 
         lines = [l for l in log_path.read_text().splitlines() if l.strip()]
         assert len(lines) >= 1
-        entry = json.loads(lines[-1])
-        assert entry["operation"] == "capture"
-        assert entry["item_id"] == "log-item-001"
+        entries = [json.loads(l) for l in lines]
+        # The capture operation must appear in the log; auto_classify may append
+        # additional entries after it, so we look in the full entry list.
+        capture_entries = [e for e in entries if e["operation"] == "capture" and e["item_id"] == "log-item-001"]
+        assert len(capture_entries) >= 1
 
     def test_archive_is_logged(self, gateway, repo_root):
         """Archive operation must appear in log.jsonl."""

@@ -53,6 +53,13 @@ def cli() -> None:
 @click.option("--session-id", default=None, help="Session ID for session layer.")
 @click.option("--no-color", "no_color", is_flag=True, default=False, help="Disable ANSI color output.")
 @click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress capture notification output.")
+@click.option(
+    "--no-classify",
+    "no_classify",
+    is_flag=True,
+    default=False,
+    help="Skip automatic tag classification after capture.",
+)
 def memory_capture(
     layer: str | None,
     content: str,
@@ -63,6 +70,7 @@ def memory_capture(
     session_id: str | None,
     no_color: bool,
     quiet: bool,
+    no_classify: bool,
 ) -> None:
     """Capture a new memory item into the target layer (default: ephemeral)."""
     # Defensive fallback: if --session-id was not passed, check env var set by
@@ -80,6 +88,7 @@ def memory_capture(
             quality_score=quality_score,
             run_id=run_id,
             session_id=session_id,
+            no_classify=no_classify,
         )
         effective_layer = layer or "ephemeral"
         if captured_id is None:
@@ -110,12 +119,86 @@ def memory_capture(
 
 
 @cli.command("classify")
-@click.argument("item_id")
-@click.option("--tag", required=True, help="Tag to apply.")
+@click.argument("item_id", required=False, default=None)
+@click.option("--tag", default=None, help="Tag to apply (required when classifying a single item).")
 @click.option("--layer", default=None, help="Layer hint (optional).")
-def memory_classify(item_id: str, tag: str, layer: str | None) -> None:
-    """Classify/tag a captured memory item."""
+@click.option(
+    "--all",
+    "classify_all",
+    is_flag=True,
+    default=False,
+    help="Auto-classify every memory item in the store.",
+)
+@click.option(
+    "--untagged",
+    "untagged_only",
+    is_flag=True,
+    default=False,
+    help="When used with --all, skip items that already have at least one tag.",
+)
+def memory_classify(
+    item_id: str | None,
+    tag: str | None,
+    layer: str | None,
+    classify_all: bool,
+    untagged_only: bool,
+) -> None:
+    """Classify/tag a captured memory item.
+
+    Single-item mode (default):
+      mnemos classify <ITEM_ID> --tag <tag>
+
+    Backfill mode — auto-classify every item:
+      mnemos classify --all
+
+    Backfill mode — auto-classify only untagged items:
+      mnemos classify --all --untagged
+    """
     gw = _get_gateway()
+
+    if classify_all:
+        # Backfill mode: iterate all layers, optionally skip already-tagged items.
+        from core.layers import LAYER_STATIC_PATHS
+
+        static_layers = list(LAYER_STATIC_PATHS.keys())
+        dynamic_layers = ["ephemeral", "working", "session"]
+        all_layers = static_layers + [l for l in dynamic_layers if l not in static_layers]
+
+        classified_count = 0
+        skipped_count = 0
+
+        for lyr in all_layers:
+            try:
+                for item in gw._store.iter_layer_items(lyr):
+                    iid = item.get("id") or ""
+                    if not iid:
+                        continue
+                    existing_tags = item.get("tags") or []
+                    if untagged_only and existing_tags:
+                        skipped_count += 1
+                        continue
+                    content = item.get("content", "")
+                    new_tags = gw.auto_classify(item_id=iid, content=content)
+                    if new_tags:
+                        classified_count += 1
+                        click.echo(f"  classified: {iid} → {new_tags}")
+            except Exception:
+                continue
+
+        click.echo(
+            f"[mnemos classify] {classified_count} item(s) classified"
+            + (f", {skipped_count} skipped (already tagged)" if untagged_only else "")
+        )
+        return
+
+    # Single-item mode
+    if item_id is None:
+        click.echo("error: provide an ITEM_ID or use --all for backfill", err=True)
+        sys.exit(1)
+    if tag is None:
+        click.echo("error: --tag is required when classifying a single item", err=True)
+        sys.exit(1)
+
     try:
         gw.classify(item_id=item_id, tag=tag, layer=layer)
         click.echo(f"classified: {item_id} with tag '{tag}'")
