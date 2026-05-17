@@ -404,7 +404,25 @@ def run_update(
                 file=sys.stderr,
             )
 
-    # -- 4. Run bg-check --quiet (GC + auto-promote + dedup) ----------------
+    # -- 4. Policy migration — add transient layer if absent ----------------
+    # Installations predating the transient layer will be missing it in
+    # wiki/policy.yaml, causing `mnemos capture --layer transient` to fail
+    # with "Unknown layer 'transient'".  The migration is idempotent and
+    # non-fatal; a warning is emitted if it fails so the user can investigate.
+    print("\n── migrating policy: transient layer ─────────────────────────────")
+    try:
+        from core.install import migrate_policy_transient
+
+        repo_root_path = Path(repo_root)
+        changed = migrate_policy_transient(repo_root_path)
+        if changed:
+            print("policy updated: transient layer added to wiki/policy.yaml")
+        else:
+            print("policy ok: transient layer already present")
+    except Exception as exc:
+        print(f"warning: policy migration failed — {exc}", file=sys.stderr)
+
+    # -- 5. Run bg-check --quiet (GC + auto-promote + dedup) ----------------
     # This step runs silently so the update summary stays readable. Failures
     # are non-fatal — they are reported as warnings and do not change exit_code.
     print("\n── running mnemos bg-check --quiet ───────────────────────────────")
