@@ -464,23 +464,30 @@ def run_update(
         print("── git pull --rebase origin main ─────────────────────────────")
         # Auto-stash any local changes before pulling, restore after.
         stashed = _stash_if_dirty(repo_root)
+        pull_ok = True
         try:
             git_pull(repo_root)
         except subprocess.CalledProcessError as exc:
+            pull_ok = False
             cmd_str = " ".join(exc.cmd) if isinstance(exc.cmd, list) else str(exc.cmd)
-            print(f"warning: git pull failed — '{cmd_str}' exited with code {exc.returncode}", file=sys.stderr)
             print(
+                f"warning: git pull failed — '{cmd_str}' exited with code {exc.returncode}\n"
+                f"         Installing from a potentially stale source is unsafe.\n"
                 f"\nTo recover manually:\n"
                 f"  cd {repo_root} && git pull --rebase origin main\n"
+                f"  Then re-run: mnemos update\n"
                 f"\nIf there are local commits conflicting with remote:\n"
                 f"  cd {repo_root} && git rebase --abort\n"
                 f"  cd {repo_root} && git reset --hard origin/main  # discards local commits",
                 file=sys.stderr,
             )
-            exit_code = 1
         finally:
             if stashed:
                 _stash_pop(repo_root)
+
+        if not pull_ok:
+            print("\n── update aborted ────────────────────────────────────────────────")
+            return 1
 
     # -- 1b. sync updated source directories to install location -------------
     # git pull updates the dev repo but ~/.mnemos/core/ and ~/.mnemos/agents/

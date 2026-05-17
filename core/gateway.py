@@ -574,6 +574,7 @@ class MemoryGateway:
         target_layer: str | None = None,
         run_id: str | None = None,
         session_id: str | None = None,
+        force: bool = False,
     ) -> str:
         """Promote a memory item to the next layer (or specified target_layer)."""
         item = self._store.read(item_id)
@@ -586,7 +587,9 @@ class MemoryGateway:
                     f"Layer '{current_layer}' has no higher layer to promote to."
                 )
 
-        self._policy.validate_promote(item=item, target_layer=target_layer)
+        if not force:
+            self._policy.validate_promote(item=item, target_layer=target_layer)
+        # when force=True: skip validate_promote entirely (age/policy bypassed)
 
         content = item["content"]
         new_metadata = {
