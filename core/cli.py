@@ -1010,6 +1010,207 @@ def memory_ingest_claude_md(
             )
 
 
+@cli.group("sync")
+def sync_group() -> None:
+    """Multi-host Obsidian vault git sync commands.
+
+    Requires ``storage.backend: obsidian`` in ``mnemos.yml`` and
+    ``storage.sync.enabled: true`` (or the relevant subcommand handles it).
+
+    \b
+    Subcommands:
+      mnemos sync pull                              Manual pull
+      mnemos sync push                              Manual push
+      mnemos sync status                            Show ahead/behind/dirty state
+      mnemos sync init --remote <url>               Bootstrap git repo + remote
+      mnemos sync continue                          Resume after conflict resolution
+    """
+
+
+def _get_obsidian_backend():
+    """Return the active ObsidianBackend or raise SystemExit with an error."""
+    from core.config import get_backend_config
+    from core.obsidian import ObsidianBackend
+    from core.fts import FTSIndex
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    cfg = get_backend_config(repo_root)
+    if cfg.backend != "obsidian" or not cfg.vault_path:
+        click.echo(
+            "error: mnemos sync requires storage.backend: obsidian in mnemos.yml",
+            err=True,
+        )
+        raise SystemExit(1)
+    state_dir = Path(repo_root) / ".agent" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fts = FTSIndex(db_path=str(state_dir / "fts.db"))
+    return ObsidianBackend(vault_path=cfg.vault_path, fts=fts, sync_config=cfg.sync)
+
+
+@sync_group.command("pull")
+def sync_pull_cmd() -> None:
+    """Pull the latest changes from the remote (manual, bypasses rate limit)."""
+    from core.obsidian import SyncConflictError
+
+    backend = _get_obsidian_backend()
+    try:
+        backend.sync_pull()
+        click.echo("[mnemos sync] pull complete")
+    except SyncConflictError as exc:
+        click.echo(f"error: sync conflict — {exc}", err=True)
+        click.echo(
+            "Resolve the conflict in your editor, then run: mnemos sync continue",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+
+@sync_group.command("push")
+def sync_push_cmd() -> None:
+    """Push local commits to the remote."""
+    backend = _get_obsidian_backend()
+    try:
+        backend.sync_push()
+        click.echo("[mnemos sync] push complete")
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+
+@sync_group.command("status")
+def sync_status_cmd() -> None:
+    """Show ahead/behind counts, dirty state, and last pull/push timestamps."""
+    backend = _get_obsidian_backend()
+    try:
+        stat = backend.sync_status()
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"branch:       {stat.get('branch', '?')}")
+    click.echo(f"upstream:     {stat.get('upstream') or '(none)'}")
+    click.echo(f"ahead:        {stat.get('ahead', 0)}")
+    click.echo(f"behind:       {stat.get('behind', 0)}")
+    click.echo(f"dirty:        {stat.get('dirty', False)}")
+    click.echo(f"untracked:    {stat.get('untracked', 0)}")
+
+    last_pull = stat.get("last_pull_ts", 0.0)
+    last_push = stat.get("last_push_ts", 0.0)
+    click.echo(f"last_pull_ts: {last_pull:.0f}" + (" (never)" if last_pull == 0.0 else ""))
+    click.echo(f"last_push_ts: {last_push:.0f}" + (" (never)" if last_push == 0.0 else ""))
+    click.echo(f"sync_enabled: {stat.get('sync_enabled', False)}")
+    click.echo(f"sync_remote:  {stat.get('sync_remote', 'origin')}")
+    click.echo(f"sync_branch:  {stat.get('sync_branch', 'main')}")
+
+
+@sync_group.command("init")
+@click.option("--remote", "remote_url", required=True, help="Remote git URL (e.g. git@github.com:user/vault.git).")
+@click.option("--branch", "branch_name", default="main", help="Branch to track (default: main).")
+def sync_init_cmd(remote_url: str, branch_name: str) -> None:
+    """Bootstrap: ensure vault is a git repo, add the remote, fetch, set tracking.
+
+    Idempotent — safe to re-run.
+    """
+    import core.git as _git
+    from core.config import get_backend_config
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    cfg = get_backend_config(repo_root)
+    if cfg.backend != "obsidian" or not cfg.vault_path:
+        click.echo(
+            "error: mnemos sync init requires storage.backend: obsidian in mnemos.yml",
+            err=True,
+        )
+        sys.exit(1)
+
+    vault_path = cfg.vault_path
+    remote_name = cfg.sync.remote if cfg.sync.remote else "origin"
+
+    try:
+        # 1. git init (idempotent)
+        _git.init(vault_path)
+        click.echo(f"[mnemos sync] git repo at {vault_path}")
+
+        # 2. Add / update remote
+        _git.set_remote(vault_path, remote_name, remote_url)
+        click.echo(f"[mnemos sync] remote '{remote_name}' → {remote_url}")
+
+        # 3. Fetch
+        import subprocess, shutil
+        if shutil.which("git") is None:
+            raise _git.GitNotFoundError("git binary not found")
+        result = subprocess.run(
+            ["git", "fetch", remote_name],
+            cwd=vault_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            click.echo(f"warning: git fetch failed: {result.stderr.strip()}", err=True)
+        else:
+            click.echo(f"[mnemos sync] fetched from {remote_name}")
+
+        # 4. Set upstream tracking (best-effort)
+        result2 = subprocess.run(
+            ["git", "branch", f"--set-upstream-to={remote_name}/{branch_name}"],
+            cwd=vault_path,
+            capture_output=True,
+            text=True,
+        )
+        if result2.returncode == 0:
+            click.echo(f"[mnemos sync] tracking {remote_name}/{branch_name}")
+        else:
+            # Branch may not exist yet on the remote — not fatal
+            click.echo(
+                f"[mnemos sync] note: could not set upstream tracking "
+                f"({result2.stderr.strip()}) — push once to create the branch"
+            )
+
+        click.echo("[mnemos sync] init complete")
+    except _git.GitNotFoundError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+    except _git.GitCommandError as exc:
+        click.echo(f"error: git error (rc={exc.returncode}): {exc.stderr}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+
+@sync_group.command("continue")
+def sync_continue_cmd() -> None:
+    """Resume after manually resolving a sync conflict.
+
+    After editing the conflicted files in Obsidian / your editor:
+    1. Verify no conflict markers remain.
+    2. Run ``git rebase --continue`` internally.
+    3. Clean up _sync_conflict.md and transient/conflict-*.md.
+    """
+    from core.obsidian import SyncConflictError
+    import core.git as _git
+
+    backend = _get_obsidian_backend()
+    try:
+        backend.sync_continue()
+        click.echo("[mnemos sync] conflict resolved — rebase complete")
+    except SyncConflictError as exc:
+        click.echo(f"error: cannot continue — {exc}", err=True)
+        sys.exit(1)
+    except _git.GitCommandError as exc:
+        click.echo(
+            f"error: git rebase --continue failed (rc={exc.returncode}): {exc.stderr}",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+
 @cli.command("migrate")
 @click.option(
     "--from",
