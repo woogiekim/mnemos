@@ -19,6 +19,25 @@ def _get_gateway() -> MemoryGateway:
     return MemoryGateway(repo_root=repo_root)
 
 
+def _truncate_content(s: str, width: int, full: bool = False) -> str:
+    """Return a preview of *s* with an ellipsis when truncated.
+
+    Args:
+        s:     The source string to preview.
+        width: Maximum number of characters to show (ignored when *full* is True).
+        full:  When True, return the original string unchanged.
+
+    Returns:
+        The original string when ``full=True`` or ``len(s) <= width``.
+        Otherwise, ``s[:width] + "..."``.
+    """
+    if full:
+        return s
+    if len(s) <= width:
+        return s
+    return s[:width] + "..."
+
+
 @click.group()
 def cli() -> None:
     """mnemos — LLM Wiki Memory OS CLI."""
@@ -116,7 +135,9 @@ def memory_classify(item_id: str, tag: str, layer: str | None) -> None:
     help="Comma-separated list of layers to include (default: all).",
 )
 @click.option("--limit", default=None, type=int, help="Maximum number of items to show.")
-def memory_list(layers: str | None, limit: int | None) -> None:
+@click.option("--full", "full", is_flag=True, default=False, help="Show full content without truncation.")
+@click.option("--width", "width", default=80, type=int, help="Preview width in characters (default: 80).")
+def memory_list(layers: str | None, limit: int | None, full: bool, width: int) -> None:
     """List memory items across all layers (or specified layers)."""
     gw = _get_gateway()
     layer_list = [l.strip() for l in layers.split(",")] if layers else None
@@ -125,7 +146,8 @@ def memory_list(layers: str | None, limit: int | None) -> None:
         click.echo("no memories found")
     else:
         for item in items:
-            click.echo(f"  [{item['layer']}] {item['item_id']}: {item['content'][:80]}")
+            preview = _truncate_content(item["content"], width=width, full=full)
+            click.echo(f"  [{item['layer']}] {item['item_id']}: {preview}")
     click.echo(f"[mnemos] {len(items)} memories")
 
 
@@ -137,7 +159,9 @@ def memory_list(layers: str | None, limit: int | None) -> None:
     help="Comma-separated list of layers to search.",
 )
 @click.option("--limit", default=20, type=int, help="Maximum results.")
-def memory_search(query: str, layers: str | None, limit: int) -> None:
+@click.option("--full", "full", is_flag=True, default=False, help="Show full content without truncation.")
+@click.option("--width", "width", default=80, type=int, help="Preview width in characters (default: 80).")
+def memory_search(query: str, layers: str | None, limit: int, full: bool, width: int) -> None:
     """Search across memory layers."""
     gw = _get_gateway()
     layer_list = [l.strip() for l in layers.split(",")] if layers else None
@@ -146,7 +170,8 @@ def memory_search(query: str, layers: str | None, limit: int) -> None:
         click.echo("no results found")
     else:
         for r in results:
-            click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {r['content'][:80]}")
+            preview = _truncate_content(r["content"], width=width, full=full)
+            click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {preview}")
     click.echo(f"[mnemos] Retrieved {len(results)} memories")
 
 
