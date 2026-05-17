@@ -347,7 +347,7 @@ _inject_promotion_block
 # search each keyword individually and merge the results (dedup by ID).
 
 KEYWORDS="$(python3 -c "
-import re, sys
+import re, sys, os
 
 ENGLISH_STOPWORDS = {
     'the','a','an','is','are','was','were','be','been','have','has','had',
@@ -364,6 +364,17 @@ KOREAN_STOPWORDS = {
 }
 
 prompt = sys.argv[1][:500]
+
+# Load Korean preprocessing from mnemos core if available.
+_preprocess = None
+try:
+    repo_root = os.environ.get('MNEMOS_REPO_ROOT', '')
+    if repo_root:
+        sys.path.insert(0, repo_root)
+    from core.korean import preprocess_query, strip_particles, expand_aliases
+    _preprocess = preprocess_query
+except Exception:
+    pass
 
 # Split camelCase/PascalCase before further tokenisation
 def split_camel(token):
@@ -387,10 +398,29 @@ for w in words:
         continue
     if lw in ENGLISH_STOPWORDS or w in KOREAN_STOPWORDS:
         continue
-    if lw in seen:
-        continue
-    seen.add(lw)
-    keywords.append(w)
+
+    # Apply Korean preprocessing when available: alias expansion + particle strip.
+    # This ensures 에이전트크루 -> agent-crew and 니모스를 -> mnemos before dedup.
+    if _preprocess is not None:
+        w = _preprocess(w)
+        # preprocess_query returns space-joined tokens for multi-word expansions;
+        # split again in case an alias produced a multi-word result.
+        sub_words = w.split()
+        for sw in sub_words:
+            slw = sw.lower()
+            if len(sw) < 2:
+                continue
+            if slw in ENGLISH_STOPWORDS:
+                continue
+            if slw in seen:
+                continue
+            seen.add(slw)
+            keywords.append(sw)
+    else:
+        if lw in seen:
+            continue
+        seen.add(lw)
+        keywords.append(w)
 
 # Pick up to 5 longest/most unique keywords
 keywords.sort(key=lambda x: -len(x))

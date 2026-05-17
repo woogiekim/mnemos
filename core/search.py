@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from core.fts import FTSIndex
+from core.korean import expand_query, preprocess_query
 from core.layers import LAYER_STATIC_PATHS
 from core.vector import VectorBackend
 
@@ -94,9 +95,16 @@ class SearchMiddleware:
         abstraction is honoured.  Without a store the method falls back to
         direct filesystem globbing over the static layers (preserving the
         original behaviour for callers that do not yet pass a store).
+
+        Korean queries are preprocessed (particle stripping + alias expansion)
+        so that ``니모스를`` matches files containing ``mnemos``.
         """
         results: list[dict[str, Any]] = []
-        query_lower = query.lower()
+        # Build all query variants for Korean expansion
+        query_variants = expand_query(query)
+        query_lower_variants = [v.lower() for v in query_variants]
+
+        seen_ids: set[str] = set()
 
         if self._store is not None:
             # Route through the StorageBackend Protocol.
@@ -112,8 +120,12 @@ class SearchMiddleware:
                         text = Path(raw_path).read_text(encoding="utf-8", errors="ignore") if raw_path else content
                     except OSError:
                         text = content
-                    if query_lower in text.lower():
-                        item_id = item.get("id") or Path(raw_path).stem if raw_path else ""
+                    text_lower = text.lower()
+                    if any(qv in text_lower for qv in query_lower_variants):
+                        item_id = item.get("id") or (Path(raw_path).stem if raw_path else "")
+                        if item_id in seen_ids:
+                            continue
+                        seen_ids.add(item_id)
                         results.append(
                             {
                                 "item_id": item_id,
@@ -134,8 +146,12 @@ class SearchMiddleware:
                 for md_file in search_dir.glob("*.md"):
                     try:
                         text = md_file.read_text(encoding="utf-8", errors="ignore")
-                        if query_lower in text.lower():
+                        text_lower = text.lower()
+                        if any(qv in text_lower for qv in query_lower_variants):
                             item_id = md_file.stem
+                            if item_id in seen_ids:
+                                continue
+                            seen_ids.add(item_id)
                             results.append(
                                 {
                                     "item_id": item_id,
