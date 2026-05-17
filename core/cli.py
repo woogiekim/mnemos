@@ -640,13 +640,86 @@ def uninstall_cmd(yes: bool, purge: bool) -> None:
 
 
 @cli.command("log")
-@click.option("--op", required=True, help="Operation name.")
-@click.option("--id", "item_id", required=True, help="Item ID.")
-@click.option("--layer", required=True, help="Layer name.")
+@click.option("--op", default=None, help="Operation name (write mode).")
+@click.option("--id", "item_id", default=None, help="Item ID (write mode).")
+@click.option("--layer", default=None, help="Layer name (write mode).")
 @click.option("--meta", default=None, help="Additional metadata as JSON string.")
-def memory_log(op: str, item_id: str, layer: str, meta: str | None) -> None:
-    """Manually append an entry to the audit log."""
+@click.option("--tail", default=20, type=int, help="Number of entries to show in read mode (default: 20).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output raw JSON lines in read mode.")
+def memory_log(op: str | None, item_id: str | None, layer: str | None, meta: str | None, tail: int, as_json: bool) -> None:
+    """View or append audit log entries.
+
+    \b
+    Read mode (no arguments): show recent audit entries.
+      mnemos log                       # last 20 entries
+      mnemos log --tail 50             # last 50 entries
+      mnemos log --json                # raw JSON output
+
+    Write mode (--op, --id, --layer required): append an entry.
+      mnemos log --op capture --id <ID> --layer session
+    """
     gw = _get_gateway()
+
+    # Read mode: no write options provided
+    if op is None and item_id is None and layer is None:
+        obs = gw.observability
+        entries = obs.read_entries(tail=tail)
+        if not entries:
+            click.echo("no audit log entries found")
+            return
+        if as_json:
+            import json as _json
+            for entry in entries:
+                click.echo(_json.dumps(entry, ensure_ascii=False))
+            return
+        # Human-readable table: timestamp | event | agent | detail
+        click.echo(f"{'TIMESTAMP':<22}  {'EVENT':<22}  {'AGENT':<10}  DETAIL")
+        click.echo("-" * 80)
+        for entry in entries:
+            ts = entry.get("ts", "")[:19]
+            event = entry.get("event", "")
+            agent = entry.get("agent", "")
+            session = entry.get("session_id", "")[:12]
+
+            # Build a short human detail string per event type
+            if event in ("hook_search", "search"):
+                kws = ", ".join(entry.get("keywords", []))[:30]
+                cnt = entry.get("result_count", 0)
+                detail = f"kw={kws!r} results={cnt}"
+            elif event == "hook_session_start":
+                cnt = entry.get("memory_count", 0)
+                detail = f"session={session} memories_loaded={cnt}"
+            elif event == "capture":
+                mid = entry.get("memory_id", "")[:16]
+                elayer = entry.get("layer", "")
+                tags = entry.get("tags", [])
+                detail = f"id={mid} layer={elayer} tags={tags}"
+            elif event == "gc":
+                n = entry.get("archived_count", 0)
+                dr = " [dry-run]" if entry.get("dry_run") else ""
+                detail = f"archived={n}{dr}"
+            elif event == "promotion":
+                mid = entry.get("memory_id", "")[:16]
+                fl = entry.get("from_layer", "")
+                tl = entry.get("layer", "")
+                detail = f"id={mid} {fl}→{tl}"
+            elif event == "hook_post_tool":
+                tool = entry.get("tool_name", "")
+                detail = f"tool={tool} session={session}"
+            else:
+                detail = str(entry)[:60]
+
+            click.echo(f"{ts:<22}  {event:<22}  {agent:<10}  {detail}")
+
+        click.echo(f"\n[mnemos] {len(entries)} entries")
+        return
+
+    # Write mode: validate all required fields are present
+    missing = [name for name, val in [("--op", op), ("--id", item_id), ("--layer", layer)] if val is None]
+    if missing:
+        click.echo(f"error: write mode requires all of --op, --id, --layer (missing: {', '.join(missing)})", err=True)
+        sys.exit(1)
+
     metadata = None
     if meta:
         try:

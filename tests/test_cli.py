@@ -1113,3 +1113,123 @@ class TestAuditLimitAlias:
         assert result.exit_code == 0, result.output
         lines = [l for l in result.output.strip().splitlines() if l.strip()]
         assert len(lines) == 4, f"Expected 4 JSON lines, got {len(lines)}: {result.output}"
+
+
+class TestLogDualMode:
+    """Tests for dual-mode `mnemos log` command (closes #40).
+
+    With no arguments, `log` reads the audit log (same as `audit`).
+    With --op, --id, --layer, it appends an entry (existing write behaviour).
+    Partial write arguments must produce a helpful error.
+    """
+
+    def _setup_obs_entries(self, repo_root, count: int = 5) -> None:
+        """Write synthetic observability.jsonl entries to the test repo."""
+        import json as _json
+
+        obs_path = repo_root / "wiki" / "observability.jsonl"
+        obs_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for i in range(count):
+            entry = {
+                "ts": f"2026-05-17T10:00:{i:02d}Z",
+                "event": "capture",
+                "agent": "test",
+                "session_id": "sess-001",
+                "memory_id": f"item-{i:03d}",
+                "layer": "session",
+                "tags": [],
+            }
+            lines.append(_json.dumps(entry))
+        obs_path.write_text("\n".join(lines) + "\n")
+
+    # --- Read mode ---
+
+    def test_log_no_args_exits_zero(self, runner, cli_with_repo, repo_root):
+        """mnemos log with no args must exit 0 (read mode)."""
+        self._setup_obs_entries(repo_root)
+        result = runner.invoke(cli_with_repo, ["log"])
+        assert result.exit_code == 0, result.output
+
+    def test_log_no_args_shows_table_header(self, runner, cli_with_repo, repo_root):
+        """Read mode must print the TIMESTAMP/EVENT/AGENT/DETAIL header."""
+        self._setup_obs_entries(repo_root)
+        result = runner.invoke(cli_with_repo, ["log"])
+        assert "TIMESTAMP" in result.output
+        assert "EVENT" in result.output
+
+    def test_log_no_args_shows_entries(self, runner, cli_with_repo, repo_root):
+        """Read mode must display existing audit entries."""
+        self._setup_obs_entries(repo_root, count=3)
+        result = runner.invoke(cli_with_repo, ["log"])
+        assert result.exit_code == 0, result.output
+        assert "3 entries" in result.output
+
+    def test_log_tail_limits_entries(self, runner, cli_with_repo, repo_root):
+        """--tail must limit the number of entries shown in read mode."""
+        self._setup_obs_entries(repo_root, count=10)
+        result = runner.invoke(cli_with_repo, ["log", "--tail", "3"])
+        assert result.exit_code == 0, result.output
+        assert "3 entries" in result.output
+
+    def test_log_json_flag_outputs_jsonl(self, runner, cli_with_repo, repo_root):
+        """--json flag in read mode must output one JSON object per line."""
+        import json as _json
+
+        self._setup_obs_entries(repo_root, count=4)
+        result = runner.invoke(cli_with_repo, ["log", "--json"])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.strip().splitlines() if l.strip()]
+        assert len(lines) == 4
+        # Each line must be valid JSON
+        for line in lines:
+            parsed = _json.loads(line)
+            assert "event" in parsed
+
+    def test_log_no_args_empty_store_prints_message(self, runner, cli_with_repo):
+        """Read mode with no entries must print a friendly empty message."""
+        result = runner.invoke(cli_with_repo, ["log"])
+        assert result.exit_code == 0, result.output
+        assert "no audit log entries found" in result.output
+
+    # --- Write mode ---
+
+    def test_log_write_mode_exits_zero(self, runner, cli_with_repo):
+        """Write mode with all three required flags must exit 0."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["log", "--op", "capture", "--id", "item-abc", "--layer", "session"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "logged:" in result.output
+
+    def test_log_write_mode_confirms_entry(self, runner, cli_with_repo):
+        """Write mode output must echo the op, id, and layer."""
+        result = runner.invoke(
+            cli_with_repo,
+            ["log", "--op", "search", "--id", "item-xyz", "--layer", "project"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "search" in result.output
+        assert "item-xyz" in result.output
+        assert "project" in result.output
+
+    # --- Partial / error cases ---
+
+    def test_log_partial_args_op_only_exits_nonzero(self, runner, cli_with_repo):
+        """Providing only --op (without --id and --layer) must exit non-zero."""
+        result = runner.invoke(cli_with_repo, ["log", "--op", "capture"])
+        assert result.exit_code != 0
+
+    def test_log_partial_args_shows_helpful_error(self, runner, cli_with_repo):
+        """Partial write args must print a message naming the missing flags."""
+        result = runner.invoke(cli_with_repo, ["log", "--op", "capture"])
+        combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
+        assert "--id" in combined or "missing" in combined.lower()
+
+    def test_log_partial_args_op_and_id_only(self, runner, cli_with_repo):
+        """Providing --op and --id but not --layer must exit non-zero."""
+        result = runner.invoke(
+            cli_with_repo, ["log", "--op", "capture", "--id", "item-1"]
+        )
+        assert result.exit_code != 0
