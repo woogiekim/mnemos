@@ -14,6 +14,9 @@ Public API
 - :func:`add` — stage files for commit
 - :func:`commit` — create a commit (idempotent — no-ops on clean tree)
 - :func:`push` — push to a remote branch
+- :func:`fetch` — fetch from a remote
+- :func:`set_upstream` — set the upstream tracking branch
+- :func:`rebase_continue` — continue an in-progress rebase
 - :func:`status` — return ahead/behind/dirty information as a dict
 """
 from __future__ import annotations
@@ -238,6 +241,71 @@ def push(path: str | Path, remote: str, branch: str) -> None:
     rc, _, stderr = _git("push", remote, branch, cwd=path)
     if rc != 0:
         raise GitCommandError(rc, stderr, ["git", "push", remote, branch])
+
+
+def fetch(path: str | Path, remote: str) -> None:
+    """Fetch from *remote*.
+
+    Raises
+    ------
+    GitCommandError
+        On non-zero exit from git fetch.
+    """
+    rc, _, stderr = _git("fetch", remote, cwd=path)
+    if rc != 0:
+        raise GitCommandError(rc, stderr, ["git", "fetch", remote])
+
+
+def set_upstream(path: str | Path, remote: str, branch: str) -> None:
+    """Set the upstream tracking branch to ``remote/branch``.
+
+    Raises
+    ------
+    GitCommandError
+        When the branch does not yet exist on the remote or the operation fails.
+    """
+    rc, _, stderr = _git(
+        "branch", f"--set-upstream-to={remote}/{branch}", cwd=path
+    )
+    if rc != 0:
+        raise GitCommandError(
+            rc, stderr, ["git", "branch", f"--set-upstream-to={remote}/{branch}"]
+        )
+
+
+def rebase_continue(path: str | Path) -> None:
+    """Continue an in-progress interactive or non-interactive rebase.
+
+    Sets ``GIT_EDITOR=true`` (POSIX no-op) so the command does not block
+    waiting for user input when a commit message needs to be confirmed.
+
+    Raises
+    ------
+    GitCommandError
+        When ``git rebase --continue`` exits with a non-zero return code
+        (e.g. there is no rebase in progress, or unresolved conflicts remain).
+    """
+    import os as _os
+    env = dict(_os.environ)
+    env["GIT_EDITOR"] = "true"  # POSIX no-op editor
+
+    if shutil.which("git") is None:
+        raise GitNotFoundError(
+            "git binary not found on PATH — install git before using mnemos sync"
+        )
+    result = subprocess.run(
+        ["git", "rebase", "--continue"],
+        cwd=str(path),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if result.returncode != 0:
+        raise GitCommandError(
+            result.returncode,
+            result.stderr,
+            ["git", "rebase", "--continue"],
+        )
 
 
 def status(path: str | Path) -> dict[str, object]:

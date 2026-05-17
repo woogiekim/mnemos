@@ -452,29 +452,12 @@ class ObsidianBackend:
                 + "\n".join(conflicted)
             )
 
-        # 2. git rebase --continue
+        # 2. git rebase --continue — via core.git to satisfy the DIP rule.
         import core.git as _git
-        # Set GIT_EDITOR to a no-op so rebase --continue does not open an
-        # interactive editor when a commit message needs updating.
-        import subprocess
-        import shutil
-        if shutil.which("git") is None:
-            raise _git.GitNotFoundError("git binary not found")
-        env = dict(os.environ)
-        env["GIT_EDITOR"] = "true"  # POSIX no-op
-        result = subprocess.run(
-            ["git", "rebase", "--continue"],
-            cwd=str(self._vault),
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        if result.returncode != 0:
-            raise _git.GitCommandError(
-                result.returncode,
-                result.stderr,
-                ["git", "rebase", "--continue"],
-            )
+        try:
+            _git.rebase_continue(self._vault)
+        except _git.GitCommandError:
+            raise
 
         # 3. Clean up conflict artefacts
         conflict_index = self._vault / "_sync_conflict.md"

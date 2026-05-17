@@ -1138,35 +1138,24 @@ def sync_init_cmd(remote_url: str, branch_name: str) -> None:
         _git.set_remote(vault_path, remote_name, remote_url)
         click.echo(f"[mnemos sync] remote '{remote_name}' → {remote_url}")
 
-        # 3. Fetch
-        import subprocess, shutil
-        if shutil.which("git") is None:
-            raise _git.GitNotFoundError("git binary not found")
-        result = subprocess.run(
-            ["git", "fetch", remote_name],
-            cwd=vault_path,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            click.echo(f"warning: git fetch failed: {result.stderr.strip()}", err=True)
-        else:
+        # 3. Fetch (best-effort — non-fatal)
+        try:
+            _git.fetch(vault_path, remote_name)
             click.echo(f"[mnemos sync] fetched from {remote_name}")
+        except _git.GitCommandError as fetch_exc:
+            click.echo(
+                f"warning: git fetch failed: {fetch_exc.stderr.strip()}", err=True
+            )
 
-        # 4. Set upstream tracking (best-effort)
-        result2 = subprocess.run(
-            ["git", "branch", f"--set-upstream-to={remote_name}/{branch_name}"],
-            cwd=vault_path,
-            capture_output=True,
-            text=True,
-        )
-        if result2.returncode == 0:
+        # 4. Set upstream tracking (best-effort — non-fatal)
+        try:
+            _git.set_upstream(vault_path, remote_name, branch_name)
             click.echo(f"[mnemos sync] tracking {remote_name}/{branch_name}")
-        else:
+        except _git.GitCommandError:
             # Branch may not exist yet on the remote — not fatal
             click.echo(
                 f"[mnemos sync] note: could not set upstream tracking "
-                f"({result2.stderr.strip()}) — push once to create the branch"
+                f"— push once to create the branch"
             )
 
         click.echo("[mnemos sync] init complete")
