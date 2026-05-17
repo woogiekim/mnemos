@@ -119,8 +119,8 @@ def _run(cmd: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProce
 # ---------------------------------------------------------------------------
 
 def git_pull(repo_root: str) -> None:
-    """Run git pull origin main in repo_root."""
-    _run(["git", "pull", "origin", "main"], cwd=repo_root)
+    """Run git pull --rebase origin main in repo_root."""
+    _run(["git", "pull", "--rebase", "origin", "main"], cwd=repo_root)
 
 
 def pipx_reinstall() -> None:
@@ -411,7 +411,7 @@ def run_update(
 
     # -- 1. git pull ---------------------------------------------------------
     if not skip_git_pull:
-        print("── git pull origin main ──────────────────────────────────────")
+        print("── git pull --rebase origin main ─────────────────────────────")
         try:
             git_pull(repo_root)
         except subprocess.CalledProcessError as exc:
