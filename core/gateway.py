@@ -485,13 +485,39 @@ class MemoryGateway:
         query: str,
         layers: list[str] | None = None,
         limit: int = 20,
+        tags: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Search across memory layers.
 
         After returning results, access_count is incremented for each hit and
         each hit is checked for silent auto-promotion.
+
+        Args:
+            tags: When provided, only items whose stored tag list contains ALL
+                  of the specified tags are returned (AND logic).
         """
-        results = self._search.search(query=query, layers=layers, limit=limit)
+        # Fetch more results than needed when tag filtering so post-filter can
+        # still satisfy the limit.
+        fetch_limit = limit * 5 if tags else limit
+        results = self._search.search(query=query, layers=layers, limit=fetch_limit)
+
+        # Post-filter by tags (AND logic): every specified tag must be present.
+        if tags:
+            filtered = []
+            for result in results:
+                result_item_id = result.get("item_id")
+                if not result_item_id:
+                    continue
+                try:
+                    item = self._store.read(result_item_id)
+                    item_tags = set(item.get("tags") or [])
+                    if all(t in item_tags for t in tags):
+                        filtered.append(result)
+                        if len(filtered) >= limit:
+                            break
+                except Exception:
+                    continue
+            results = filtered
 
         # Side-effect: increment access_count and auto-promote eligible results
         for result in results:
