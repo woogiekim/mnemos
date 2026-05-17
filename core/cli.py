@@ -319,20 +319,37 @@ def memory_list(layers: str | None, limit: int | None, full: bool, width: int) -
 
 
 @cli.command("search")
-@click.argument("query")
+@click.argument("query", required=False, default="")
 @click.option(
     "--layers",
+    "--layer",
+    "layers",
     default=None,
-    help="Comma-separated list of layers to search.",
+    help="Comma-separated list of layers to search (also: --layer).",
 )
 @click.option("--limit", default=20, type=int, help="Maximum results.")
 @click.option("--full", "full", is_flag=True, default=False, help="Show full content without truncation.")
 @click.option("--width", "width", default=80, type=int, help="Preview width in characters (default: 80).")
-def memory_search(query: str, layers: str | None, limit: int, full: bool, width: int) -> None:
-    """Search across memory layers."""
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Filter results to items with this tag (repeatable; AND logic).",
+)
+def memory_search(query: str, layers: str | None, limit: int, full: bool, width: int, tags: tuple) -> None:
+    """Search across memory layers.
+
+    \b
+    Examples:
+      mnemos search "architecture"
+      mnemos search "workflow" --layer session
+      mnemos search --tag testing
+      mnemos search "auth" --tag project --tag architecture
+    """
     gw = _get_gateway()
     layer_list = [l.strip() for l in layers.split(",")] if layers else None
-    results = gw.search(query=query, layers=layer_list, limit=limit)
+    tag_list = list(tags) if tags else None
+    results = gw.search(query=query, layers=layer_list, limit=limit, tags=tag_list)
     if not results:
         click.echo("no results found")
     else:
