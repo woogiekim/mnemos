@@ -423,6 +423,14 @@ def run_update(
             git_pull(repo_root)
         except subprocess.CalledProcessError as exc:
             print(f"warning: git pull failed — {exc}", file=sys.stderr)
+            print(
+                f"\nTo recover manually:\n"
+                f"  cd {repo_root} && git pull --rebase origin main\n"
+                f"\nIf there are local commits conflicting with remote:\n"
+                f"  cd {repo_root} && git rebase --abort\n"
+                f"  cd {repo_root} && git reset --hard origin/main  # discards local commits",
+                file=sys.stderr,
+            )
             exit_code = 1
 
     # -- 1b. sync updated source directories to install location -------------

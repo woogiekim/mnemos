@@ -174,6 +174,7 @@ class IngestAgent:
         run_id: str = "default",
         tags: list[str] | None = None,
         source_type: str = "claude_memory",
+        dry_run: bool = False,
     ) -> dict[str, list[str]]:
         """Ingest scanner results with content-hash deduplication.
 
@@ -194,9 +195,13 @@ class IngestAgent:
                   ``["ingest", source_type]``.
             source_type: Value written to the ``sourceType`` metadata field and
                          used as the second default tag (default: ``"claude_memory"``).
+            dry_run: When ``True``, perform all read-only checks (hash comparison,
+                     existing-item lookup) but skip all writes.  Returns file path
+                     strings instead of item IDs in each bucket.
 
         Returns:
-            A dict with three keys mapping to lists of item IDs:
+            A dict with three keys mapping to lists of item IDs (or file path
+            strings when *dry_run* is ``True``):
             ``"created"``, ``"updated"``, and ``"skipped"``.
         """
         effective_tags = tags if tags is not None else ["ingest", source_type]
@@ -224,43 +229,55 @@ class IngestAgent:
                 item_id: str = existing["id"]
 
                 if existing_hash == new_hash:
-                    logger.debug("Skipped (unchanged): %s [%s]", file_path.name, item_id)
-                    result["skipped"].append(item_id)
+                    if dry_run:
+                        logger.debug("Dry-run skipped (unchanged): %s", file_path.name)
+                        result["skipped"].append(source_file_str)
+                    else:
+                        logger.debug("Skipped (unchanged): %s [%s]", file_path.name, item_id)
+                        result["skipped"].append(item_id)
                     continue
 
                 # Content changed — update in place
-                try:
-                    self._gw.update(item_id=item_id, content=content)
-                    # Persist the refreshed hash via a metadata-only patch
-                    item = self._gw._store.read(item_id)
-                    self._gw._store.update(
-                        item["_path"],
-                        metadata_updates={"content_hash": new_hash},
-                    )
-                    logger.info("Updated (changed): %s → %s", file_path.name, item_id)
-                    result["updated"].append(item_id)
-                except Exception as exc:
-                    logger.error("Failed to update %s: %s", file_path, exc)
+                if dry_run:
+                    logger.debug("Dry-run updated (changed): %s", file_path.name)
+                    result["updated"].append(source_file_str)
+                else:
+                    try:
+                        self._gw.update(item_id=item_id, content=content)
+                        # Persist the refreshed hash via a metadata-only patch
+                        item = self._gw._store.read(item_id)
+                        self._gw._store.update(
+                            item["_path"],
+                            metadata_updates={"content_hash": new_hash},
+                        )
+                        logger.info("Updated (changed): %s → %s", file_path.name, item_id)
+                        result["updated"].append(item_id)
+                    except Exception as exc:
+                        logger.error("Failed to update %s: %s", file_path, exc)
             else:
                 # New file — capture
-                try:
-                    extra_meta: dict[str, Any] = {
-                        "sourceType": source_type,
-                        "source_file": source_file_str,
-                        "source_scope": source_scope,
-                        "content_hash": new_hash,
-                    }
-                    item_id = self._gw.capture(
-                        layer=layer,
-                        content=content,
-                        tags=effective_tags,
-                        run_id=run_id,
-                        extra_metadata=extra_meta,
-                    )
-                    logger.info("Created (new): %s → %s", file_path.name, item_id)
-                    result["created"].append(item_id)
-                except Exception as exc:
-                    logger.error("Failed to capture %s: %s", file_path, exc)
+                if dry_run:
+                    logger.debug("Dry-run created (new): %s", file_path.name)
+                    result["created"].append(source_file_str)
+                else:
+                    try:
+                        extra_meta: dict[str, Any] = {
+                            "sourceType": source_type,
+                            "source_file": source_file_str,
+                            "source_scope": source_scope,
+                            "content_hash": new_hash,
+                        }
+                        item_id = self._gw.capture(
+                            layer=layer,
+                            content=content,
+                            tags=effective_tags,
+                            run_id=run_id,
+                            extra_metadata=extra_meta,
+                        )
+                        logger.info("Created (new): %s → %s", file_path.name, item_id)
+                        result["created"].append(item_id)
+                    except Exception as exc:
+                        logger.error("Failed to capture %s: %s", file_path, exc)
 
         return result
 

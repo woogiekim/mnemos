@@ -871,3 +871,64 @@ class TestBootstrapSyncSource:
 
         # Must not raise
         _bootstrap_sync_source(str(repo))
+
+
+# ---------------------------------------------------------------------------
+# git pull recovery message (Issue #38)
+# ---------------------------------------------------------------------------
+
+class TestGitPullRecoveryMessage:
+    """run_update() must emit human-readable recovery instructions when git pull fails."""
+
+    def test_recovery_message_printed_to_stderr_on_git_pull_failure(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """When git_pull raises CalledProcessError the recovery hint must appear on stderr."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "git pull --rebase origin main" in captured.err
+        assert "git rebase --abort" in captured.err
+        assert "git reset --hard origin/main" in captured.err
+
+    def test_recovery_message_contains_repo_root_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The recovery instructions must include the actual repo_root path."""
+        import subprocess
+        from core import updater as updater_module
+
+        def failing_git_pull(repo_root):
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=["git", "pull", "--rebase", "origin", "main"]
+            )
+
+        monkeypatch.setattr(updater_module, "git_pull", failing_git_pull)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+
+        updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=True,
+            home=tmp_path,
+        )
+
+        captured = capsys.readouterr()
+        assert str(tmp_path) in captured.err

@@ -1160,10 +1160,18 @@ def stats_cmd(days: int) -> None:
     default=False,
     help="Skip syncing ~/.claude/projects/*/memory/*.md files.",
 )
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Preview what would be ingested without writing to the memory store.",
+)
 def memory_ingest_claude_md(
     project_root: str | None,
     run_id: str,
     skip_memory_files: bool,
+    dry_run: bool,
 ) -> None:
     """Discover and ingest CLAUDE.md files and project memory files into memory.
 
@@ -1203,6 +1211,7 @@ def memory_ingest_claude_md(
                 scan_results,
                 run_id=run_id,
                 source_type="claude_md",
+                dry_run=dry_run,
             )
         except PolicyViolationError as exc:
             click.echo(f"error: policy violation — {exc}", err=True)
@@ -1211,19 +1220,33 @@ def memory_ingest_claude_md(
             click.echo(f"error: {exc}", err=True)
             sys.exit(1)
 
-        for item_id in dedup_claude["created"]:
-            click.echo(f"ingested: {item_id}")
-        for item_id in dedup_claude["updated"]:
-            click.echo(f"claude-md updated: {item_id}")
-        for item_id in dedup_claude["skipped"]:
-            click.echo(f"claude-md skipped (unchanged): {item_id}")
-        total_claude = sum(len(v) for v in dedup_claude.values())
-        click.echo(
-            f"claude-md: {len(dedup_claude['created'])} created, "
-            f"{len(dedup_claude['updated'])} updated, "
-            f"{len(dedup_claude['skipped'])} skipped "
-            f"({total_claude} file(s) processed)"
-        )
+        if dry_run:
+            for fp in dedup_claude["created"]:
+                click.echo(f"[dry-run] would ingest: {fp}")
+            for fp in dedup_claude["updated"]:
+                click.echo(f"[dry-run] would update: {fp}")
+            for fp in dedup_claude["skipped"]:
+                click.echo(f"[dry-run] would skip (unchanged): {fp}")
+            total_claude = sum(len(v) for v in dedup_claude.values())
+            click.echo(
+                f"[dry-run] total: {len(dedup_claude['created'])} new, "
+                f"{len(dedup_claude['updated'])} updated, "
+                f"{len(dedup_claude['skipped'])} skipped"
+            )
+        else:
+            for item_id in dedup_claude["created"]:
+                click.echo(f"ingested: {item_id}")
+            for item_id in dedup_claude["updated"]:
+                click.echo(f"claude-md updated: {item_id}")
+            for item_id in dedup_claude["skipped"]:
+                click.echo(f"claude-md skipped (unchanged): {item_id}")
+            total_claude = sum(len(v) for v in dedup_claude.values())
+            click.echo(
+                f"claude-md: {len(dedup_claude['created'])} created, "
+                f"{len(dedup_claude['updated'])} updated, "
+                f"{len(dedup_claude['skipped'])} skipped "
+                f"({total_claude} file(s) processed)"
+            )
 
     # ── ~/.claude/projects/*/memory/*.md sync (with dedup) ──────────────
     if not skip_memory_files:
@@ -1232,7 +1255,9 @@ def memory_ingest_claude_md(
             click.echo("no project memory files found — skipping memory sync")
         else:
             try:
-                dedup = agent.run_scanner_results_dedup(memory_results, run_id=run_id)
+                dedup = agent.run_scanner_results_dedup(
+                    memory_results, run_id=run_id, dry_run=dry_run
+                )
             except PolicyViolationError as exc:
                 click.echo(f"error: policy violation — {exc}", err=True)
                 sys.exit(1)
@@ -1240,19 +1265,33 @@ def memory_ingest_claude_md(
                 click.echo(f"error: {exc}", err=True)
                 sys.exit(1)
 
-            for item_id in dedup["created"]:
-                click.echo(f"memory created: {item_id}")
-            for item_id in dedup["updated"]:
-                click.echo(f"memory updated: {item_id}")
-            for item_id in dedup["skipped"]:
-                click.echo(f"memory skipped (unchanged): {item_id}")
-            total = sum(len(v) for v in dedup.values())
-            click.echo(
-                f"memory-sync: {len(dedup['created'])} created, "
-                f"{len(dedup['updated'])} updated, "
-                f"{len(dedup['skipped'])} skipped "
-                f"({total} file(s) processed)"
-            )
+            if dry_run:
+                for fp in dedup["created"]:
+                    click.echo(f"[dry-run] would ingest: {fp}")
+                for fp in dedup["updated"]:
+                    click.echo(f"[dry-run] would update: {fp}")
+                for fp in dedup["skipped"]:
+                    click.echo(f"[dry-run] would skip (unchanged): {fp}")
+                total = sum(len(v) for v in dedup.values())
+                click.echo(
+                    f"[dry-run] total: {len(dedup['created'])} new, "
+                    f"{len(dedup['updated'])} updated, "
+                    f"{len(dedup['skipped'])} skipped"
+                )
+            else:
+                for item_id in dedup["created"]:
+                    click.echo(f"memory created: {item_id}")
+                for item_id in dedup["updated"]:
+                    click.echo(f"memory updated: {item_id}")
+                for item_id in dedup["skipped"]:
+                    click.echo(f"memory skipped (unchanged): {item_id}")
+                total = sum(len(v) for v in dedup.values())
+                click.echo(
+                    f"memory-sync: {len(dedup['created'])} created, "
+                    f"{len(dedup['updated'])} updated, "
+                    f"{len(dedup['skipped'])} skipped "
+                    f"({total} file(s) processed)"
+                )
 
 
 @cli.group("sync")
