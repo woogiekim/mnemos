@@ -444,6 +444,61 @@ class TestSearchTruncation:
         )
 
 
+class TestIssue29ListSearchEllipsis:
+    """Regression tests for issue #29: list/search must append '...' on truncation.
+
+    The original bug: ``mnemos list`` and ``mnemos search`` truncated content at
+    ~80 chars without any visual indicator, so users could not tell whether an
+    entry ended there or was cut off.  The fix (via ``_truncate_content``) ensures
+    ``...`` is always appended when the content exceeds the display width.
+    """
+
+    # Mirrors the exact reproduction case from issue #29 (195-char string)
+    ROUTING_CONTENT = (
+        "Routing: questions now route through crew:agent (historian for session-state Q, "
+        "analyst for codebase Q); CLAUDE.md carve-out narrowed; see core/rules/agent-routing.md"
+    )
+
+    def test_list_appends_ellipsis_for_195_char_content(self, runner, cli_with_repo):
+        """list must show '...' for the 195-char content from issue #29 reproduction."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.ROUTING_CONTENT, "--id", "issue29-list"],
+        )
+        result = runner.invoke(cli_with_repo, ["list"])
+        assert result.exit_code == 0, result.output
+        lines = [ln for ln in result.output.splitlines() if "issue29-list" in ln]
+        assert len(lines) == 1, f"Expected one result line, got: {result.output}"
+        assert lines[0].endswith("..."), (
+            f"195-char content must be truncated with '...': {lines[0]!r}"
+        )
+
+    def test_search_appends_ellipsis_for_195_char_content(self, runner, cli_with_repo):
+        """search must show '...' for the 195-char content from issue #29 reproduction."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.ROUTING_CONTENT, "--id", "issue29-search"],
+        )
+        result = runner.invoke(cli_with_repo, ["search", "crew:agent"])
+        assert result.exit_code == 0, result.output
+        body = result.output.split("[mnemos]")[0]
+        assert "..." in body, (
+            f"195-char content must show '...' in search output: {result.output!r}"
+        )
+
+    def test_list_full_flag_shows_complete_195_char_content(self, runner, cli_with_repo):
+        """list --full must show the entire 195-char string without truncation."""
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", self.ROUTING_CONTENT, "--id", "issue29-full"],
+        )
+        result = runner.invoke(cli_with_repo, ["list", "--full"])
+        assert result.exit_code == 0, result.output
+        assert self.ROUTING_CONTENT in result.output, (
+            "list --full must show the complete 195-char content"
+        )
+
+
 class TestMemoryPromoteCommand:
     def test_memory_promote_command(self, runner, cli_with_repo, repo_root):
         """promote must move item to next layer."""
