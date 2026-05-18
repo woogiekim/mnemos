@@ -357,6 +357,35 @@ class TestClaudeMdScannerDiscoverMemoryFiles:
         assert len(results) == 1
         assert results[0][0].suffix == ".md"
 
+    def test_skips_memory_md_index_file(self, tmp_path: Path) -> None:
+        """discover_memory_files() excludes MEMORY.md (the auto-generated index) from results.
+
+        MEMORY.md is a link-list index, not a content file.  Including it in
+        the FTS index produces high-noise hits (link titles, section headers)
+        that obscure real memory content.  It must be silently excluded.
+        """
+        import agents.scanner as scanner_mod
+        from agents.scanner import ClaudeMdScanner
+
+        projects_root = tmp_path / ".claude" / "projects"
+        memory_dir = projects_root / "proj" / "memory"
+        memory_dir.mkdir(parents=True)
+        # Real content file — must be discovered
+        (memory_dir / "feedback_ship_threshold.md").write_text("# Feedback\nActual content.\n")
+        # Index file — must be excluded
+        (memory_dir / "MEMORY.md").write_text(
+            "- [Feedback](feedback_ship_threshold.md) — actual content\n"
+        )
+
+        with patch.object(scanner_mod, "_CLAUDE_PROJECTS_ROOT", projects_root):
+            scanner = ClaudeMdScanner()
+            results = scanner.discover_memory_files()
+
+        result_names = [r[0].name for r in results]
+        assert "feedback_ship_threshold.md" in result_names
+        assert "MEMORY.md" not in result_names
+        assert len(results) == 1
+
 
 # ---------------------------------------------------------------------------
 # IngestAgent.run_scanner_results_dedup() unit tests (memory files)

@@ -88,6 +88,94 @@ class TestVectorFallback:
         assert results == []
 
 
+class TestFTSFrontmatterStripping:
+    """Tests for YAML front-matter stripping in the FTS index (issue #26).
+
+    Memory files may be ingested as raw text including a leading ``--- ... ---``
+    front-matter block.  That block must not appear in FTS snippets — it adds
+    noise (metadata key/value lines) that obscures the actual memory content.
+    """
+
+    def test_frontmatter_not_in_indexed_content(self, fts_index):
+        """Content indexed with YAML front-matter should not surface the front-matter in results."""
+        raw = (
+            "---\n"
+            "id: abc-123\n"
+            "layer: global\n"
+            "tags: [architecture]\n"
+            "---\n"
+            "Architecture decision: use hexagonal design."
+        )
+        fts_index.index_item(item_id="fm-item", content=raw, metadata={})
+
+        # Search for the body content — must still match
+        results = fts_index.search("hexagonal")
+        assert any(r["item_id"] == "fm-item" for r in results)
+
+        # The stored content must not contain the front-matter lines
+        hit = next(r for r in results if r["item_id"] == "fm-item")
+        assert "id: abc-123" not in hit["content"]
+        assert "layer: global" not in hit["content"]
+        assert "---" not in hit["content"]
+
+    def test_frontmatter_fields_not_searchable_after_indexing(self, fts_index):
+        """FTS search on a front-matter key should not return the item.
+
+        Once the front-matter is stripped, terms that appear *only* in the
+        front-matter block are no longer in the FTS index for that item.
+        The body content remains searchable.
+        """
+        raw = (
+            "---\n"
+            "unique_fm_key: uniquefmvalue9999\n"
+            "---\n"
+            "Body text that does not mention the frontmatter value."
+        )
+        fts_index.index_item(item_id="fm-noisy", content=raw, metadata={})
+
+        # 'uniquefmvalue9999' is only in the front-matter — should not match
+        results_fm = fts_index.search("uniquefmvalue9999")
+        assert not any(r["item_id"] == "fm-noisy" for r in results_fm)
+
+        # But the body is still findable
+        results_body = fts_index.search("Body")
+        assert any(r["item_id"] == "fm-noisy" for r in results_body)
+
+    def test_content_without_frontmatter_unchanged(self, fts_index):
+        """Plain content (no front-matter) is indexed and searched without modification."""
+        plain = "No front-matter here — just plain text content."
+        fts_index.index_item(item_id="plain-item", content=plain, metadata={})
+
+        results = fts_index.search("plain")
+        assert any(r["item_id"] == "plain-item" for r in results)
+        hit = next(r for r in results if r["item_id"] == "plain-item")
+        assert "No front-matter" in hit["content"]
+
+    def test_strip_frontmatter_helper_removes_block(self):
+        """_strip_frontmatter() removes the leading YAML block and returns body."""
+        from core.fts import _strip_frontmatter
+
+        raw = "---\nkey: value\n---\nBody text here."
+        assert _strip_frontmatter(raw) == "Body text here."
+
+    def test_strip_frontmatter_helper_noop_on_plain_content(self):
+        """_strip_frontmatter() returns the original string when no front-matter present."""
+        from core.fts import _strip_frontmatter
+
+        plain = "Just a plain string."
+        assert _strip_frontmatter(plain) == plain
+
+    def test_strip_frontmatter_helper_multiline_block(self):
+        """_strip_frontmatter() handles multi-field YAML blocks."""
+        from core.fts import _strip_frontmatter
+
+        raw = "---\nid: x\nlayer: session\ntags:\n  - foo\n---\nThe actual content."
+        result = _strip_frontmatter(raw)
+        assert result == "The actual content."
+        assert "---" not in result
+        assert "layer:" not in result
+
+
 class TestFTSCompoundTerms:
     """Tests for compound technical term handling (issue #30).
 

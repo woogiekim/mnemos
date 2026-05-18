@@ -78,9 +78,16 @@ class ClaudeMdScanner:
 
         results: list[ScanResult] = []
         for memory_file in sorted(_CLAUDE_PROJECTS_ROOT.glob("*/memory/*.md")):
-            if memory_file.is_file():
-                results.append((memory_file.resolve(), "global", "claude_memory"))
-                logger.debug("Discovered memory file: %s", memory_file)
+            if not memory_file.is_file():
+                continue
+            # MEMORY.md is an auto-generated index file listing the other
+            # memory entries.  Indexing it produces high-noise FTS hits
+            # (link-list lines, section headers) that obscure real content.
+            if memory_file.name.upper() == "MEMORY.MD":
+                logger.debug("Skipping MEMORY.md index file: %s", memory_file)
+                continue
+            results.append((memory_file.resolve(), "global", "claude_memory"))
+            logger.debug("Discovered memory file: %s", memory_file)
 
         if not results:
             logger.warning(
