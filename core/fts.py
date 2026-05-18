@@ -14,6 +14,31 @@ from core.korean import expand_query
 # "agent" MINUS "crew" rather than a phrase, causing an OperationalError.
 _FTS5_SPECIAL_RE = re.compile(r'[-+*^":()\[\]{}|&!]')
 
+# Matches the leading YAML front-matter block at the start of a string:
+#   ---\n...\n---\n
+# The content after the closing delimiter (and the trailing newline) is
+# what we want to keep; the front-matter itself is noise in FTS snippets.
+_FRONTMATTER_RE = re.compile(r'^---\s*\n.*?\n---\s*\n', re.DOTALL)
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Remove the leading YAML front-matter block from *content*, if present.
+
+    Returns the body text that follows the closing ``---`` delimiter, stripped
+    of leading/trailing whitespace.  When no front-matter block is detected the
+    original string is returned unchanged.
+
+    Examples
+    --------
+    >>> _strip_frontmatter("---\\nkey: val\\n---\\nBody text here.")
+    'Body text here.'
+    >>> _strip_frontmatter("No frontmatter here.")
+    'No frontmatter here.'
+    """
+    stripped = _FRONTMATTER_RE.sub("", content, count=1)
+    return stripped.strip() if stripped != content else content
+
+
 # Characters used as separators in compound technical terms that should be
 # normalised to spaces so FTS5 can match the component tokens.  Colons and
 # hyphens are the two most common: ``crew:run`` and ``agent-crew``.
@@ -98,7 +123,13 @@ class FTSIndex:
         content: str,
         metadata: dict[str, Any],
     ) -> None:
-        """Insert or update an item in the FTS5 index."""
+        """Insert or update an item in the FTS5 index.
+
+        YAML front-matter (the leading ``--- ... ---`` block) is stripped from
+        *content* before it is stored so that FTS snippets never surface raw
+        metadata key/value lines as search results.
+        """
+        indexed_content = _strip_frontmatter(content)
         meta_str = json.dumps(metadata)
         with self._connect() as conn:
             # Delete existing entries for this item_id
@@ -106,7 +137,7 @@ class FTSIndex:
             # Insert new entry
             conn.execute(
                 "INSERT INTO items_fts (item_id, content, metadata) VALUES (?, ?, ?)",
-                (item_id, content, meta_str),
+                (item_id, indexed_content, meta_str),
             )
             conn.commit()
 
