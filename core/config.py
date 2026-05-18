@@ -14,7 +14,7 @@ Example ``mnemos.yml``::
       backend: obsidian
       vault_path: ~/Documents/ObsidianVault
       sync:
-        enabled: false          # opt-in master switch — safe default
+        enabled: false          # opt-out override — omitting this key auto-enables sync
         remote: origin
         branch: main
         mode: auto              # auto | manual
@@ -23,9 +23,14 @@ Example ``mnemos.yml``::
         commit_message_template: "mnemos: {layer} {id} ({timestamp})"
         pull_rate_limit_seconds: 30
 
-Multi-host sync is available for the Obsidian backend when
-``storage.sync.enabled: true``.  The default backend (MemoryStore) never
-grows sync wiring — see :class:`SyncConfig` for the full field catalogue.
+Auto-sync: when ``storage.backend: obsidian`` and ``vault_path`` is set,
+sync is **enabled automatically** without requiring ``sync.enabled: true``.
+To opt out, set ``sync.enabled: false`` explicitly.  The default backend
+(MemoryStore) never grows sync wiring — see :class:`SyncConfig` for the
+full field catalogue.
+
+When no git remote is configured in the vault, git push/pull operations are
+skipped silently so the backend works in local-only mode.
 """
 from __future__ import annotations
 
@@ -54,10 +59,20 @@ class SyncConfig:
 
     All fields have safe defaults so callers can always read them without
     checking whether the ``sync:`` block was present in the YAML file.
+
+    .. note::
+
+        The :attr:`enabled` field is ``False`` by default here.  The
+        :func:`get_backend_config` function overrides it to ``True``
+        automatically when ``backend == "obsidian"`` and a ``vault_path``
+        is configured — unless the user explicitly set ``sync.enabled:
+        false`` in ``mnemos.yml``.
     """
 
     #: Master switch.  When ``False`` (the default) no sync hooks run and
-    #: the ObsidianBackend behaves exactly as before #24.
+    #: the ObsidianBackend behaves exactly as before #24.  Callers should
+    #: not set this field directly — use :func:`get_backend_config` which
+    #: applies the auto-enable rule for the Obsidian backend.
     enabled: bool = False
 
     #: Remote name for pull/push (default: ``"origin"``).
@@ -185,6 +200,24 @@ def get_backend_config(repo_root: str | None = None) -> BackendConfig:
             vault_path = str(Path(str(raw_vp)).expanduser().resolve())
 
     # Resolve sync config (only meaningful for obsidian; always populated)
-    sync = _parse_sync_config(storage_cfg.get("sync"))
+    sync_raw = storage_cfg.get("sync")
+    sync = _parse_sync_config(sync_raw)
+
+    # ── Auto-enable sync for Obsidian when vault_path is set ──────────────
+    # When backend == "obsidian" and vault_path is configured, sync is
+    # activated automatically — the user does not need to write
+    # ``sync.enabled: true``.  The only way to opt out is to explicitly
+    # set ``sync.enabled: false`` in the YAML.
+    #
+    # Logic: if the sync sub-block is absent OR the ``enabled`` key is not
+    # present in it, treat the absence as "auto" (activate).  Only a
+    # literal ``enabled: false`` suppresses auto-activation.
+    if backend_name == "obsidian" and vault_path:
+        sync_raw_dict = sync_raw if isinstance(sync_raw, dict) else {}
+        if "enabled" not in sync_raw_dict:
+            # No explicit opinion from the user — auto-enable
+            sync.enabled = True
+        # If "enabled" IS in sync_raw_dict, _parse_sync_config() already
+        # applied the user's explicit value (True or False) — do not override.
 
     return BackendConfig(backend=backend_name, vault_path=vault_path, sync=sync)

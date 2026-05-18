@@ -135,6 +135,7 @@ class MemoryGateway:
             self._store: StorageBackend = ObsidianBackend(
                 vault_path=vault_path,
                 fts=self._fts,
+                sync_config=backend_cfg.sync,
             )
         else:
             # Default: existing MemoryStore — behaviour is unchanged
