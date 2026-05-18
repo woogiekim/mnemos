@@ -125,6 +125,20 @@ def remote_exists(path: str | Path, name: str) -> bool:
     return rc == 0
 
 
+def remote_has_branch(path: str | Path, remote: str, branch: str) -> bool:
+    """Return ``True`` if *remote* has the given *branch*.
+
+    Uses ``git ls-remote --exit-code`` which exits 0 when the ref is found and
+    2 when no matching refs exist.  Any network error or non-zero exit (other
+    than 2) returns ``False`` so callers treat an unreachable remote as
+    local-only mode rather than raising.
+    """
+    rc, _, _ = _git(
+        "ls-remote", "--exit-code", remote, f"refs/heads/{branch}", cwd=path
+    )
+    return rc == 0
+
+
 def current_branch(path: str | Path) -> str:
     """Return the current branch name.
 

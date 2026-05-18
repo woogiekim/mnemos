@@ -244,11 +244,22 @@ class ObsidianBackend:
 
         A pull is skipped when:
         - ``pull_rate_limit_seconds`` has NOT yet elapsed since the last pull, OR
-        - the configured remote does not exist in the vault repo (local-only mode).
+        - the configured remote does not exist in the vault repo (local-only mode), OR
+        - the remote branch does not yet exist (empty / uninitialized remote repo).
         """
         if not self._sync.enabled or not self._sync.auto_pull_on_capture:
             return False
         if not self._has_remote():
+            return False
+        # Skip pull when the remote branch doesn't exist yet (e.g. empty GitHub
+        # repo before the first push).  Treat the same as local-only mode.
+        try:
+            import core.git as _git
+            if not _git.remote_has_branch(
+                self._vault, self._sync.remote, self._sync.branch
+            ):
+                return False
+        except Exception:
             return False
         elapsed = time.monotonic() - self._last_pull_ts
         # _last_pull_ts is 0.0 on the first-ever call, so elapsed will be huge
@@ -375,8 +386,10 @@ class ObsidianBackend:
         """Hook 3 — push after a successful commit.
 
         Only runs when ``committed`` is ``True`` AND ``auto_push_after_commit``
-        is set AND a remote is configured.  When no remote is configured
-        (local-only mode), the push is skipped silently.
+        is set AND a remote is configured with the target branch already
+        existing on the remote.  When no remote is configured or the remote
+        branch does not yet exist (uninitialized repo), the push is skipped
+        silently.
         """
         if not self._sync.enabled:
             return
@@ -388,6 +401,9 @@ class ObsidianBackend:
             # Local-only mode — no remote configured, skip push silently
             return
         import core.git as _git
+        # Skip push when the remote branch hasn't been created yet (empty repo)
+        if not _git.remote_has_branch(self._vault, self._sync.remote, self._sync.branch):
+            return
         _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
         self._last_push_ts = time.monotonic()
 
@@ -398,8 +414,9 @@ class ObsidianBackend:
     def sync_pull(self) -> None:
         """Manual pull — works regardless of ``mode`` or rate limit.
 
-        When no remote is configured (local-only mode), this method returns
-        silently without raising an error.
+        When no remote is configured, or the remote branch does not yet exist
+        (uninitialized remote repo), this method returns silently without
+        raising an error.
 
         Raises :exc:`SyncConflictError` when the pull detects a conflict.
         """
@@ -407,6 +424,9 @@ class ObsidianBackend:
             # Local-only mode — no remote to pull from
             return
         import core.git as _git
+        if not _git.remote_has_branch(self._vault, self._sync.remote, self._sync.branch):
+            # Remote exists but the branch hasn't been pushed yet — skip silently
+            return
         try:
             _git.pull_rebase(
                 self._vault,
