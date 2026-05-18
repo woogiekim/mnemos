@@ -947,6 +947,130 @@ class ObsidianBackend:
     # Health page (_health.md)                                             #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # UUID-to-slug migration                                               #
+    # ------------------------------------------------------------------ #
+
+    def rename_uuid_to_slug(
+        self,
+        dry_run: bool = False,
+        commit: bool = False,
+    ) -> dict[str, object]:
+        """Rename all UUID-named vault files to slug-based names.
+
+        Returns stats: {renamed: int, skipped: int, dry_run: bool, renames: list[dict]}
+        Each rename dict: {layer, old_name, new_name, item_id, reason}
+        reason is "renamed", "skipped" (already slug), or "collision_resolved".
+        """
+        UUID_RE = re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+            re.IGNORECASE,
+        )
+
+        renames: list[dict[str, object]] = []
+        renamed = 0
+        skipped = 0
+        changed_paths: list[Path] = []
+
+        for layer in OBSIDIAN_LAYERS:
+            layer_dir = self._vault / layer
+            if not layer_dir.exists():
+                continue
+            for md_file in sorted(layer_dir.glob("*.md")):
+                stem = md_file.stem
+                # Check if the filename stem is a UUID
+                if not UUID_RE.fullmatch(stem):
+                    skipped += 1
+                    renames.append({
+                        "layer": layer,
+                        "old_name": md_file.name,
+                        "new_name": md_file.name,
+                        "item_id": stem,
+                        "reason": "skipped",
+                    })
+                    continue
+
+                # Parse frontmatter to get id and content
+                try:
+                    post = frontmatter.load(str(md_file))
+                except Exception:
+                    skipped += 1
+                    renames.append({
+                        "layer": layer,
+                        "old_name": md_file.name,
+                        "new_name": md_file.name,
+                        "item_id": stem,
+                        "reason": "skipped",
+                    })
+                    continue
+
+                item_id = post.metadata.get("id", stem)
+                content = post.content
+
+                # Build slug-based destination path (handles collision)
+                new_path = self._build_file_path(layer_dir, item_id, content)
+                new_name = new_path.name
+
+                if new_path == md_file:
+                    # Already at the right slug path (shouldn't happen for UUID files, but be safe)
+                    skipped += 1
+                    renames.append({
+                        "layer": layer,
+                        "old_name": md_file.name,
+                        "new_name": new_name,
+                        "item_id": item_id,
+                        "reason": "skipped",
+                    })
+                    continue
+
+                # Determine reason label
+                slug = _content_slug(content)
+                base_candidate = layer_dir / f"{slug}.md"
+                reason = "renamed"
+                if new_path != base_candidate:
+                    reason = "collision_resolved"
+
+                if not dry_run:
+                    os.rename(str(md_file), str(new_path))
+                    # Update mtime cache
+                    self._mtime_cache.pop(str(md_file), None)
+                    try:
+                        self._mtime_cache[str(new_path)] = new_path.stat().st_mtime
+                    except OSError:
+                        pass
+                    changed_paths.extend([md_file, new_path])
+
+                renamed += 1
+                renames.append({
+                    "layer": layer,
+                    "old_name": md_file.name,
+                    "new_name": new_name,
+                    "item_id": item_id,
+                    "reason": reason,
+                })
+
+        # Optionally commit
+        if commit and not dry_run and changed_paths:
+            if self._sync.enabled:
+                import core.git as _git
+                _git.add(self._vault, [str(p) for p in changed_paths])
+                _git.commit(self._vault, "mnemos: rename UUID files to slug names")
+            else:
+                # Try committing even if sync is not enabled (standalone commit mode)
+                try:
+                    import core.git as _git
+                    _git.add(self._vault, [str(p) for p in changed_paths])
+                    _git.commit(self._vault, "mnemos: rename UUID files to slug names")
+                except Exception:
+                    pass
+
+        return {
+            "renamed": renamed,
+            "skipped": skipped,
+            "dry_run": dry_run,
+            "renames": renames,
+        }
+
     def generate_health_page(self) -> Path:
         """Generate (or regenerate) ``_health.md`` at the vault root.
 
