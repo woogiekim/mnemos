@@ -129,6 +129,31 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(_nfkc_normalise(content).encode("utf-8")).hexdigest()
 
 
+def _content_slug(content: str, max_words: int = 6, max_chars: int = 60) -> str:
+    """Derive a human-readable slug from the first line of *content*.
+
+    Keeps Unicode letters and digits (including Korean, CJK, etc.);
+    replaces everything else with hyphens.  Falls back to ``"untitled"``
+    when the content yields no usable words.
+    """
+    first_line = content.strip().split("\n")[0][:200]
+    cleaned = ""
+    for ch in first_line:
+        cat = unicodedata.category(ch)
+        if cat.startswith(("L", "N")):  # Letters (any script) and Numbers
+            cleaned += ch
+        else:
+            cleaned += " "
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    words = cleaned.split()[:max_words]
+    if not words:
+        return "untitled"
+    slug = "-".join(words)
+    if len(slug) > max_chars:
+        slug = slug[:max_chars].rstrip("-")
+    return slug or "untitled"
+
+
 # ---------------------------------------------------------------------------
 # ObsidianBackend
 # ---------------------------------------------------------------------------
@@ -530,17 +555,71 @@ class ObsidianBackend:
         return d
 
     def _find_path(self, item_id: str) -> Path:
-        """Search all layer folders for a file named ``<item_id>.md``.
+        """Search all layer folders for an item with the given *item_id*.
 
-        Raises :exc:`FileNotFoundError` if the item is not in any layer.
+        First tries the legacy ``<item_id>.md`` filename for backward
+        compatibility with pre-slug vaults.  If not found, scans all
+        ``.md`` files in all layers and checks the ``id`` front-matter
+        field (used by slug-named files written after this change).
+
+        Raises :exc:`FileNotFoundError` if the item is not found anywhere.
         """
+        # Fast path: legacy UUID-named file (backward compat)
         for layer in OBSIDIAN_LAYERS:
             candidate = self._vault / layer / f"{item_id}.md"
             if candidate.exists():
                 return candidate
+        # Slow path: scan frontmatter for matching id (slug-named files)
+        for layer in OBSIDIAN_LAYERS:
+            layer_dir = self._vault / layer
+            if not layer_dir.exists():
+                continue
+            for md_file in sorted(layer_dir.glob("*.md")):
+                try:
+                    post = frontmatter.load(str(md_file))
+                    if post.metadata.get("id") == item_id:
+                        return md_file
+                except Exception:
+                    continue
         raise FileNotFoundError(
             f"Memory item not found in Obsidian vault: {item_id!r}"
         )
+
+    def _build_file_path(self, layer_dir: Path, item_id: str, content: str) -> Path:
+        """Return the slug-based file path for *item_id*/*content*.
+
+        If ``<slug>.md`` is absent, that path is returned immediately.
+        If it exists and belongs to *item_id*, it is returned (idempotent
+        rewrite).  If it belongs to a different item, numbered variants are
+        tried: ``<slug>-2.md``, ``<slug>-3.md``, …
+        """
+        slug = _content_slug(content)
+        candidate = layer_dir / f"{slug}.md"
+
+        if not candidate.exists():
+            return candidate
+
+        # Check if the existing file belongs to this item_id
+        try:
+            existing = frontmatter.load(str(candidate))
+            if existing.metadata.get("id") == item_id:
+                return candidate  # idempotent rewrite
+        except Exception:
+            pass
+
+        # Collision with a different item — try numbered suffixes
+        counter = 2
+        while True:
+            candidate = layer_dir / f"{slug}-{counter}.md"
+            if not candidate.exists():
+                return candidate
+            try:
+                existing = frontmatter.load(str(candidate))
+                if existing.metadata.get("id") == item_id:
+                    return candidate
+            except Exception:
+                pass
+            counter += 1
 
     def _resolve_path(self, item_id_or_path: str) -> Path:
         """Resolve *item_id_or_path* to a :class:`~pathlib.Path`.
@@ -614,7 +693,7 @@ class ObsidianBackend:
         self._hook_before_write()
 
         layer_dir = self._layer_dir(layer)
-        file_path = layer_dir / f"{item_id}.md"
+        file_path = self._build_file_path(layer_dir, item_id, content)
 
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         meta = dict(metadata)
@@ -739,7 +818,8 @@ class ObsidianBackend:
         item_id = item.get("id", src_path.stem)
 
         target_dir = self._layer_dir(target_layer)
-        dst_path = target_dir / f"{item_id}.md"
+        # Preserve the slug-based filename when moving between layers
+        dst_path = target_dir / src_path.name
 
         # Update layer in metadata
         item["layer"] = target_layer

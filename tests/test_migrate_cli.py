@@ -105,6 +105,20 @@ def runner():
 
 
 class TestForwardMigration:
+    def _find_vault_item(self, vault_dir: Path, item_id: str) -> "Path | None":
+        """Scan vault layers and return the path of the file with matching id frontmatter."""
+        for layer_dir in vault_dir.iterdir():
+            if not layer_dir.is_dir():
+                continue
+            for md_file in layer_dir.glob("*.md"):
+                try:
+                    post = frontmatter.load(str(md_file))
+                    if post.metadata.get("id") == item_id:
+                        return md_file
+                except Exception:
+                    pass
+        return None
+
     def test_migrate_default_to_obsidian_creates_vault_files(
         self, default_repo, vault_dir, runner
     ):
@@ -117,8 +131,9 @@ class TestForwardMigration:
             env={"MNEMOS_REPO_ROOT": str(default_repo)},
         )
         assert result.exit_code == 0, f"CLI exited with {result.exit_code}: {result.output}"
-        assert (vault_dir / "project" / "migrate-proj-001.md").exists()
-        assert (vault_dir / "global" / "migrate-glo-001.md").exists()
+        # Files use slug-based names; find them by frontmatter id
+        assert self._find_vault_item(vault_dir, "migrate-proj-001") is not None
+        assert self._find_vault_item(vault_dir, "migrate-glo-001") is not None
 
     def test_migrate_preserves_content(self, default_repo, vault_dir, runner):
         """Migrated items preserve their original content."""
@@ -129,7 +144,9 @@ class TestForwardMigration:
              "--vault-path", str(vault_dir)],
             env={"MNEMOS_REPO_ROOT": str(default_repo)},
         )
-        post = frontmatter.load(str(vault_dir / "project" / "migrate-proj-001.md"))
+        path = self._find_vault_item(vault_dir, "migrate-proj-001")
+        assert path is not None
+        post = frontmatter.load(str(path))
         assert post.content == "project memory one"
         assert post.metadata["id"] == "migrate-proj-001"
 
@@ -142,7 +159,9 @@ class TestForwardMigration:
              "--vault-path", str(vault_dir)],
             env={"MNEMOS_REPO_ROOT": str(default_repo)},
         )
-        post = frontmatter.load(str(vault_dir / "project" / "migrate-proj-001.md"))
+        path = self._find_vault_item(vault_dir, "migrate-proj-001")
+        assert path is not None
+        post = frontmatter.load(str(path))
         assert post.metadata["quality_score"] == 0.8
         assert post.metadata["tags"] == ["test"]
 
@@ -245,9 +264,12 @@ class TestDryRun:
             env={"MNEMOS_REPO_ROOT": str(default_repo)},
         )
         assert result.exit_code == 0
-        # No files should have been created
-        assert not (vault_dir / "project" / "migrate-proj-001.md").exists()
-        assert not (vault_dir / "global" / "migrate-glo-001.md").exists()
+        # No .md files should have been created in any layer directory
+        for layer_dir in vault_dir.iterdir():
+            if layer_dir.is_dir():
+                assert list(layer_dir.glob("*.md")) == [], (
+                    f"Dry-run must not create files in {layer_dir}"
+                )
 
     def test_dry_run_output_describes_plan(self, default_repo, vault_dir, runner):
         """--dry-run output mentions the items that would be migrated."""
@@ -268,6 +290,19 @@ class TestDryRun:
 
 
 class TestIdempotency:
+    def _find_vault_file(self, vault_dir: Path, item_id: str) -> "Path | None":
+        for layer_dir in vault_dir.iterdir():
+            if not layer_dir.is_dir():
+                continue
+            for md_file in layer_dir.glob("*.md"):
+                try:
+                    post = frontmatter.load(str(md_file))
+                    if post.metadata.get("id") == item_id:
+                        return md_file
+                except Exception:
+                    pass
+        return None
+
     def test_re_run_skips_already_migrated_items(self, default_repo, vault_dir, runner):
         """Re-running migrate skips items whose (id, content_hash) already match."""
         from core.cli import cli
@@ -277,8 +312,9 @@ class TestIdempotency:
 
         # First run
         runner.invoke(cli, args, env=env)
-        # Record mtime of a migrated file
-        proj_file = vault_dir / "project" / "migrate-proj-001.md"
+        # Find the actual slug-based path for the migrated item
+        proj_file = self._find_vault_file(vault_dir, "migrate-proj-001")
+        assert proj_file is not None, "First migration should have created a vault file"
         mtime_after_first = proj_file.stat().st_mtime
 
         import time
