@@ -151,6 +151,11 @@ class MemoryGateway:
         # On-write dedup registry: maps (layer, content_hash) → item_id.
         # Keyed by layer so cross-layer promotion is never blocked.
         self._capture_dedup: dict[tuple[str, str], str] = {}
+        # Set to True when capture() detects a cross-process duplicate via
+        # persistent storage scan. Reset to False at the start of each capture()
+        # call. The CLI reads this flag to emit "(existing) <uuid>" instead of
+        # the normal "captured: <uuid>" line.
+        self.last_capture_was_duplicate: bool = False
 
     # ------------------------------------------------------------------ #
     # Observability logger access                                           #
@@ -207,6 +212,53 @@ class MemoryGateway:
         except Exception:
             # Swallow all errors: auto-promotion is best-effort
             pass
+
+    # ------------------------------------------------------------------ #
+    # Cross-process dedup helper                                            #
+    # ------------------------------------------------------------------ #
+
+    def _find_existing_by_hash(
+        self, content_hash: str
+    ) -> tuple[str, str] | None:
+        """Scan ALL layers for a memory item whose ``content_hash`` metadata
+        field matches *content_hash*.
+
+        Returns ``(item_id, layer)`` of the first matching item found, or
+        ``None`` when no match exists.
+
+        This is the cross-process deduplication guard introduced to fix
+        issues #49 and #50.  The in-memory ``_capture_dedup`` registry only
+        covers the current process lifetime; this method performs a
+        filesystem scan so that a second invocation of ``mnemos capture``
+        in a fresh process finds the item written by the first invocation.
+
+        Scanning order: static layers (project, global, entities, claims,
+        topics) first, then dynamic layers (session, ephemeral, working,
+        transient).  The scan short-circuits on the first match to keep
+        latency bounded for typical small stores.
+        """
+        from core.layers import LAYER_STATIC_PATHS
+
+        static_layers = list(LAYER_STATIC_PATHS.keys())
+        dynamic_layers = ["session", "ephemeral", "working", "transient"]
+        all_layers = static_layers + dynamic_layers
+
+        for layer in all_layers:
+            try:
+                for item in self._store.iter_layer_items(layer):
+                    stored_hash = item.get("content_hash")
+                    if stored_hash and stored_hash == content_hash:
+                        raw_path = item.get("_path", "")
+                        item_id = str(
+                            item.get("id") or (Path(raw_path).stem if raw_path else "")
+                        )
+                        if item_id:
+                            return (item_id, layer)
+            except Exception:
+                # iter_layer_items is best-effort — skip layers that error
+                continue
+
+        return None
 
     # ------------------------------------------------------------------ #
     # Capture                                                               #
@@ -345,8 +397,8 @@ class MemoryGateway:
         that ephemeral items always land in a deterministic path for the
         duration of the process.
 
-        On-write dedup
-        --------------
+        On-write dedup (in-process)
+        ---------------------------
         Before writing, the content is NFKC-normalised and hashed.  The
         dedup key is ``(layer, SHA-256(nfkc_normalise(content)))``.  If an
         item with the same key was already captured by **this gateway
@@ -359,13 +411,27 @@ class MemoryGateway:
         response turn and re-submitting identical content — without adding
         significant latency to normal captures.
 
-        **Cross-layer promotion is not blocked.**  The dedup key is
+        Cross-process dedup (persistent storage scan — Issues #49/#50)
+        ---------------------------------------------------------------
+        After the in-process check, the content hash is looked up across ALL
+        layers in the persistent store.  If found, the existing item_id is
+        returned and ``self.last_capture_was_duplicate`` is set to ``True``
+        so that the CLI can print ``(existing) <uuid>`` instead of the normal
+        capture notice.  The in-memory registry is also updated with the
+        existing id so subsequent in-process calls are blocked without
+        another store scan.
+
+        **Cross-layer promotion is not blocked.**  The in-process dedup key is
         layer-scoped, so capturing the same content into ``session`` after
-        it has already been promoted to ``global`` is allowed and returns a
-        new item_id.  This matches the invariant stated in the requirements:
-        ``dedup key is (layer, hash) — promotion across layers is NOT blocked
-        by dedup``.
+        it has already been promoted to ``global`` is allowed.  However, the
+        cross-process scan checks ALL layers, which means the same content
+        already stored in ANY layer will be detected as a duplicate across
+        different processes — this matches the requirement:
+        ``dedup_scope: Cross-layer``.
         """
+        # Reset the duplicate flag for this call
+        self.last_capture_was_duplicate = False
+
         if layer is None:
             layer = _DEFAULT_LAYER
 
@@ -376,7 +442,7 @@ class MemoryGateway:
             session_id = self._session_id
 
         # ------------------------------------------------------------------
-        # On-write dedup check (Issue #4 anti-regression)
+        # On-write dedup check (Issue #4 anti-regression — in-process path)
         # ------------------------------------------------------------------
         # This gate makes Stop hook re-introduction safe: a Stop event that
         # fires per AI response turn will parse the same capture markers from
@@ -389,6 +455,32 @@ class MemoryGateway:
         dedup_key = (layer, content_hash)
         if dedup_key in self._capture_dedup:
             return None
+
+        # ------------------------------------------------------------------
+        # Cross-process dedup check (Issues #49/#50 — persistent storage scan)
+        # ------------------------------------------------------------------
+        # A second invocation of `mnemos capture` in a new process starts with
+        # an empty _capture_dedup registry.  Scan the persistent store across
+        # all layers to detect items written by previous processes.  Short-
+        # circuits on first match so typical small stores see minimal overhead.
+        #
+        # Guard: only fire the persistent scan when no entry for this content
+        # hash exists in the in-process registry under ANY layer.  This preserves
+        # the existing cross-layer same-process behaviour (e.g. capturing the
+        # same content to 'session' and then to 'global' in a single process is
+        # still allowed and produces a new item_id — promotion use-case).
+        hash_already_in_process = any(
+            h == content_hash for (_, h) in self._capture_dedup
+        )
+        if not hash_already_in_process:
+            existing = self._find_existing_by_hash(content_hash)
+            if existing is not None:
+                existing_id, _existing_layer = existing
+                # Warm the in-process cache so subsequent same-process calls are
+                # fast (no second scan) and return None per the in-process contract.
+                self._capture_dedup[dedup_key] = existing_id
+                self.last_capture_was_duplicate = True
+                return existing_id
 
         self._policy.validate_capture(layer=layer, item={"content": content})
 
@@ -409,6 +501,10 @@ class MemoryGateway:
             "tags": tags or [],
             "run_id": run_id,
             "session_id": session_id,
+            # Store the content hash in metadata so _find_existing_by_hash()
+            # can locate this item in future cross-process scans without
+            # re-hashing every item's content.
+            "content_hash": content_hash,
         }
         if extra_metadata:
             metadata.update(extra_metadata)
