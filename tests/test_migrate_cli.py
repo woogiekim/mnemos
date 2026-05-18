@@ -558,3 +558,37 @@ class TestUuidToSlugMigration:
         # Output should mention skipped
         output2 = result2.output.lower()
         assert "skip" in output2 or "0 renamed" in output2 or "already" in output2
+
+
+class TestContentSlugNestedFrontmatter:
+    """_content_slug handles bodies that start with nested frontmatter (e.g. ingested claude_memory files)."""
+
+    def test_name_field_used_as_slug(self) -> None:
+        from core.obsidian import _content_slug
+
+        body = "---\nname: Devops stage not executing at end of pipeline\ntype: feedback\n---\nsome body text"
+        assert _content_slug(body) == "devops-stage-not-executing-at-end"
+
+    def test_korean_name_field(self) -> None:
+        from core.obsidian import _content_slug
+
+        body = "---\nname: mnemos 마커 문법 개정 결정\ntype: project\n---\n"
+        assert _content_slug(body) == "mnemos-마커-문법-개정-결정"
+
+    def test_nested_block_without_name_falls_back_to_body(self) -> None:
+        from core.obsidian import _content_slug
+
+        body = "---\ndescription: Something\n---\nActual body content here"
+        assert _content_slug(body) == "actual-body-content-here"
+
+    def test_nested_block_all_empty_returns_untitled(self) -> None:
+        from core.obsidian import _content_slug
+
+        body = "---\ndescription: Something\n---\n"
+        assert _content_slug(body) == "untitled"
+
+    def test_normal_content_unchanged(self) -> None:
+        from core.obsidian import _content_slug
+
+        body = "This is the first line of content"
+        assert _content_slug(body) == "this-is-the-first-line-of"

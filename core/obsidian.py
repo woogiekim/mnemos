@@ -135,8 +135,35 @@ def _content_slug(content: str, max_words: int = 6, max_chars: int = 60) -> str:
     Keeps Unicode letters and digits (including Korean, CJK, etc.);
     replaces everything else with hyphens.  Falls back to ``"untitled"``
     when the content yields no usable words.
+
+    When the content body itself begins with ``---`` (nested frontmatter,
+    e.g. ingested claude_memory files), extracts the ``name:`` field from
+    that inner block instead of trying to use the delimiter as a slug.
     """
-    first_line = content.strip().split("\n")[0][:200]
+    stripped = content.strip()
+    # Detect nested frontmatter: body starts with "---"
+    if stripped.startswith("---"):
+        lines = stripped.splitlines()
+        # Find the closing "---"
+        end = None
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == "---":
+                end = i
+                break
+        if end is not None:
+            inner_block = "\n".join(lines[1:end])
+            # Look for a "name:" key in the inner frontmatter
+            for line in inner_block.splitlines():
+                m = re.match(r"^name\s*:\s*(.+)", line, re.IGNORECASE)
+                if m:
+                    stripped = m.group(1).strip()
+                    break
+            else:
+                # No name: found — fall through to use content after inner block
+                rest = "\n".join(lines[end + 1:]).strip()
+                if rest:
+                    stripped = rest
+    first_line = stripped.split("\n")[0][:200]
     cleaned = ""
     for ch in first_line:
         cat = unicodedata.category(ch)
