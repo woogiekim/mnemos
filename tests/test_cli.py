@@ -1284,3 +1284,98 @@ class TestLogDualMode:
             cli_with_repo, ["log", "--op", "capture", "--id", "item-1"]
         )
         assert result.exit_code != 0
+
+
+class TestMemoryCaptureDeduplicationCLI:
+    """CLI output contract for cross-process deduplication (Issues #49 and #50).
+
+    When ``mnemos capture`` is invoked with content that already exists in
+    persistent storage (written by a previous invocation), the CLI must print
+    ``(existing) <uuid>`` and exit 0.
+    """
+
+    def test_cross_process_duplicate_prints_existing_marker(
+        self, runner, repo_root, monkeypatch
+    ):
+        """Second capture of identical content prints '(existing) <uuid>'."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+        from core.cli import cli
+
+        content = "Cross-process dedup CLI test content"
+
+        # First invocation — fresh write
+        result1 = runner.invoke(
+            cli,
+            ["capture", "--layer", "global", "--content", content],
+        )
+        assert result1.exit_code == 0, result1.output
+        assert "captured:" in result1.output
+
+        # Extract the UUID from the first output line "captured: <uuid>"
+        first_line = result1.output.strip().splitlines()[0]
+        assert first_line.startswith("captured:"), (
+            f"Expected 'captured: <uuid>' line, got: {first_line!r}"
+        )
+        item_id = first_line.split(":", 1)[1].strip()
+
+        # Second invocation — cross-process duplicate (new CLI call = new gateway)
+        result2 = runner.invoke(
+            cli,
+            ["capture", "--layer", "global", "--content", content],
+        )
+        assert result2.exit_code == 0, result2.output
+        assert f"(existing) {item_id}" in result2.output, (
+            f"Expected '(existing) {item_id}' in output, got: {result2.output!r}"
+        )
+
+    def test_cross_process_duplicate_does_not_write_new_file(
+        self, runner, repo_root, monkeypatch
+    ):
+        """Second capture of identical content must NOT create a new .md file."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+        from core.cli import cli
+
+        content = "Dedup no-write test: architecture constraint noted"
+
+        runner.invoke(cli, ["capture", "--layer", "global", "--content", content])
+        files_after_first = list((repo_root / "wiki" / "global").glob("*.md"))
+        count_after_first = len(files_after_first)
+        assert count_after_first == 1, "Exactly one file after first capture"
+
+        runner.invoke(cli, ["capture", "--layer", "global", "--content", content])
+        files_after_second = list((repo_root / "wiki" / "global").glob("*.md"))
+        assert len(files_after_second) == count_after_first, (
+            "No new file must be created on duplicate capture"
+        )
+
+    def test_first_capture_output_unchanged(
+        self, runner, repo_root, monkeypatch
+    ):
+        """First capture of new content must still print 'captured: <uuid>'."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+        from core.cli import cli
+
+        result = runner.invoke(
+            cli,
+            ["capture", "--layer", "global", "--content", "Brand new unique memory"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "captured:" in result.output
+        assert "(existing)" not in result.output
+
+    def test_cross_process_duplicate_exit_code_zero(
+        self, runner, repo_root, monkeypatch
+    ):
+        """Duplicate capture must exit 0 (clean exit, not an error)."""
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+        from core.cli import cli
+
+        content = "Exit-code-zero dedup test"
+        runner.invoke(cli, ["capture", "--layer", "global", "--content", content])
+        result = runner.invoke(
+            cli, ["capture", "--layer", "global", "--content", content]
+        )
+        assert result.exit_code == 0, (
+            f"Duplicate capture must exit 0, got {result.exit_code}. "
+            f"Output: {result.output!r}"
+        )

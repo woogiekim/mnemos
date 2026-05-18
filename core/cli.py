@@ -155,8 +155,15 @@ def memory_capture(
         )
         effective_layer = layer or "ephemeral"
         if captured_id is None:
+            # In-process duplicate: same gateway instance saw this content before
+            # (e.g. Stop hook firing multiple times per session).  Silent no-op.
             preview = content[:60]
             click.echo(f"[mnemos] Skipped (duplicate): \"{preview}\"")
+        elif gw.last_capture_was_duplicate:
+            # Cross-process duplicate (Issues #49/#50): identical content was
+            # written by a previous `mnemos capture` invocation.  Return the
+            # existing ID so the caller knows which record to reference.
+            click.echo(f"(existing) {captured_id}")
         else:
             if not quiet:
                 # Method E: CLI stdout IS the notification.

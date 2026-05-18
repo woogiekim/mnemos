@@ -522,3 +522,123 @@ class TestHealthPage:
                 if not line.startswith("_Generated:")
             )
         assert strip_ts(first) == strip_ts(second)
+
+
+# ---------------------------------------------------------------------------
+# Local-only mode (no remote configured)
+# ---------------------------------------------------------------------------
+
+
+def _make_local_vault(tmp_path: Path) -> "ObsidianBackend":
+    """Create an ObsidianBackend with sync enabled but no remote configured.
+
+    The vault is a git repo (so commits work) but has no remote.
+    sync.enabled=True to exercise the auto-sync code path.
+    """
+    import subprocess
+    from core.config import SyncConfig
+    from core.obsidian import ObsidianBackend
+
+    vault_path = tmp_path / "local_vault"
+    vault_path.mkdir(parents=True, exist_ok=True)
+
+    # Initialise a git repo without adding a remote
+    subprocess.run(["git", "init", str(vault_path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(vault_path), "config", "user.email", "test@mnemos.local"],
+        capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(vault_path), "config", "user.name", "mnemos test"],
+        capture_output=True, check=True,
+    )
+
+    cfg = SyncConfig(
+        enabled=True,
+        remote="origin",
+        branch="main",
+        auto_pull_on_capture=True,
+        auto_push_after_commit=True,
+        pull_rate_limit_seconds=0,
+    )
+    fts_path = str(tmp_path / ".agent" / "state" / "fts.db")
+    from core.fts import FTSIndex
+    fts = FTSIndex(db_path=fts_path)
+    return ObsidianBackend(vault_path=str(vault_path), fts=fts, sync_config=cfg)
+
+
+class TestLocalOnlyMode:
+    """When sync is enabled but no remote is configured, push/pull skip silently."""
+
+    def test_has_remote_returns_false_when_no_remote(self, tmp_path):
+        """_has_remote() must return False when no remote is configured."""
+        backend = _make_local_vault(tmp_path)
+        assert backend._has_remote() is False
+
+    def test_should_pull_returns_false_when_no_remote(self, tmp_path):
+        """_should_pull() must return False when remote is absent (local-only)."""
+        backend = _make_local_vault(tmp_path)
+        assert backend._should_pull() is False
+
+    def test_write_succeeds_without_remote(self, tmp_path):
+        """write() must succeed silently in local-only mode (no remote)."""
+        backend = _make_local_vault(tmp_path)
+        vault_path = tmp_path / "local_vault"
+        path = backend.write(
+            layer="session",
+            item_id="local-001",
+            content="local only content",
+            metadata={"id": "local-001", "layer": "session"},
+        )
+        assert path.exists(), "write() must create the vault file"
+        assert (vault_path / "session" / "local-001.md").exists()
+
+    def test_write_creates_local_git_commit(self, tmp_path):
+        """In local-only mode, write() still creates a local git commit."""
+        import subprocess
+        backend = _make_local_vault(tmp_path)
+        vault_path = tmp_path / "local_vault"
+        backend.write(
+            layer="project",
+            item_id="local-commit-001",
+            content="commit without remote",
+            metadata={"id": "local-commit-001", "layer": "project"},
+        )
+        result = subprocess.run(
+            ["git", "-C", str(vault_path), "log", "--oneline"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert len(result.stdout.strip().splitlines()) >= 1, (
+            "A local git commit should have been created"
+        )
+
+    def test_update_succeeds_without_remote(self, tmp_path):
+        """update() must succeed silently in local-only mode."""
+        backend = _make_local_vault(tmp_path)
+        backend.write(
+            layer="global",
+            item_id="local-upd-001",
+            content="original",
+            metadata={"id": "local-upd-001", "layer": "global"},
+        )
+        path = backend.update("local-upd-001", content="updated content")
+        assert path.exists()
+
+    def test_sync_push_skips_silently_when_no_remote(self, tmp_path):
+        """Manual sync_push() must return silently when no remote is configured."""
+        backend = _make_local_vault(tmp_path)
+        # Must not raise any exception
+        backend.sync_push()
+
+    def test_sync_pull_skips_silently_when_no_remote(self, tmp_path):
+        """Manual sync_pull() must return silently when no remote is configured."""
+        backend = _make_local_vault(tmp_path)
+        # Must not raise any exception
+        backend.sync_pull()
+
+    def test_hook_after_commit_skips_push_when_no_remote(self, tmp_path):
+        """_hook_after_commit() must skip push silently when no remote."""
+        backend = _make_local_vault(tmp_path)
+        # Should not raise even with committed=True
+        backend._hook_after_commit(committed=True)

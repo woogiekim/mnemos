@@ -32,15 +32,26 @@ pointer-translation concerns for migrated items.  New items captured
 directly via the Obsidian backend may use ``[[<id>]]`` syntax in their
 content body for native Obsidian Graph integration.
 
-**Multi-host sync** (issue #24): When ``storage.sync.enabled: true`` in
-``mnemos.yml``, :class:`ObsidianBackend` performs automatic git pull/commit/push
-around every write operation.  The three hook points are:
+**Auto-sync** (issue #25): When ``storage.backend: obsidian`` and
+``vault_path`` is set in ``mnemos.yml``, sync is **enabled automatically**
+without requiring ``sync.enabled: true``.  To opt out, set
+``sync.enabled: false`` explicitly.
+
+**Multi-host sync** (issue #24): When sync is enabled (auto or explicit),
+:class:`ObsidianBackend` performs automatic git pull/commit/push around every
+write operation.  The three hook points are:
 
 1. **Before write** — pull rebase (rate-limited) to get remote changes.
 2. **After write** — commit the changed file(s).
 3. **After commit** — push to the configured remote (if ``auto_push_after_commit``).
 
-When ``sync.enabled: false`` (the default) none of these hooks run and the
+**Local-only mode**: When sync is enabled but no git remote is configured in
+the vault, pull and push operations are skipped silently.  The vault still
+receives local git commits on every write, so the history is preserved.
+Connecting a remote later (via ``git remote add origin <url>``) immediately
+activates full bidirectional sync without any configuration change.
+
+When ``sync.enabled: false`` (explicit opt-out) none of these hooks run and the
 backend behaves exactly as it did before #24.
 """
 from __future__ import annotations
@@ -190,13 +201,29 @@ class ObsidianBackend:
         except Exception:
             pass  # non-fatal — the in-memory value is still correct
 
+    def _has_remote(self) -> bool:
+        """Return ``True`` when the configured remote exists in the vault repo.
+
+        Uses :func:`core.git.remote_exists` (which runs ``git remote get-url``).
+        Returns ``False`` on any error (git not found, not a repo, etc.) so
+        callers can treat the absence of a remote as local-only mode.
+        """
+        try:
+            import core.git as _git
+            return _git.remote_exists(self._vault, self._sync.remote)
+        except Exception:
+            return False
+
     def _should_pull(self) -> bool:
         """Return ``True`` when a pull should be attempted now.
 
-        A pull is skipped when ``pull_rate_limit_seconds`` has NOT yet elapsed
-        since the last successful pull.
+        A pull is skipped when:
+        - ``pull_rate_limit_seconds`` has NOT yet elapsed since the last pull, OR
+        - the configured remote does not exist in the vault repo (local-only mode).
         """
         if not self._sync.enabled or not self._sync.auto_pull_on_capture:
+            return False
+        if not self._has_remote():
             return False
         elapsed = time.monotonic() - self._last_pull_ts
         # _last_pull_ts is 0.0 on the first-ever call, so elapsed will be huge
@@ -323,13 +350,17 @@ class ObsidianBackend:
         """Hook 3 — push after a successful commit.
 
         Only runs when ``committed`` is ``True`` AND ``auto_push_after_commit``
-        is set.
+        is set AND a remote is configured.  When no remote is configured
+        (local-only mode), the push is skipped silently.
         """
         if not self._sync.enabled:
             return
         if not committed:
             return
         if not self._sync.auto_push_after_commit:
+            return
+        if not self._has_remote():
+            # Local-only mode — no remote configured, skip push silently
             return
         import core.git as _git
         _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
@@ -342,8 +373,14 @@ class ObsidianBackend:
     def sync_pull(self) -> None:
         """Manual pull — works regardless of ``mode`` or rate limit.
 
+        When no remote is configured (local-only mode), this method returns
+        silently without raising an error.
+
         Raises :exc:`SyncConflictError` when the pull detects a conflict.
         """
+        if not self._has_remote():
+            # Local-only mode — no remote to pull from
+            return
         import core.git as _git
         try:
             _git.pull_rebase(
@@ -362,8 +399,14 @@ class ObsidianBackend:
     def sync_push(self) -> None:
         """Manual push to the configured remote/branch.
 
+        When no remote is configured (local-only mode), this method returns
+        silently without raising an error.
+
         Raises :exc:`~core.git.GitCommandError` on push failure.
         """
+        if not self._has_remote():
+            # Local-only mode — no remote to push to
+            return
         import core.git as _git
         _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
         self._last_push_ts = time.monotonic()
