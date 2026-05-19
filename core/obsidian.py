@@ -32,15 +32,26 @@ pointer-translation concerns for migrated items.  New items captured
 directly via the Obsidian backend may use ``[[<id>]]`` syntax in their
 content body for native Obsidian Graph integration.
 
-**Multi-host sync** (issue #24): When ``storage.sync.enabled: true`` in
-``mnemos.yml``, :class:`ObsidianBackend` performs automatic git pull/commit/push
-around every write operation.  The three hook points are:
+**Auto-sync** (issue #25): When ``storage.backend: obsidian`` and
+``vault_path`` is set in ``mnemos.yml``, sync is **enabled automatically**
+without requiring ``sync.enabled: true``.  To opt out, set
+``sync.enabled: false`` explicitly.
+
+**Multi-host sync** (issue #24): When sync is enabled (auto or explicit),
+:class:`ObsidianBackend` performs automatic git pull/commit/push around every
+write operation.  The three hook points are:
 
 1. **Before write** — pull rebase (rate-limited) to get remote changes.
 2. **After write** — commit the changed file(s).
 3. **After commit** — push to the configured remote (if ``auto_push_after_commit``).
 
-When ``sync.enabled: false`` (the default) none of these hooks run and the
+**Local-only mode**: When sync is enabled but no git remote is configured in
+the vault, pull and push operations are skipped silently.  The vault still
+receives local git commits on every write, so the history is preserved.
+Connecting a remote later (via ``git remote add origin <url>``) immediately
+activates full bidirectional sync without any configuration change.
+
+When ``sync.enabled: false`` (explicit opt-out) none of these hooks run and the
 backend behaves exactly as it did before #24.
 """
 from __future__ import annotations
@@ -118,6 +129,58 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(_nfkc_normalise(content).encode("utf-8")).hexdigest()
 
 
+def _content_slug(content: str, max_words: int = 6, max_chars: int = 60) -> str:
+    """Derive a human-readable slug from the first line of *content*.
+
+    Keeps Unicode letters and digits (including Korean, CJK, etc.);
+    replaces everything else with hyphens.  Falls back to ``"untitled"``
+    when the content yields no usable words.
+
+    When the content body itself begins with ``---`` (nested frontmatter,
+    e.g. ingested claude_memory files), extracts the ``name:`` field from
+    that inner block instead of trying to use the delimiter as a slug.
+    """
+    stripped = content.strip()
+    # Detect nested frontmatter: body starts with "---"
+    if stripped.startswith("---"):
+        lines = stripped.splitlines()
+        # Find the closing "---"
+        end = None
+        for i, line in enumerate(lines[1:], 1):
+            if line.strip() == "---":
+                end = i
+                break
+        if end is not None:
+            inner_block = "\n".join(lines[1:end])
+            # Look for a "name:" key in the inner frontmatter
+            for line in inner_block.splitlines():
+                m = re.match(r"^name\s*:\s*(.+)", line, re.IGNORECASE)
+                if m:
+                    stripped = m.group(1).strip()
+                    break
+            else:
+                # No name: found — fall through to use content after inner block
+                rest = "\n".join(lines[end + 1:]).strip()
+                if rest:
+                    stripped = rest
+    first_line = stripped.split("\n")[0][:200]
+    cleaned = ""
+    for ch in first_line:
+        cat = unicodedata.category(ch)
+        if cat.startswith(("L", "N")):  # Letters (any script) and Numbers
+            cleaned += ch
+        else:
+            cleaned += " "
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    words = cleaned.split()[:max_words]
+    if not words:
+        return "untitled"
+    slug = "-".join(words)
+    if len(slug) > max_chars:
+        slug = slug[:max_chars].rstrip("-")
+    return slug or "untitled"
+
+
 # ---------------------------------------------------------------------------
 # ObsidianBackend
 # ---------------------------------------------------------------------------
@@ -190,13 +253,40 @@ class ObsidianBackend:
         except Exception:
             pass  # non-fatal — the in-memory value is still correct
 
+    def _has_remote(self) -> bool:
+        """Return ``True`` when the configured remote exists in the vault repo.
+
+        Uses :func:`core.git.remote_exists` (which runs ``git remote get-url``).
+        Returns ``False`` on any error (git not found, not a repo, etc.) so
+        callers can treat the absence of a remote as local-only mode.
+        """
+        try:
+            import core.git as _git
+            return _git.remote_exists(self._vault, self._sync.remote)
+        except Exception:
+            return False
+
     def _should_pull(self) -> bool:
         """Return ``True`` when a pull should be attempted now.
 
-        A pull is skipped when ``pull_rate_limit_seconds`` has NOT yet elapsed
-        since the last successful pull.
+        A pull is skipped when:
+        - ``pull_rate_limit_seconds`` has NOT yet elapsed since the last pull, OR
+        - the configured remote does not exist in the vault repo (local-only mode), OR
+        - the remote branch does not yet exist (empty / uninitialized remote repo).
         """
         if not self._sync.enabled or not self._sync.auto_pull_on_capture:
+            return False
+        if not self._has_remote():
+            return False
+        # Skip pull when the remote branch doesn't exist yet (e.g. empty GitHub
+        # repo before the first push).  Treat the same as local-only mode.
+        try:
+            import core.git as _git
+            if not _git.remote_has_branch(
+                self._vault, self._sync.remote, self._sync.branch
+            ):
+                return False
+        except Exception:
             return False
         elapsed = time.monotonic() - self._last_pull_ts
         # _last_pull_ts is 0.0 on the first-ever call, so elapsed will be huge
@@ -323,7 +413,10 @@ class ObsidianBackend:
         """Hook 3 — push after a successful commit.
 
         Only runs when ``committed`` is ``True`` AND ``auto_push_after_commit``
-        is set.
+        is set AND a remote is configured with the target branch already
+        existing on the remote.  When no remote is configured or the remote
+        branch does not yet exist (uninitialized repo), the push is skipped
+        silently.
         """
         if not self._sync.enabled:
             return
@@ -331,7 +424,13 @@ class ObsidianBackend:
             return
         if not self._sync.auto_push_after_commit:
             return
+        if not self._has_remote():
+            # Local-only mode — no remote configured, skip push silently
+            return
         import core.git as _git
+        # Skip push when the remote branch hasn't been created yet (empty repo)
+        if not _git.remote_has_branch(self._vault, self._sync.remote, self._sync.branch):
+            return
         _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
         self._last_push_ts = time.monotonic()
 
@@ -342,9 +441,19 @@ class ObsidianBackend:
     def sync_pull(self) -> None:
         """Manual pull — works regardless of ``mode`` or rate limit.
 
+        When no remote is configured, or the remote branch does not yet exist
+        (uninitialized remote repo), this method returns silently without
+        raising an error.
+
         Raises :exc:`SyncConflictError` when the pull detects a conflict.
         """
+        if not self._has_remote():
+            # Local-only mode — no remote to pull from
+            return
         import core.git as _git
+        if not _git.remote_has_branch(self._vault, self._sync.remote, self._sync.branch):
+            # Remote exists but the branch hasn't been pushed yet — skip silently
+            return
         try:
             _git.pull_rebase(
                 self._vault,
@@ -362,8 +471,14 @@ class ObsidianBackend:
     def sync_push(self) -> None:
         """Manual push to the configured remote/branch.
 
+        When no remote is configured (local-only mode), this method returns
+        silently without raising an error.
+
         Raises :exc:`~core.git.GitCommandError` on push failure.
         """
+        if not self._has_remote():
+            # Local-only mode — no remote to push to
+            return
         import core.git as _git
         _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
         self._last_push_ts = time.monotonic()
@@ -487,17 +602,71 @@ class ObsidianBackend:
         return d
 
     def _find_path(self, item_id: str) -> Path:
-        """Search all layer folders for a file named ``<item_id>.md``.
+        """Search all layer folders for an item with the given *item_id*.
 
-        Raises :exc:`FileNotFoundError` if the item is not in any layer.
+        First tries the legacy ``<item_id>.md`` filename for backward
+        compatibility with pre-slug vaults.  If not found, scans all
+        ``.md`` files in all layers and checks the ``id`` front-matter
+        field (used by slug-named files written after this change).
+
+        Raises :exc:`FileNotFoundError` if the item is not found anywhere.
         """
+        # Fast path: legacy UUID-named file (backward compat)
         for layer in OBSIDIAN_LAYERS:
             candidate = self._vault / layer / f"{item_id}.md"
             if candidate.exists():
                 return candidate
+        # Slow path: scan frontmatter for matching id (slug-named files)
+        for layer in OBSIDIAN_LAYERS:
+            layer_dir = self._vault / layer
+            if not layer_dir.exists():
+                continue
+            for md_file in sorted(layer_dir.glob("*.md")):
+                try:
+                    post = frontmatter.load(str(md_file))
+                    if post.metadata.get("id") == item_id:
+                        return md_file
+                except Exception:
+                    continue
         raise FileNotFoundError(
             f"Memory item not found in Obsidian vault: {item_id!r}"
         )
+
+    def _build_file_path(self, layer_dir: Path, item_id: str, content: str) -> Path:
+        """Return the slug-based file path for *item_id*/*content*.
+
+        If ``<slug>.md`` is absent, that path is returned immediately.
+        If it exists and belongs to *item_id*, it is returned (idempotent
+        rewrite).  If it belongs to a different item, numbered variants are
+        tried: ``<slug>-2.md``, ``<slug>-3.md``, …
+        """
+        slug = _content_slug(content)
+        candidate = layer_dir / f"{slug}.md"
+
+        if not candidate.exists():
+            return candidate
+
+        # Check if the existing file belongs to this item_id
+        try:
+            existing = frontmatter.load(str(candidate))
+            if existing.metadata.get("id") == item_id:
+                return candidate  # idempotent rewrite
+        except Exception:
+            pass
+
+        # Collision with a different item — try numbered suffixes
+        counter = 2
+        while True:
+            candidate = layer_dir / f"{slug}-{counter}.md"
+            if not candidate.exists():
+                return candidate
+            try:
+                existing = frontmatter.load(str(candidate))
+                if existing.metadata.get("id") == item_id:
+                    return candidate
+            except Exception:
+                pass
+            counter += 1
 
     def _resolve_path(self, item_id_or_path: str) -> Path:
         """Resolve *item_id_or_path* to a :class:`~pathlib.Path`.
@@ -571,7 +740,7 @@ class ObsidianBackend:
         self._hook_before_write()
 
         layer_dir = self._layer_dir(layer)
-        file_path = layer_dir / f"{item_id}.md"
+        file_path = self._build_file_path(layer_dir, item_id, content)
 
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         meta = dict(metadata)
@@ -696,7 +865,8 @@ class ObsidianBackend:
         item_id = item.get("id", src_path.stem)
 
         target_dir = self._layer_dir(target_layer)
-        dst_path = target_dir / f"{item_id}.md"
+        # Preserve the slug-based filename when moving between layers
+        dst_path = target_dir / src_path.name
 
         # Update layer in metadata
         item["layer"] = target_layer
@@ -803,6 +973,130 @@ class ObsidianBackend:
     # ------------------------------------------------------------------ #
     # Health page (_health.md)                                             #
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # UUID-to-slug migration                                               #
+    # ------------------------------------------------------------------ #
+
+    def rename_uuid_to_slug(
+        self,
+        dry_run: bool = False,
+        commit: bool = False,
+    ) -> dict[str, object]:
+        """Rename all UUID-named vault files to slug-based names.
+
+        Returns stats: {renamed: int, skipped: int, dry_run: bool, renames: list[dict]}
+        Each rename dict: {layer, old_name, new_name, item_id, reason}
+        reason is "renamed", "skipped" (already slug), or "collision_resolved".
+        """
+        UUID_RE = re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+            re.IGNORECASE,
+        )
+
+        renames: list[dict[str, object]] = []
+        renamed = 0
+        skipped = 0
+        changed_paths: list[Path] = []
+
+        for layer in OBSIDIAN_LAYERS:
+            layer_dir = self._vault / layer
+            if not layer_dir.exists():
+                continue
+            for md_file in sorted(layer_dir.glob("*.md")):
+                stem = md_file.stem
+                # Check if the filename stem is a UUID
+                if not UUID_RE.fullmatch(stem):
+                    skipped += 1
+                    renames.append({
+                        "layer": layer,
+                        "old_name": md_file.name,
+                        "new_name": md_file.name,
+                        "item_id": stem,
+                        "reason": "skipped",
+                    })
+                    continue
+
+                # Parse frontmatter to get id and content
+                try:
+                    post = frontmatter.load(str(md_file))
+                except Exception:
+                    skipped += 1
+                    renames.append({
+                        "layer": layer,
+                        "old_name": md_file.name,
+                        "new_name": md_file.name,
+                        "item_id": stem,
+                        "reason": "skipped",
+                    })
+                    continue
+
+                item_id = post.metadata.get("id", stem)
+                content = post.content
+
+                # Build slug-based destination path (handles collision)
+                new_path = self._build_file_path(layer_dir, item_id, content)
+                new_name = new_path.name
+
+                if new_path == md_file:
+                    # Already at the right slug path (shouldn't happen for UUID files, but be safe)
+                    skipped += 1
+                    renames.append({
+                        "layer": layer,
+                        "old_name": md_file.name,
+                        "new_name": new_name,
+                        "item_id": item_id,
+                        "reason": "skipped",
+                    })
+                    continue
+
+                # Determine reason label
+                slug = _content_slug(content)
+                base_candidate = layer_dir / f"{slug}.md"
+                reason = "renamed"
+                if new_path != base_candidate:
+                    reason = "collision_resolved"
+
+                if not dry_run:
+                    os.rename(str(md_file), str(new_path))
+                    # Update mtime cache
+                    self._mtime_cache.pop(str(md_file), None)
+                    try:
+                        self._mtime_cache[str(new_path)] = new_path.stat().st_mtime
+                    except OSError:
+                        pass
+                    changed_paths.extend([md_file, new_path])
+
+                renamed += 1
+                renames.append({
+                    "layer": layer,
+                    "old_name": md_file.name,
+                    "new_name": new_name,
+                    "item_id": item_id,
+                    "reason": reason,
+                })
+
+        # Optionally commit
+        if commit and not dry_run and changed_paths:
+            if self._sync.enabled:
+                import core.git as _git
+                _git.add(self._vault, [str(p) for p in changed_paths])
+                _git.commit(self._vault, "mnemos: rename UUID files to slug names")
+            else:
+                # Try committing even if sync is not enabled (standalone commit mode)
+                try:
+                    import core.git as _git
+                    _git.add(self._vault, [str(p) for p in changed_paths])
+                    _git.commit(self._vault, "mnemos: rename UUID files to slug names")
+                except Exception:
+                    pass
+
+        return {
+            "renamed": renamed,
+            "skipped": skipped,
+            "dry_run": dry_run,
+            "renames": renames,
+        }
 
     def generate_health_page(self) -> Path:
         """Generate (or regenerate) ``_health.md`` at the vault root.

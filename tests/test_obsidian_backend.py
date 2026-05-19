@@ -82,8 +82,11 @@ class TestWriteRead:
             content="hello obsidian",
             metadata={"id": "test-001", "layer": "project", "tags": []},
         )
-        assert (vault / "project" / "test-001.md").exists()
-        assert str(path) == str(vault / "project" / "test-001.md")
+        # File should exist in the correct layer folder with a slug-based name
+        assert path.exists()
+        assert path.parent == vault / "project"
+        # The id is preserved in frontmatter even though filename is slug-based
+        assert backend.read("test-001")["id"] == "test-001"
 
     def test_write_creates_frontmatter(self, tmp_path):
         backend = _make_backend(tmp_path)
@@ -99,12 +102,11 @@ class TestWriteRead:
                 "access_count": 0,
             },
         )
-        vault = tmp_path / "vault"
-        post = frontmatter.load(str(vault / "global" / "glo-001.md"))
-        assert post.metadata["id"] == "glo-001"
-        assert post.metadata["layer"] == "global"
-        assert post.metadata["tags"] == ["important"]
-        assert post.content == "global memory"
+        result = backend.read("glo-001")
+        assert result["id"] == "glo-001"
+        assert result["layer"] == "global"
+        assert result["tags"] == ["important"]
+        assert result["content"] == "global memory"
 
     def test_read_returns_content_and_path(self, tmp_path):
         backend = _make_backend(tmp_path)
@@ -150,15 +152,18 @@ class TestWriteRead:
         layers = ["session", "project", "global", "transient",
                   "ephemeral", "working", "entities", "claims", "topics"]
         for layer in layers:
-            backend.write(
+            item_id = f"{layer}-layer-test"
+            path = backend.write(
                 layer=layer,
-                item_id=f"{layer}-layer-test",
+                item_id=item_id,
                 content=f"content for {layer}",
-                metadata={"id": f"{layer}-layer-test", "layer": layer},
+                metadata={"id": item_id, "layer": layer},
             )
-            assert (vault / layer / f"{layer}-layer-test.md").exists(), (
-                f"Expected file in vault/{layer}/ for layer='{layer}'"
+            assert path.exists(), f"Expected file in vault/{layer}/ for layer='{layer}'"
+            assert path.parent == vault / layer, (
+                f"File should be inside vault/{layer}/"
             )
+            assert backend.read(item_id)["id"] == item_id
 
 
 # ---------------------------------------------------------------------------
@@ -206,16 +211,15 @@ class TestUpdateDelete:
 
     def test_delete_removes_file(self, tmp_path):
         backend = _make_backend(tmp_path)
-        backend.write(
+        path = backend.write(
             layer="project",
             item_id="del-001",
             content="to be deleted",
             metadata={"id": "del-001", "layer": "project"},
         )
-        vault = tmp_path / "vault"
-        assert (vault / "project" / "del-001.md").exists()
+        assert path.exists()
         backend.delete("del-001")
-        assert not (vault / "project" / "del-001.md").exists()
+        assert not path.exists()
 
     def test_delete_nonexistent_raises(self, tmp_path):
         backend = _make_backend(tmp_path)
@@ -245,7 +249,8 @@ class TestListAndIter:
         )
         paths = list(backend.list_layer("global"))
         assert len(paths) == 2
-        ids = {p.stem for p in paths}
+        # id is in frontmatter, not necessarily in the filename
+        ids = {backend.read(str(p))["id"] for p in paths}
         assert ids == {"list-001", "list-002"}
 
     def test_list_layer_empty_returns_nothing(self, tmp_path):
@@ -314,22 +319,21 @@ class TestPromotion:
     def test_promote_moves_file_to_new_layer_folder(self, tmp_path):
         backend = _make_backend(tmp_path)
         vault = tmp_path / "vault"
-        backend.write(
+        src_path = backend.write(
             layer="session",
             item_id="promo-001",
             content="promote me",
             metadata={"id": "promo-001", "layer": "session"},
         )
-        assert (vault / "session" / "promo-001.md").exists()
+        assert src_path.exists()
 
-        backend.promote("promo-001", target_layer="project")
+        dst_path = backend.promote("promo-001", target_layer="project")
 
-        assert not (vault / "session" / "promo-001.md").exists(), (
-            "File should be moved out of session/"
-        )
-        assert (vault / "project" / "promo-001.md").exists(), (
-            "File should appear in project/"
-        )
+        assert not src_path.exists(), "File should be moved out of session/"
+        assert dst_path.exists(), "File should appear in project/"
+        assert dst_path.parent == vault / "project"
+        # Slug-based filename is preserved across layers
+        assert dst_path.name == src_path.name
 
     def test_promote_updates_layer_frontmatter(self, tmp_path):
         backend = _make_backend(tmp_path)
@@ -360,14 +364,13 @@ class TestSyncEdits:
         backend = _make_backend(tmp_path)
         vault = tmp_path / "vault"
 
-        backend.write(
+        file_path = backend.write(
             layer="project",
             item_id="edit-001",
             content="original content",
             metadata={"id": "edit-001", "layer": "project"},
         )
 
-        file_path = vault / "project" / "edit-001.md"
         original_hash = backend.read("edit-001")["content_hash"]
 
         # Simulate external Obsidian edit — modify file content directly
@@ -408,13 +411,12 @@ class TestSyncEdits:
         """When sync_edits detects a changed file it increments access_count."""
         backend = _make_backend(tmp_path)
         vault = tmp_path / "vault"
-        backend.write(
+        file_path = backend.write(
             layer="session",
             item_id="acc-001",
             content="access count test",
             metadata={"id": "acc-001", "layer": "session", "access_count": 5},
         )
-        file_path = vault / "session" / "acc-001.md"
 
         time.sleep(0.05)
         post = frontmatter.load(str(file_path))
@@ -522,3 +524,234 @@ class TestHealthPage:
                 if not line.startswith("_Generated:")
             )
         assert strip_ts(first) == strip_ts(second)
+
+
+# ---------------------------------------------------------------------------
+# Local-only mode (no remote configured)
+# ---------------------------------------------------------------------------
+
+
+def _make_local_vault(tmp_path: Path) -> "ObsidianBackend":
+    """Create an ObsidianBackend with sync enabled but no remote configured.
+
+    The vault is a git repo (so commits work) but has no remote.
+    sync.enabled=True to exercise the auto-sync code path.
+    """
+    import subprocess
+    from core.config import SyncConfig
+    from core.obsidian import ObsidianBackend
+
+    vault_path = tmp_path / "local_vault"
+    vault_path.mkdir(parents=True, exist_ok=True)
+
+    # Initialise a git repo without adding a remote
+    subprocess.run(["git", "init", str(vault_path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(vault_path), "config", "user.email", "test@mnemos.local"],
+        capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(vault_path), "config", "user.name", "mnemos test"],
+        capture_output=True, check=True,
+    )
+
+    cfg = SyncConfig(
+        enabled=True,
+        remote="origin",
+        branch="main",
+        auto_pull_on_capture=True,
+        auto_push_after_commit=True,
+        pull_rate_limit_seconds=0,
+    )
+    fts_path = str(tmp_path / ".agent" / "state" / "fts.db")
+    from core.fts import FTSIndex
+    fts = FTSIndex(db_path=fts_path)
+    return ObsidianBackend(vault_path=str(vault_path), fts=fts, sync_config=cfg)
+
+
+class TestLocalOnlyMode:
+    """When sync is enabled but no remote is configured, push/pull skip silently."""
+
+    def test_has_remote_returns_false_when_no_remote(self, tmp_path):
+        """_has_remote() must return False when no remote is configured."""
+        backend = _make_local_vault(tmp_path)
+        assert backend._has_remote() is False
+
+    def test_should_pull_returns_false_when_no_remote(self, tmp_path):
+        """_should_pull() must return False when remote is absent (local-only)."""
+        backend = _make_local_vault(tmp_path)
+        assert backend._should_pull() is False
+
+    def test_write_succeeds_without_remote(self, tmp_path):
+        """write() must succeed silently in local-only mode (no remote)."""
+        backend = _make_local_vault(tmp_path)
+        vault_path = tmp_path / "local_vault"
+        path = backend.write(
+            layer="session",
+            item_id="local-001",
+            content="local only content",
+            metadata={"id": "local-001", "layer": "session"},
+        )
+        assert path.exists(), "write() must create the vault file"
+        assert path.parent == vault_path / "session", "File should be in session/ layer"
+        assert backend.read("local-001")["id"] == "local-001"
+
+    def test_write_creates_local_git_commit(self, tmp_path):
+        """In local-only mode, write() still creates a local git commit."""
+        import subprocess
+        backend = _make_local_vault(tmp_path)
+        vault_path = tmp_path / "local_vault"
+        backend.write(
+            layer="project",
+            item_id="local-commit-001",
+            content="commit without remote",
+            metadata={"id": "local-commit-001", "layer": "project"},
+        )
+        result = subprocess.run(
+            ["git", "-C", str(vault_path), "log", "--oneline"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert len(result.stdout.strip().splitlines()) >= 1, (
+            "A local git commit should have been created"
+        )
+
+    def test_update_succeeds_without_remote(self, tmp_path):
+        """update() must succeed silently in local-only mode."""
+        backend = _make_local_vault(tmp_path)
+        backend.write(
+            layer="global",
+            item_id="local-upd-001",
+            content="original",
+            metadata={"id": "local-upd-001", "layer": "global"},
+        )
+        path = backend.update("local-upd-001", content="updated content")
+        assert path.exists()
+
+    def test_sync_push_skips_silently_when_no_remote(self, tmp_path):
+        """Manual sync_push() must return silently when no remote is configured."""
+        backend = _make_local_vault(tmp_path)
+        # Must not raise any exception
+        backend.sync_push()
+
+    def test_sync_pull_skips_silently_when_no_remote(self, tmp_path):
+        """Manual sync_pull() must return silently when no remote is configured."""
+        backend = _make_local_vault(tmp_path)
+        # Must not raise any exception
+        backend.sync_pull()
+
+    def test_hook_after_commit_skips_push_when_no_remote(self, tmp_path):
+        """_hook_after_commit() must skip push silently when no remote."""
+        backend = _make_local_vault(tmp_path)
+        # Should not raise even with committed=True
+        backend._hook_after_commit(committed=True)
+
+
+# ---------------------------------------------------------------------------
+# Slug-based filenames
+# ---------------------------------------------------------------------------
+
+
+class TestSlugFilenames:
+    """Files are named from content words, not UUID — id stays in frontmatter."""
+
+    def test_filename_derived_from_content(self, tmp_path):
+        """write() creates a slug-based filename from the content words."""
+        backend = _make_backend(tmp_path)
+        vault = tmp_path / "vault"
+        path = backend.write(
+            layer="project",
+            item_id="slug-test-001",
+            content="Architecture decision use SQLite for FTS",
+            metadata={"id": "slug-test-001", "layer": "project"},
+        )
+        assert path.name == "architecture-decision-use-sqlite-for-fts.md"
+        assert path.parent == vault / "project"
+
+    def test_uuid_in_frontmatter_not_filename(self, tmp_path):
+        """The UUID id is stored in frontmatter, not the filename stem."""
+        import uuid
+        backend = _make_backend(tmp_path)
+        item_id = str(uuid.uuid4())
+        path = backend.write(
+            layer="global",
+            item_id=item_id,
+            content="User prefers explicit error handling",
+            metadata={"id": item_id, "layer": "global"},
+        )
+        assert path.stem != item_id  # filename is slug, not UUID
+        result = backend.read(item_id)
+        assert result["id"] == item_id  # UUID preserved in frontmatter
+
+    def test_read_by_id_works_with_slug_filename(self, tmp_path):
+        """read(item_id) resolves correctly even with slug-based filename."""
+        backend = _make_backend(tmp_path)
+        backend.write(
+            layer="session",
+            item_id="find-by-id-001",
+            content="some memorable content here",
+            metadata={"id": "find-by-id-001", "layer": "session"},
+        )
+        result = backend.read("find-by-id-001")
+        assert result["content"] == "some memorable content here"
+        assert result["id"] == "find-by-id-001"
+
+    def test_slug_collision_appends_counter(self, tmp_path):
+        """When two items have the same content prefix, filenames get -2, -3 suffixes."""
+        backend = _make_backend(tmp_path)
+        backend.write(
+            layer="project",
+            item_id="col-001",
+            content="duplicate slug content here",
+            metadata={"id": "col-001", "layer": "project"},
+        )
+        path2 = backend.write(
+            layer="project",
+            item_id="col-002",
+            content="duplicate slug content here",
+            metadata={"id": "col-002", "layer": "project"},
+        )
+        assert path2.stem.endswith("-2")
+
+    def test_idempotent_rewrite_same_path(self, tmp_path):
+        """Rewriting the same item_id produces the same slug path."""
+        backend = _make_backend(tmp_path)
+        path1 = backend.write(
+            layer="project",
+            item_id="idem-001",
+            content="idempotent content check",
+            metadata={"id": "idem-001", "layer": "project"},
+        )
+        path2 = backend.write(
+            layer="project",
+            item_id="idem-001",
+            content="idempotent content check",
+            metadata={"id": "idem-001", "layer": "project"},
+        )
+        assert path1 == path2
+
+    def test_korean_content_slug(self, tmp_path):
+        """Korean content words appear in the slug filename."""
+        backend = _make_backend(tmp_path)
+        path = backend.write(
+            layer="global",
+            item_id="korean-001",
+            content="아키텍처 결정 SQLite 사용",
+            metadata={"id": "korean-001", "layer": "global"},
+        )
+        assert "아키텍처" in path.stem
+        result = backend.read("korean-001")
+        assert result["id"] == "korean-001"
+
+    def test_promote_preserves_slug_filename(self, tmp_path):
+        """promote() moves the file but keeps the same slug filename."""
+        backend = _make_backend(tmp_path)
+        src_path = backend.write(
+            layer="session",
+            item_id="slug-promo-001",
+            content="memorable promoted item",
+            metadata={"id": "slug-promo-001", "layer": "session"},
+        )
+        dst_path = backend.promote("slug-promo-001", target_layer="project")
+        assert dst_path.name == src_path.name
+        assert dst_path.parent.name == "project"

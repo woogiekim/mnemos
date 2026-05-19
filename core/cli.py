@@ -155,8 +155,15 @@ def memory_capture(
         )
         effective_layer = layer or "ephemeral"
         if captured_id is None:
+            # In-process duplicate: same gateway instance saw this content before
+            # (e.g. Stop hook firing multiple times per session).  Silent no-op.
             preview = content[:60]
             click.echo(f"[mnemos] Skipped (duplicate): \"{preview}\"")
+        elif gw.last_capture_was_duplicate:
+            # Cross-process duplicate (Issues #49/#50): identical content was
+            # written by a previous `mnemos capture` invocation.  Return the
+            # existing ID so the caller knows which record to reference.
+            click.echo(f"(existing) {captured_id}")
         else:
             if not quiet:
                 # Method E: CLI stdout IS the notification.
@@ -1613,21 +1620,24 @@ def sync_continue_cmd() -> None:
 @click.option(
     "--from",
     "from_backend",
-    required=True,
+    required=False,
+    default=None,
     type=click.Choice(["default", "obsidian"], case_sensitive=False),
-    help="Source backend (default or obsidian).",
+    help="Source backend (default or obsidian). Required unless --uuid-to-slug is set.",
 )
 @click.option(
     "--to",
     "to_backend",
-    required=True,
+    required=False,
+    default=None,
     type=click.Choice(["default", "obsidian"], case_sensitive=False),
-    help="Target backend (default or obsidian).",
+    help="Target backend (default or obsidian). Required unless --uuid-to-slug is set.",
 )
 @click.option(
     "--vault-path",
     "vault_path",
-    required=True,
+    required=False,
+    default=None,
     help="Path to the Obsidian vault (required for both obsidian source and target).",
 )
 @click.option(
@@ -1635,13 +1645,30 @@ def sync_continue_cmd() -> None:
     "dry_run",
     is_flag=True,
     default=False,
-    help="Print what would be migrated without writing anything.",
+    help="Print what would be migrated/renamed without writing anything.",
+)
+@click.option(
+    "--uuid-to-slug",
+    "uuid_to_slug",
+    is_flag=True,
+    default=False,
+    help="Rename UUID-named vault files to human-readable slug names. "
+         "Requires --vault-path. --from/--to are ignored when this flag is set.",
+)
+@click.option(
+    "--commit",
+    "do_commit",
+    is_flag=True,
+    default=False,
+    help="Stage and commit renamed files after uuid-to-slug migration.",
 )
 def memory_migrate(
-    from_backend: str,
-    to_backend: str,
-    vault_path: str,
+    from_backend: str | None,
+    to_backend: str | None,
+    vault_path: str | None,
     dry_run: bool,
+    uuid_to_slug: bool,
+    do_commit: bool,
 ) -> None:
     """Migrate memory items between the default backend and an Obsidian vault.
 
@@ -1649,6 +1676,12 @@ def memory_migrate(
     Directions:
       mnemos migrate --from default --to obsidian --vault-path ~/vault
       mnemos migrate --from obsidian --to default --vault-path ~/vault
+
+    \b
+    UUID-to-slug rename (in-place vault rename):
+      mnemos migrate --uuid-to-slug --vault-path ~/vault
+      mnemos migrate --uuid-to-slug --vault-path ~/vault --dry-run
+      mnemos migrate --uuid-to-slug --vault-path ~/vault --commit
 
     \b
     Idempotent: items whose (id, content_hash) already match in the target are
@@ -1665,6 +1698,42 @@ def memory_migrate(
     from core.layers import LAYER_STATIC_PATHS
 
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+
+    # ── UUID-to-slug mode ─────────────────────────────────────────────────
+    if uuid_to_slug:
+        if not vault_path:
+            raise click.UsageError("--vault-path is required when --uuid-to-slug is set.")
+        resolved_vault = str(_Path(vault_path).expanduser().resolve())
+        backend = ObsidianBackend(vault_path=resolved_vault)
+        stats = backend.rename_uuid_to_slug(dry_run=dry_run, commit=do_commit)
+
+        renamed = stats["renamed"]
+        skipped = stats["skipped"]
+        renames = stats["renames"]
+
+        if dry_run:
+            would_rename = [r for r in renames if r["reason"] != "skipped"]
+            would_skip = [r for r in renames if r["reason"] == "skipped"]
+            click.echo(f"[DRY RUN] Would rename {renamed} file(s):")
+            for r in would_rename:
+                click.echo(f"  {r['layer']}/{r['old_name']} → {r['layer']}/{r['new_name']}")
+            if would_skip:
+                click.echo(f"{len(would_skip)} file(s) would be skipped (already slug-named).")
+        else:
+            actual_renamed = [r for r in renames if r["reason"] != "skipped"]
+            click.echo(f"Renamed {renamed} file(s), skipped {skipped} (already slug-named).")
+            for r in actual_renamed:
+                click.echo(f"  {r['layer']}/{r['old_name']} → {r['layer']}/{r['new_name']}")
+        return
+
+    # ── Validate required options for non-uuid-to-slug modes ─────────────
+    if not from_backend:
+        raise click.UsageError("--from is required when --uuid-to-slug is not set.")
+    if not to_backend:
+        raise click.UsageError("--to is required when --uuid-to-slug is not set.")
+    if not vault_path:
+        raise click.UsageError("--vault-path is required.")
+
     resolved_vault = str(_Path(vault_path).expanduser().resolve())
 
     # ── Build source and target backends ──────────────────────────────────

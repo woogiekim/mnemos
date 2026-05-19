@@ -160,17 +160,14 @@ class TestCapturePropagatesToB:
             metadata={"tags": ["e2e"], "quality_score": 0.9},
         )
 
-        # B has not pulled yet — item should NOT be on disk
-        b_path = Path(vaultB._vault) / "session" / "e2e-item-001.md"
-        assert not b_path.exists(), "B should not have the item before pull"
+        # B has not pulled yet — item should NOT be readable on B
+        with pytest.raises(FileNotFoundError):
+            vaultB.read("e2e-item-001")
 
         # Pull on B
         vaultB.sync_pull()
 
-        # After pull, B should have the file
-        assert b_path.exists(), "B should have the item after pull"
-
-        # And can read it
+        # After pull, B can read the item
         item = vaultB.read("e2e-item-001")
         assert item["content"] == "Memory from host A"
 
@@ -191,8 +188,8 @@ class TestCapturePropagatesToB:
         vaultB.sync_pull()
 
         for i in range(3):
-            p = Path(vaultB._vault) / "project" / f"e2e-multi-{i:03d}.md"
-            assert p.exists(), f"item {i} should be on B after pull"
+            item = vaultB.read(f"e2e-multi-{i:03d}")
+            assert item["content"] == f"item {i}", f"item {i} should be on B after pull"
 
 
 # ---------------------------------------------------------------------------
@@ -222,11 +219,14 @@ class TestPromotePropagatesToB:
         # B pulls and should see the item in project, not session
         vaultB.sync_pull()
 
-        session_path = Path(vaultB._vault) / "session" / "e2e-promote-001.md"
-        project_path = Path(vaultB._vault) / "project" / "e2e-promote-001.md"
-
-        assert not session_path.exists(), "Old session path should be gone after promote+pull"
-        assert project_path.exists(), "New project path should exist on B after pull"
+        # After pull, B can read the promoted item and it's in project layer
+        item = vaultB.read("e2e-promote-001")
+        assert item["layer"] == "project", "Promoted item should be in project layer on B"
+        # Item should not appear in session layer
+        session_items = [i["id"] for i in vaultB.iter_layer_items("session")]
+        assert "e2e-promote-001" not in session_items, (
+            "Promoted item should not be in session layer on B"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,14 +261,30 @@ class TestConflictDetection:
         )
         vaultC = ObsidianBackend(vault_path=str(clone_b_path), fts=fts_b, sync_config=cfg_b)
 
+        def _find_item_path(vault_path: Path, item_id: str) -> Path:
+            """Scan vault for file with matching id frontmatter."""
+            import frontmatter as _fm
+            for layer_dir in vault_path.iterdir():
+                if not layer_dir.is_dir() or layer_dir.name.startswith("."):
+                    continue
+                for md_file in layer_dir.glob("*.md"):
+                    try:
+                        post = _fm.load(str(md_file))
+                        if post.metadata.get("id") == item_id:
+                            return md_file
+                    except Exception:
+                        pass
+            raise FileNotFoundError(f"Item {item_id!r} not found in vault {vault_path}")
+
         # B (C) first syncs to get A's initial write
         vaultC.sync_pull()
-        assert (clone_b_path / "project" / "e2e-conflict-001.md").exists()
+        item_path_c = _find_item_path(clone_b_path, "e2e-conflict-001")
+        assert item_path_c.exists()
 
         # B edits the same item and pushes WITHOUT pulling first
         # (Simulate a race: B has the item, edits it, pushes directly)
-        item_path = clone_b_path / "project" / "e2e-conflict-001.md"
         import frontmatter as _fm
+        item_path = item_path_c
         post = _fm.load(str(item_path))
         post.content = "conflicting content from host B/C"
         post["updated_at"] = "2024-01-02T00:00:00+00:00"
@@ -281,7 +297,7 @@ class TestConflictDetection:
 
         # A edits the same item AFTER C pushed — A has a diverging local commit
         # Directly edit A's local file to simulate a diverging edit without auto-push
-        item_path_a = Path(vaultA._vault) / "project" / "e2e-conflict-001.md"
+        item_path_a = _find_item_path(Path(vaultA._vault), "e2e-conflict-001")
         post_a = _fm.load(str(item_path_a))
         post_a.content = "diverging content from host A (to cause conflict)"
         post_a["updated_at"] = "2024-01-02T00:01:00+00:00"
@@ -407,13 +423,14 @@ class TestBackwardCompat:
         assert backend._sync.enabled is False
 
         # This should work normally without a git repo
-        backend.write(
+        path = backend.write(
             layer="session",
             item_id="nosync-001",
             content="no sync content",
             metadata={},
         )
-        assert (vault / "session" / "nosync-001.md").exists()
+        assert path.exists(), "write() must create the vault file"
+        assert path.parent == vault / "session", "File should be in session/ layer"
         # No .git directory should be created
         assert not (vault / ".git").exists()
 

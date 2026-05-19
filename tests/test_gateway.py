@@ -791,13 +791,13 @@ class TestCaptureDedup:
         )
 
     def test_dedup_registry_is_per_instance(self, repo_root):
-        """Two separate MemoryGateway instances must NOT share the dedup registry.
+        """Cross-process dedup: second instance detects the stored item and
+        returns its existing id (non-None) with last_capture_was_duplicate=True.
 
-        The dedup registry is an in-memory per-instance dict.  A new gateway
-        instance (new process, new hook invocation) starts with an empty
-        registry and captures the item again — this is correct behaviour,
-        because the Stop hook is designed to fire per-turn, and each turn
-        spawns a fresh mnemos process.
+        The in-memory dedup registry is per-instance and does not transfer, but
+        the cross-process persistent dedup scan (Issues #49/#50) means the
+        second gateway instance returns the already-stored item_id rather than
+        writing a duplicate.
         """
         from core.gateway import MemoryGateway
         content = "Shared content across two gateway instances"
@@ -806,13 +806,276 @@ class TestCaptureDedup:
         id1 = gw1.capture(content=content, layer="session")
         assert id1 is not None
 
-        # Second instance must NOT see gw1's dedup registry
+        # Second instance detects the stored item via cross-process scan
         gw2 = MemoryGateway(repo_root=repo_root)
         id2 = gw2.capture(content=content, layer="session")
-        # gw2 may write a duplicate file but must not see None from its own
-        # fresh dedup registry — the on-write gateway-level dedup is
-        # process-scoped, not storage-scoped (storage dedup is handled by bg.py)
+        # Cross-process dedup returns the existing id (not None, not a new UUID)
         assert id2 is not None, (
-            "A fresh gateway instance must not inherit the dedup registry of "
-            "another instance — each process starts clean"
+            "Cross-process dedup must return the existing item_id, not None"
+        )
+        assert id2 == id1, (
+            "Cross-process dedup must return the SAME item_id as the first capture"
+        )
+        assert gw2.last_capture_was_duplicate is True, (
+            "last_capture_was_duplicate must be True when a cross-process "
+            "duplicate is detected"
+        )
+
+
+class TestCrossProcessCaptureDedup:
+    """Tests for cross-process persistent deduplication (Issues #49 and #50).
+
+    Background
+    ----------
+    The in-memory ``_capture_dedup`` registry is reset each time a new
+    MemoryGateway instance is created.  A second invocation of
+    ``mnemos capture`` therefore starts with an empty registry and — without
+    further guards — would write a duplicate memory entry for the same content.
+
+    Fix contract
+    ------------
+    ``gateway.capture()`` now scans persistent storage (all layers) via
+    ``_find_existing_by_hash()`` before writing.  When an item with the same
+    SHA-256 content hash exists anywhere in the store, the method:
+
+    - Returns the *existing* item_id (not None, not a fresh UUID).
+    - Sets ``self.last_capture_was_duplicate = True`` so the CLI can print
+      ``(existing) <uuid>`` instead of the normal capture notice.
+    - Warms the in-process cache so subsequent same-process calls remain
+      fast (no second scan).
+
+    The ``content_hash`` field is stored in item metadata on every new write
+    so future scans can use it for fast equality comparison.
+    """
+
+    @pytest.fixture
+    def repo_root(self, tmp_path):
+        """Minimal repo structure required by MemoryGateway."""
+        wiki = tmp_path / "wiki"
+        for d in ["global", "projects", "entities", "claims", "topics"]:
+            (wiki / d).mkdir(parents=True)
+        agent = tmp_path / ".agent"
+        for d in ["runs", "sessions", "state", "reports", "tools"]:
+            (agent / d).mkdir(parents=True)
+        (agent / "workflows" / "hooks").mkdir(parents=True)
+        import yaml
+        policy = {
+            "layers": {
+                "ephemeral": {
+                    "path_template": ".agent/runs/{run_id}/scratch/",
+                    "promotes_to": "working",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "working": {
+                    "path_template": ".agent/runs/{run_id}/working/",
+                    "promotes_to": "session",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "session": {
+                    "path_template": ".agent/sessions/{session_id}/",
+                    "promotes_to": "project",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "project": {
+                    "path_template": "wiki/projects/",
+                    "promotes_to": "global",
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+                "global": {
+                    "path_template": "wiki/global/",
+                    "promotes_to": None,
+                    "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0},
+                },
+            },
+            "forget": {"requires_archived": True},
+            "archive": {"allowed_stages": ["stored", "retrieved", "used", "validated"]},
+        }
+        (wiki / "policy.yaml").write_text(yaml.dump(policy))
+        (wiki / "log.md").write_text("# Log\n")
+        (wiki / "log.jsonl").write_text("")
+        return tmp_path
+
+    def _make_gateway(self, repo_root):
+        from core.gateway import MemoryGateway
+        return MemoryGateway(repo_root=str(repo_root))
+
+    # ------------------------------------------------------------------
+    # Test 1: cross-instance returns existing id
+    # ------------------------------------------------------------------
+
+    def test_cross_instance_returns_existing_id(self, repo_root):
+        """Second gateway instance (simulating a new process) must return the
+        existing item_id and NOT write a duplicate file.
+        """
+        content = "Cross-process dedup: architecture decision recorded"
+        gw1 = self._make_gateway(repo_root)
+        id1 = gw1.capture(content=content, layer="project")
+        assert id1 is not None, "First capture must succeed"
+        assert gw1.last_capture_was_duplicate is False, (
+            "last_capture_was_duplicate must be False after a fresh write"
+        )
+
+        gw2 = self._make_gateway(repo_root)
+        id2 = gw2.capture(content=content, layer="project")
+
+        assert id2 is not None, "Cross-process duplicate must return an id, not None"
+        assert id2 == id1, (
+            "Cross-process duplicate must return the SAME item_id as the original, "
+            f"got id1={id1!r} id2={id2!r}"
+        )
+        assert gw2.last_capture_was_duplicate is True, (
+            "last_capture_was_duplicate must be True on cross-process duplicate"
+        )
+
+        # Verify no new file was written — still exactly one .md file
+        project_dir = repo_root / "wiki" / "projects"
+        md_files = list(project_dir.glob("*.md"))
+        assert len(md_files) == 1, (
+            f"Expected exactly 1 .md file in project layer, found {len(md_files)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 2: cross-layer dedup across processes
+    # ------------------------------------------------------------------
+
+    def test_cross_layer_dedup_across_processes(self, repo_root):
+        """Content written to 'session' by gw1 is detected as a duplicate by
+        gw2 even when gw2 targets 'global' — the scan checks ALL layers.
+        """
+        content = "Global insight that was first captured in session layer"
+        gw1 = self._make_gateway(repo_root)
+        id1 = gw1.capture(content=content, layer="session")
+        assert id1 is not None
+
+        # New process, different target layer — cross-layer cross-process scan
+        gw2 = self._make_gateway(repo_root)
+        id2 = gw2.capture(content=content, layer="global")
+
+        assert id2 is not None, "Cross-layer cross-process duplicate must return an id"
+        assert id2 == id1, (
+            "Cross-layer cross-process scan must return the original item_id"
+        )
+        assert gw2.last_capture_was_duplicate is True, (
+            "last_capture_was_duplicate must be True on cross-layer cross-process duplicate"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 3: content_hash stored in metadata
+    # ------------------------------------------------------------------
+
+    def test_content_hash_stored_in_metadata(self, repo_root):
+        """The 'content_hash' field must be present in the item's YAML front-matter
+        after a successful capture so future cross-process scans can use it.
+        """
+        import frontmatter as fm
+        content = "content hash metadata storage test"
+        gw = self._make_gateway(repo_root)
+        item_id = gw.capture(content=content, layer="global")
+        assert item_id is not None
+
+        # Locate the written file
+        global_dir = repo_root / "wiki" / "global"
+        md_files = list(global_dir.glob("*.md"))
+        assert len(md_files) == 1, "Expected exactly one .md file"
+
+        post = fm.load(str(md_files[0]))
+        assert "content_hash" in post.metadata, (
+            "content_hash must be stored in item YAML front-matter"
+        )
+        # Verify the hash value is correct
+        from core.gateway import _capture_content_hash
+        expected_hash = _capture_content_hash(content)
+        assert post.metadata["content_hash"] == expected_hash, (
+            f"Stored hash {post.metadata['content_hash']!r} != expected {expected_hash!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 4: normalization applies in cross-process path
+    # ------------------------------------------------------------------
+
+    def test_normalization_applies_in_cross_process(self, repo_root):
+        """Content written with extra whitespace by gw1 must be found as a
+        duplicate by gw2 when capturing the clean form — NFKC + whitespace
+        normalisation applies in the cross-process hash comparison.
+        """
+        content_with_spaces = "  architecture   decision  about   caching  "
+        content_clean = "architecture decision about caching"
+
+        gw1 = self._make_gateway(repo_root)
+        id1 = gw1.capture(content=content_with_spaces, layer="project")
+        assert id1 is not None
+
+        gw2 = self._make_gateway(repo_root)
+        id2 = gw2.capture(content=content_clean, layer="project")
+
+        assert id2 is not None, "Normalised duplicate must return an id"
+        assert id2 == id1, (
+            "Normalised duplicate must match the original item_id — "
+            f"id1={id1!r} id2={id2!r}"
+        )
+        assert gw2.last_capture_was_duplicate is True
+
+    # ------------------------------------------------------------------
+    # Test 5: last_capture_was_duplicate flag lifecycle
+    # ------------------------------------------------------------------
+
+    def test_last_capture_was_duplicate_flag_lifecycle(self, repo_root):
+        """Flag must start False, be True on duplicate, then reset to False on
+        the next fresh capture call.
+        """
+        gw = self._make_gateway(repo_root)
+
+        # Initial state
+        assert gw.last_capture_was_duplicate is False
+
+        # First capture — new write
+        id1 = gw.capture(content="First unique insight", layer="global")
+        assert id1 is not None
+        assert gw.last_capture_was_duplicate is False, (
+            "Flag must be False after a fresh new write"
+        )
+
+        # New gateway simulates a new process
+        gw2 = self._make_gateway(repo_root)
+        assert gw2.last_capture_was_duplicate is False, (
+            "Flag must start as False on a new gateway instance"
+        )
+
+        id2 = gw2.capture(content="First unique insight", layer="global")
+        assert gw2.last_capture_was_duplicate is True, (
+            "Flag must be True after cross-process duplicate detected"
+        )
+
+        # Next capture with DIFFERENT content resets the flag
+        id3 = gw2.capture(content="Second completely different insight", layer="global")
+        assert id3 is not None
+        assert gw2.last_capture_was_duplicate is False, (
+            "Flag must be reset to False after a fresh new write"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 6: in-process cache warmed after cross-process detection
+    # ------------------------------------------------------------------
+
+    def test_in_process_cache_warmed_after_cross_process_detection(self, repo_root):
+        """After a cross-process duplicate is detected, subsequent same-process
+        calls must use the warmed in-process cache (return None, not the id).
+        """
+        content = "Cache warming test content"
+        gw1 = self._make_gateway(repo_root)
+        id1 = gw1.capture(content=content, layer="global")
+        assert id1 is not None
+
+        gw2 = self._make_gateway(repo_root)
+        # First call: cross-process scan fires, returns existing id
+        id2 = gw2.capture(content=content, layer="global")
+        assert id2 == id1
+        assert gw2.last_capture_was_duplicate is True
+
+        # Second call on the SAME gateway instance: in-process cache is now
+        # warmed — returns None (silent no-op, existing in-process contract)
+        id3 = gw2.capture(content=content, layer="global")
+        assert id3 is None, (
+            "After cross-process dedup warms the in-process cache, "
+            "subsequent same-process calls must return None (silent no-op)"
         )
