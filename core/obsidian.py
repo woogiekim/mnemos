@@ -226,10 +226,10 @@ class ObsidianBackend:
             self._last_pull_ts = now
             self._save_last_pull_ts(now)
         except _git.GitCommandError as exc:
-            # pull_rebase failed — surface a conflict
+            # pull_rebase (fetch+rebase) failed — surface a conflict
             self._write_conflict_artefacts(str(exc))
             raise SyncConflictError(
-                f"git pull --rebase failed: {exc}",
+                f"git pull (fetch+rebase) failed: {exc}",
             ) from exc
 
     def _write_conflict_artefacts(self, error_detail: str) -> None:
@@ -242,7 +242,7 @@ class ObsidianBackend:
         lines = [
             "# mnemos Sync Conflict",
             "",
-            "_A ``git pull --rebase`` conflict was detected._",
+            "_A ``git fetch`` + ``git rebase`` conflict was detected._",
             "",
             "## What Happened",
             "",
@@ -357,7 +357,7 @@ class ObsidianBackend:
             self._save_last_pull_ts(now)
         except _git.GitCommandError as exc:
             self._write_conflict_artefacts(str(exc))
-            raise SyncConflictError(f"git pull --rebase failed: {exc}") from exc
+            raise SyncConflictError(f"git pull (fetch+rebase) failed: {exc}") from exc
 
     def sync_push(self) -> None:
         """Manual push to the configured remote/branch.
