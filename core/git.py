@@ -10,12 +10,13 @@ Public API
 - :func:`set_remote` — add or update a named remote URL
 - :func:`remote_exists` — check whether a named remote is present
 - :func:`current_branch` — return the current branch name
-- :func:`pull_rebase` — pull with rebase (and optional autostash)
+- :func:`pull_rebase` — pull with rebase (and optional autostash) via fetch+rebase
 - :func:`add` — stage files for commit
 - :func:`commit` — create a commit (idempotent — no-ops on clean tree)
 - :func:`push` — push to a remote branch
-- :func:`fetch` — fetch from a remote
+- :func:`fetch` — fetch from a remote (optional single-branch mode)
 - :func:`set_upstream` — set the upstream tracking branch
+- :func:`rebase_onto` — rebase current branch onto an explicit ref
 - :func:`rebase_continue` — continue an in-progress rebase
 - :func:`status` — return ahead/behind/dirty information as a dict
 """
@@ -145,6 +146,17 @@ def pull_rebase(
 ) -> None:
     """Pull from *remote*/*branch* with rebase.
 
+    Implementation uses a two-step ``fetch`` + ``rebase`` approach instead of
+    ``git pull --rebase <remote> <branch>``.  The single-argument ``git pull``
+    is unreliable when the repo has multiple remote-tracking refs because git
+    writes **all** fetched refs into ``FETCH_HEAD``; a subsequent
+    ``git pull --rebase`` then fails with
+    ``fatal: Cannot rebase onto multiple branches``.
+
+    By fetching only the single target ref and rebasing onto the explicit
+    ``<remote>/<branch>`` tracking ref we avoid the ambiguous-``FETCH_HEAD``
+    problem entirely.
+
     Parameters
     ----------
     path:
@@ -154,21 +166,19 @@ def pull_rebase(
     branch:
         Remote branch name (e.g. ``"main"``).
     autostash:
-        When ``True``, pass ``--autostash`` so local dirty changes are
-        stashed and re-applied around the rebase automatically.
+        When ``True``, stash any local dirty changes before the rebase and
+        re-apply them afterwards (equivalent to ``--autostash``).
 
     Raises
     ------
     GitCommandError
         On any non-zero exit (including unresolved merge conflicts).
     """
-    cmd = ["pull", "--rebase"]
-    if autostash:
-        cmd.append("--autostash")
-    cmd += [remote, branch]
-    rc, _, stderr = _git(*cmd, cwd=path)
-    if rc != 0:
-        raise GitCommandError(rc, stderr, ["git"] + cmd)
+    # Step 1: fetch exactly one ref so FETCH_HEAD contains a single entry.
+    fetch(path, remote, branch=branch)
+
+    # Step 2: rebase onto the explicit remote-tracking ref.
+    rebase_onto(path, f"{remote}/{branch}", autostash=autostash)
 
 
 def add(path: str | Path, files: Sequence[str]) -> None:
@@ -243,17 +253,37 @@ def push(path: str | Path, remote: str, branch: str) -> None:
         raise GitCommandError(rc, stderr, ["git", "push", remote, branch])
 
 
-def fetch(path: str | Path, remote: str) -> None:
-    """Fetch from *remote*.
+def fetch(path: str | Path, remote: str, *, branch: str | None = None) -> None:
+    """Fetch from *remote*, optionally limiting to a single *branch* ref.
+
+    When *branch* is given (recommended for sync operations), only that ref is
+    fetched — ``FETCH_HEAD`` will contain exactly one entry.  Omitting *branch*
+    fetches all refs for the remote, which may write multiple entries to
+    ``FETCH_HEAD`` and cause ``git pull --rebase`` to fail with
+    ``fatal: Cannot rebase onto multiple branches``.
+
+    Parameters
+    ----------
+    path:
+        Working-tree root.
+    remote:
+        Remote name (e.g. ``"origin"``).
+    branch:
+        Optional branch name to fetch (e.g. ``"main"``).  When provided, runs
+        ``git fetch <remote> <branch>`` so only one ref lands in ``FETCH_HEAD``.
 
     Raises
     ------
     GitCommandError
         On non-zero exit from git fetch.
     """
-    rc, _, stderr = _git("fetch", remote, cwd=path)
+    if branch:
+        cmd = ["fetch", remote, branch]
+    else:
+        cmd = ["fetch", remote]
+    rc, _, stderr = _git(*cmd, cwd=path)
     if rc != 0:
-        raise GitCommandError(rc, stderr, ["git", "fetch", remote])
+        raise GitCommandError(rc, stderr, ["git"] + cmd)
 
 
 def set_upstream(path: str | Path, remote: str, branch: str) -> None:
@@ -271,6 +301,39 @@ def set_upstream(path: str | Path, remote: str, branch: str) -> None:
         raise GitCommandError(
             rc, stderr, ["git", "branch", f"--set-upstream-to={remote}/{branch}"]
         )
+
+
+def rebase_onto(
+    path: str | Path,
+    upstream: str,
+    autostash: bool = False,
+) -> None:
+    """Rebase the current branch onto *upstream*.
+
+    Parameters
+    ----------
+    path:
+        Working-tree root.
+    upstream:
+        The commit or ref to rebase onto (e.g. ``"origin/main"``).  Using an
+        explicit remote-tracking ref (rather than ``FETCH_HEAD``) is safe even
+        when ``FETCH_HEAD`` contains multiple entries from a previous broad fetch.
+    autostash:
+        When ``True``, stash local uncommitted changes before the rebase and
+        re-apply them afterwards.
+
+    Raises
+    ------
+    GitCommandError
+        On non-zero exit (including unresolved rebase conflicts).
+    """
+    cmd = ["rebase"]
+    if autostash:
+        cmd.append("--autostash")
+    cmd.append(upstream)
+    rc, _, stderr = _git(*cmd, cwd=path)
+    if rc != 0:
+        raise GitCommandError(rc, stderr, ["git"] + cmd)
 
 
 def rebase_continue(path: str | Path) -> None:

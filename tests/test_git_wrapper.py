@@ -19,9 +19,11 @@ from core.git import (
     add,
     commit,
     current_branch,
+    fetch,
     init,
     pull_rebase,
     push,
+    rebase_onto,
     remote_exists,
     set_remote,
     status,
@@ -324,6 +326,134 @@ class TestPushPull:
         # Pull with autostash — must succeed even though B is dirty
         pull_rebase(repoB, "origin", "main", autostash=True)
         assert (repoB / "alpha.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# fetch / rebase_onto
+# ---------------------------------------------------------------------------
+
+
+class TestFetchRebaseOnto:
+    def test_fetch_single_branch_writes_one_fetch_head_entry(self, tmp_path):
+        """Fetching a single branch must write exactly one line to FETCH_HEAD.
+
+        This is the regression test for the ``fatal: Cannot rebase onto
+        multiple branches`` bug.  The original ``git pull --rebase origin main``
+        could leave multiple FETCH_HEAD entries when the remote had several refs
+        (e.g. other branches), causing the next ``git pull --rebase`` to fail.
+
+        With ``git fetch origin main`` (single-ref fetch) only one entry is
+        written, eliminating the ambiguity.
+        """
+        bare = _setup_bare(tmp_path / "bare.git")
+        # Add a second branch on the bare remote so it has >1 ref
+        seed2 = tmp_path / "_seed2"
+        _clone(bare, seed2)
+        (seed2 / "other.md").write_text("other branch content")
+        _git("checkout", "-b", "other-branch", cwd=seed2)
+        _git("add", ".", cwd=seed2)
+        _git("commit", "-m", "add other branch", cwd=seed2)
+        _git("push", "origin", "other-branch", cwd=seed2)
+
+        repo = _clone(bare, tmp_path / "repo")
+        # Single-branch fetch: FETCH_HEAD must have exactly one entry
+        fetch(repo, "origin", branch="main")
+        fetch_head = (repo / ".git" / "FETCH_HEAD").read_text()
+        entries = [line for line in fetch_head.splitlines() if line.strip()]
+        assert len(entries) == 1, (
+            f"Expected 1 FETCH_HEAD entry after single-branch fetch, got {len(entries)}: "
+            f"{fetch_head!r}"
+        )
+
+    def test_pull_rebase_succeeds_after_multi_branch_remote(self, tmp_path):
+        """pull_rebase must NOT fail when the remote has multiple branches.
+
+        Regression test: the old ``git pull --rebase origin main`` wrote all
+        remote refs into FETCH_HEAD on the first invocation.  When called a
+        second time the rebase step failed with
+        ``fatal: Cannot rebase onto multiple branches``.
+
+        The new fetch+rebase implementation fetches only ``main``, so the
+        second call succeeds regardless of how many branches exist on the remote.
+        """
+        bare = _setup_bare(tmp_path / "bare.git")
+
+        # Add extra branches to simulate a real-world remote with many refs
+        seed_extra = tmp_path / "_seed_extra"
+        _clone(bare, seed_extra)
+        for branch_name in ("dev", "feature/x", "feature/y"):
+            _git("checkout", "-b", branch_name, cwd=seed_extra)
+            (seed_extra / f"{branch_name.replace('/', '-')}.md").write_text(branch_name)
+            _git("add", ".", cwd=seed_extra)
+            _git("commit", "-m", f"add {branch_name}", cwd=seed_extra)
+            _git("push", "origin", branch_name, cwd=seed_extra)
+        _git("checkout", "main", cwd=seed_extra)
+
+        repoA = _clone(bare, tmp_path / "A")
+        repoB = _clone(bare, tmp_path / "B")
+
+        # First pull_rebase — fetches and rebases successfully
+        pull_rebase(repoB, "origin", "main")
+
+        # Push a new commit from A so B is behind
+        (repoA / "new.md").write_text("from A")
+        add(repoA, ["new.md"])
+        commit(repoA, "add new from A")
+        push(repoA, "origin", "main")
+
+        # Second pull_rebase — must NOT raise even though FETCH_HEAD was set
+        # by the first pull_rebase call (the old code left multiple entries here)
+        pull_rebase(repoB, "origin", "main")
+        assert (repoB / "new.md").exists()
+
+    def test_rebase_onto_explicit_ref(self, tmp_path):
+        """rebase_onto with an explicit remote-tracking ref succeeds."""
+        bare = _setup_bare(tmp_path / "bare.git")
+        repoA = _clone(bare, tmp_path / "A")
+        repoB = _clone(bare, tmp_path / "B")
+
+        # A pushes a new commit
+        (repoA / "rebase_target.md").write_text("target")
+        add(repoA, ["rebase_target.md"])
+        commit(repoA, "add rebase_target")
+        push(repoA, "origin", "main")
+
+        # B fetches (so origin/main is updated) then rebases onto origin/main
+        fetch(repoB, "origin", branch="main")
+        rebase_onto(repoB, "origin/main")
+        assert (repoB / "rebase_target.md").exists()
+
+    def test_fetch_without_branch_fetches_all_refs(self, tmp_path):
+        """Calling fetch without branch= fetches all refs (broad fetch)."""
+        bare = _setup_bare(tmp_path / "bare.git")
+
+        # Push a second branch to the remote
+        seed2 = tmp_path / "_seed_b"
+        _clone(bare, seed2)
+        _git("checkout", "-b", "extra", cwd=seed2)
+        (seed2 / "extra.md").write_text("extra")
+        _git("add", ".", cwd=seed2)
+        _git("commit", "-m", "add extra", cwd=seed2)
+        _git("push", "origin", "extra", cwd=seed2)
+
+        repo = _clone(bare, tmp_path / "repo")
+        # Broad fetch — must not raise; FETCH_HEAD may have >1 entry (OK here,
+        # we just verify the call completes successfully)
+        fetch(repo, "origin")  # no branch= argument
+        # The remote-tracking ref for extra must be present after broad fetch
+        rc, out, _ = subprocess.run(
+            ["git", "branch", "-r"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+        ).returncode, *[None, None]
+        result = subprocess.run(
+            ["git", "branch", "-r"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+        )
+        assert "origin/extra" in result.stdout
 
 
 # ---------------------------------------------------------------------------
