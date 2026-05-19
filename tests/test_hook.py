@@ -26,6 +26,7 @@ from core.adapters.claude import (
 # ---------------------------------------------------------------------------
 
 HOOK_SCRIPT = Path(__file__).parent.parent / "hooks" / "UserPromptSubmit.sh"
+STOP_HOOK_SCRIPT = Path(__file__).parent.parent / "hooks" / "Stop.sh"
 
 
 def _run_hook(prompt: str, session_id: str = "test-session-123",
@@ -61,6 +62,50 @@ def _run_hook(prompt: str, session_id: str = "test-session-123",
     return result.returncode, combined
 
 
+def _run_stop_hook(
+    transcript: list[dict],
+    tmp_path: Path,
+    session_id: str = "test-session-123",
+) -> tuple[int, str, list[list[str]]]:
+    """Run the Stop hook with a fake mnemos binary and return captured argv."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    calls_path = tmp_path / "mnemos_calls.jsonl"
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(calls_path)!r}).open('a', encoding='utf-8').write("
+        "json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
+
+    payload = json.dumps({
+        "session_id": session_id,
+        "transcript_path": str(transcript_path),
+        "hook_event_name": "Stop",
+    })
+    env = os.environ.copy()
+    env["MNEMOS_REPO_ROOT"] = str(tmp_path)
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        ["bash", str(STOP_HOOK_SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    calls = []
+    if calls_path.exists():
+        calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    return result.returncode, result.stdout + result.stderr, calls
+
+
 # ---------------------------------------------------------------------------
 # Existence and permissions
 # ---------------------------------------------------------------------------
@@ -76,6 +121,113 @@ class TestHookScriptFile:
     def test_hook_script_is_shell_script(self):
         first_line = HOOK_SCRIPT.read_text().splitlines()[0]
         assert first_line.startswith("#!"), "Hook script missing shebang line"
+
+    def test_stop_hook_script_exists(self):
+        assert STOP_HOOK_SCRIPT.exists(), f"Stop hook script not found at {STOP_HOOK_SCRIPT}"
+
+
+# ---------------------------------------------------------------------------
+# Stop hook fallback capture
+# ---------------------------------------------------------------------------
+
+class TestStopHookInsightFallback:
+    def test_fallback_captures_meaningful_assistant_summary(self, tmp_path):
+        """When no explicit marker exists, Stop captures the latest useful outcome."""
+        transcript = [
+            {
+                "role": "assistant",
+                "content": (
+                    "Implemented the transcript fallback in the Claude Stop hook. "
+                    "The hook now preserves durable conversation outcomes when "
+                    "explicit capture markers are missing, and tests cover the "
+                    "control-signal filters."
+                ),
+            }
+        ]
+
+        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+
+        assert rc == 0, output
+        assert len(calls) == 1
+        call = calls[0]
+        assert call[:2] == ["capture", "--content"]
+        assert call[3:5] == ["--quiet", "--layer"]
+        assert call[5] == "session"
+        assert "AI conversation insight:" in call[2]
+        assert "transcript fallback" in call[2]
+
+    def test_fallback_excludes_internal_pipeline_control_signals(self, tmp_path):
+        """Agent-crew control/status handoffs must not become memories."""
+        transcript = [
+            {
+                "role": "assistant",
+                "content": (
+                    "STATUS: completed\n"
+                    "TASK_ID: 20260520-065034-0\n"
+                    "TASK_DIR: /Users/example/.agent-crew/state/mnemos/tasks/20260520-065034-0\n"
+                    "PLAN:\n"
+                    "  actions: write pipeline.json and handoff.md\n"
+                    "BLOCKER: none\n"
+                    "This agent-crew task handoff should remain internal pipeline state."
+                ),
+            }
+        ]
+
+        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+
+        assert rc == 0, output
+        assert calls == []
+
+    def test_fallback_excludes_trivial_acknowledgements(self, tmp_path):
+        """One-word or low-information assistant replies are ignored."""
+        transcript = [{"role": "assistant", "content": "Done."}]
+
+        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+
+        assert rc == 0, output
+        assert calls == []
+
+    def test_fallback_sanitizes_status_lines_from_completion_summary(self, tmp_path):
+        """Useful summaries are retained without persisting STATUS tokens."""
+        transcript = [
+            {
+                "role": "assistant",
+                "content": (
+                    "STATUS: completed\n"
+                    "Changed files: hooks/Stop.sh and tests/test_hook.py.\n"
+                    "Verification: pytest tests/test_hook.py confirmed the new "
+                    "fallback captures meaningful summaries and rejects pipeline controls."
+                ),
+            }
+        ]
+
+        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+
+        assert rc == 0, output
+        assert len(calls) == 1
+        content = calls[0][2]
+        assert "STATUS:" not in content
+        assert "Changed files" in content
+        assert "fallback captures meaningful summaries" in content
+
+    def test_explicit_marker_still_takes_precedence_over_fallback(self, tmp_path):
+        """Marker protocol remains canonical when the assistant emits it."""
+        transcript = [
+            {
+                "role": "assistant",
+                "content": (
+                    "Implemented a broader summary.\n"
+                    "✻ 💾 Stop hook fallback uses conservative filtering"
+                ),
+            }
+        ]
+
+        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+
+        assert rc == 0, output
+        assert len(calls) == 1
+        assert calls[0][2] == "Stop hook fallback uses conservative filtering"
+        assert calls[0][5] == "project"
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,10 @@
 #      the feat/emoji-layer-markers-and-dedup merge):
 #        New:    ✻ 💡|💾|🧠 <brief>
 #        Legacy: ✻ 💡|💾|🧠 <brief> (session|project|global)
-#   4. For each parsed marker, call `mnemos capture` with the brief as
+#   4. If no explicit marker exists, fall back to the latest meaningful
+#      assistant completion summary / session insight, after filtering
+#      pipeline control signals, handoffs, and trivial acknowledgements.
+#   5. For each parsed insight, call `mnemos capture` with the brief as
 #      content and the mapped layer.  The gateway's on-write dedup ensures
 #      re-parsing the same turn produces exactly one persisted item.
 #
@@ -127,15 +130,16 @@ try:
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
                         texts.append(block.get("text", ""))
-    full_text = "\n".join(texts)
 except Exception:
     sys.exit(0)
 
-# Step 1: mask fenced code blocks (``` ... ```) — multi-line aware
-full_text = re.sub(r"```.*?```", "", full_text, flags=re.DOTALL)
+def mask_code(text):
+    # Step 1: mask fenced code blocks (``` ... ```) — multi-line aware
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    # Step 2: mask inline code (` ... `) — single-line
+    return re.sub(r"`[^`\n]*`", "", text)
 
-# Step 2: mask inline code (` ... `) — single-line
-full_text = re.sub(r"`[^`\n]*`", "", full_text)
+full_text = mask_code("\n".join(texts))
 
 # Step 3: extract ✻ emoji markers
 # Emoji → layer mapping
@@ -150,6 +154,7 @@ MARKER_RE = re.compile(
 )
 
 seen = set()
+marker_count = 0
 for m in MARKER_RE.finditer(full_text):
     emoji = m.group(1)
     brief = m.group(2).strip()
@@ -160,6 +165,111 @@ for m in MARKER_RE.finditer(full_text):
     seen.add(key)
     # Print layer and brief tab-separated so bash can read them
     print(f"{layer}\t{brief}")
+    marker_count += 1
+
+if marker_count:
+    sys.exit(0)
+
+# Fallback: preserve meaningful assistant outcomes even when the assistant did
+# not follow the explicit marker protocol.  The filter is intentionally
+# conservative because Stop fires every turn and must not persist orchestration
+# internals or one-word acknowledgements.
+CONTROL_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"\[crew\]\b|"
+    r"STATUS\s*:|PLAN\s*:|BLOCKER\s*:|REVIEW\s*:|ROUTE\s*:|TASK\s*:|"
+    r"TASK_ID\s*:|TASK_DIR\s*:|PROJECT_ROOT\s*:|BRANCH\s*:|"
+    r"EXECUTION_MODE\s*:|SESSION_ID\s*:|REQUIREMENTS(?:_PATH)?\s*:|"
+    r"HANDOFF(?:_PATH)?\s*:|QUALITY_RULE_PATH\s*:|PIPELINE_PATH\s*:|"
+    r"AGENT_CREW_HOME\s*:|HOST_TASK_ID\s*:|PROGRESS(?:_LOG)?\s*:|"
+    r"<\/?mnemos-[^>]+>|<\/?mnemos-context[^>]*>|<\/?mnemos-capture-protocol>|"
+    r"\{TASK_DIR\}|\{PROJECT_ROOT\}|\{BRANCH\}"
+    r")",
+    re.IGNORECASE,
+)
+HANDOFF_HINT_RE = re.compile(
+    r"\b(?:handoff|downstream agent|stage agent|supervisor pipeline|"
+    r"agent-crew task|pipeline\.json|approval\.md|progress\.log)\b",
+    re.IGNORECASE,
+)
+TRIVIAL_RE = re.compile(
+    r"^(?:yes|yep|yeah|no|nope|ok|okay|sure|done|thanks|thank you|"
+    r"completed|continue|proceed|go|좋아요|네|아니요|완료|진행)$",
+    re.IGNORECASE,
+)
+
+def clean_lines(text):
+    lines = []
+    dropped = 0
+    for raw in mask_code(text).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if CONTROL_LINE_RE.search(line):
+            dropped += 1
+            continue
+        if line.startswith(("<!--", "-->", "|---", "---")):
+            dropped += 1
+            continue
+        if re.fullmatch(r"[\-*_#\s]+", line):
+            dropped += 1
+            continue
+        # Drop markdown table rows and list entries that are just file paths or
+        # state coordinates; they are usually handoff/control material.
+        if line.startswith("|") and line.endswith("|"):
+            dropped += 1
+            continue
+        if re.fullmatch(r"[-*]\s+(?:/|~|\$|\{).+", line):
+            dropped += 1
+            continue
+        lines.append(line)
+    return lines, dropped
+
+def is_trivial(text):
+    folded = re.sub(r"\s+", " ", text).strip(" .!?,:;\"'`").lower()
+    if not folded:
+        return True
+    if TRIVIAL_RE.fullmatch(folded):
+        return True
+    words = re.findall(r"[A-Za-z0-9가-힣_/-]+", folded)
+    return len(folded) < 50 or len(words) < 8
+
+def looks_internal(original, lines, dropped):
+    if not lines:
+        return True
+    control_density = dropped / max(dropped + len(lines), 1)
+    if control_density >= 0.45 and HANDOFF_HINT_RE.search(original):
+        return True
+    if HANDOFF_HINT_RE.search(original) and any(
+        token in original for token in ("TASK_ID:", "TASK_DIR:", "STATUS:", "PLAN:", "BLOCKER:")
+    ):
+        return True
+    return False
+
+def summarize(lines):
+    kept = []
+    for line in lines:
+        # Keep headings only when followed by detail; standalone headings are
+        # not useful memory content.
+        if re.fullmatch(r"#{1,6}\s+\S.{0,60}", line):
+            continue
+        kept.append(re.sub(r"\s+", " ", line))
+        if len(" ".join(kept)) >= 360 or len(kept) >= 5:
+            break
+    summary = " ".join(kept).strip()
+    if len(summary) > 500:
+        summary = summary[:497].rstrip() + "..."
+    return summary
+
+for text in reversed(texts):
+    lines, dropped = clean_lines(text)
+    if looks_internal(text, lines, dropped):
+        continue
+    summary = summarize(lines)
+    if is_trivial(summary):
+        continue
+    print(f"session\tAI conversation insight: {summary}")
+    break
 PYEOF
 )"
 
