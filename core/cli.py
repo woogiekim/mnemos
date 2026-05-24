@@ -86,6 +86,11 @@ def _truncate_content(s: str, width: int, full: bool = False) -> str:
     return s[:width] + "..."
 
 
+def _echo_json(payload: object) -> None:
+    """Emit stable UTF-8 JSON for machine consumers."""
+    click.echo(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+
+
 @click.group()
 def cli() -> None:
     """mnemos — LLM Wiki Memory OS CLI."""
@@ -102,6 +107,7 @@ def cli() -> None:
 @click.option("--session-id", default=None, help="Session ID for session layer.")
 @click.option("--no-color", "no_color", is_flag=True, default=False, help="Disable ANSI color output.")
 @click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress capture notification output.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 @click.option(
     "--no-classify",
     "no_classify",
@@ -120,6 +126,7 @@ def memory_capture(
     session_id: str | None,
     no_color: bool,
     quiet: bool,
+    as_json: bool,
     no_classify: bool,
 ) -> None:
     """Capture a new memory item into the target layer (default: ephemeral).
@@ -154,6 +161,18 @@ def memory_capture(
             no_classify=no_classify,
         )
         effective_layer = layer or "ephemeral"
+        if as_json:
+            status = "duplicate" if captured_id is None or gw.last_capture_was_duplicate else "captured"
+            payload = {"status": status, "id": captured_id, "layer": effective_layer}
+            if captured_id is not None:
+                try:
+                    from core.provider import memory_item_payload
+                    payload["item"] = memory_item_payload(gw._store.read(captured_id))
+                except Exception:
+                    payload["item"] = None
+            _echo_json(payload)
+            return
+
         if captured_id is None:
             # In-process duplicate: same gateway instance saw this content before
             # (e.g. Stop hook firing multiple times per session).  Silent no-op.
@@ -173,8 +192,15 @@ def memory_capture(
                 preview = content[:60]
                 suffix = "..." if len(content) > 60 else ""
                 click.echo(f"captured: {captured_id}")
-                click.echo(capture_notice(f"{preview}{suffix}", effective_layer,
-                                          item_id=captured_id, no_color=no_color))
+                click.echo(
+                    capture_notice(
+                        f"{preview}{suffix}",
+                        effective_layer,
+                        item_id=captured_id,
+                        no_color=no_color,
+                    ),
+                    color=not no_color,
+                )
             else:
                 # --quiet: suppress everything (reserved for scripts / migrate flows).
                 # No captured: line, no notification. Used internally by hooks that
@@ -335,6 +361,8 @@ def memory_list(layers: str | None, limit: int | None, full: bool, width: int) -
     help="Comma-separated list of layers to search (also: --layer).",
 )
 @click.option("--limit", default=20, type=int, help="Maximum results.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+@click.option("--fast", "fast", is_flag=True, default=False, help="Use the stable fast-search provider path.")
 @click.option("--full", "full", is_flag=True, default=False, help="Show full content without truncation.")
 @click.option("--width", "width", default=80, type=int, help="Preview width in characters (default: 80).")
 @click.option(
@@ -343,7 +371,7 @@ def memory_list(layers: str | None, limit: int | None, full: bool, width: int) -
     multiple=True,
     help="Filter results to items with this tag (repeatable; AND logic).",
 )
-def memory_search(query: str, layers: str | None, limit: int, full: bool, width: int, tags: tuple) -> None:
+def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fast: bool, full: bool, width: int, tags: tuple) -> None:
     """Search across memory layers.
 
     \b
@@ -357,6 +385,17 @@ def memory_search(query: str, layers: str | None, limit: int, full: bool, width:
     layer_list = [l.strip() for l in layers.split(",")] if layers else None
     tag_list = list(tags) if tags else None
     results = gw.search(query=query, layers=layer_list, limit=limit, tags=tag_list)
+    if as_json:
+        from core.provider import search_result_payload
+        _echo_json({
+            "query": query,
+            "count": len(results),
+            "mode": "fast" if fast else "standard",
+            "partial_failure": False,
+            "results": [search_result_payload(r) for r in results],
+        })
+        return
+
     if not results:
         click.echo("no results found")
     else:
@@ -368,12 +407,17 @@ def memory_search(query: str, layers: str | None, limit: int, full: bool, width:
 
 @cli.command("read")
 @click.argument("item_id")
-def memory_read(item_id: str) -> None:
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_read(item_id: str, as_json: bool) -> None:
     """Read a specific memory item by ID or path."""
     gw = _get_gateway()
     try:
         item = gw.read(item_id=item_id)
-        click.echo(json.dumps(item, default=str, indent=2))
+        if as_json:
+            from core.provider import memory_item_payload
+            _echo_json(memory_item_payload(item))
+        else:
+            _echo_json(item)
     except FileNotFoundError:
         click.echo(f"error: item '{item_id}' not found", err=True)
         sys.exit(1)
@@ -463,11 +507,14 @@ def memory_promote(
             # Emit the promotion notice directly (mirrors how `capture` emits its notice).
             # The event bus also fires a post-promote event for consolidate/bg-check paths,
             # but the promote CLI command owns its notice output independently.
-            click.echo(promote_notice(
-                item_id=new_id,
-                target_layer=effective_target or "?",
-                no_color=no_color,
-            ))
+            click.echo(
+                promote_notice(
+                    item_id=new_id,
+                    target_layer=effective_target or "?",
+                    no_color=no_color,
+                ),
+                color=not no_color,
+            )
     except PolicyViolationError as exc:
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)
@@ -613,6 +660,33 @@ def install_cmd(path: str) -> None:
     from core.install import install
     install(Path(path))
     click.echo(f"mnemos installed at {path}")
+
+
+@cli.command("capabilities")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output machine-readable JSON.")
+def capabilities_cmd(as_json: bool) -> None:
+    """Show stable provider capability metadata."""
+    from core.provider import capabilities_payload
+
+    payload = capabilities_payload()
+    if as_json:
+        _echo_json(payload)
+        return
+    for name, value in payload["capabilities"].items():
+        click.echo(f"{name}: {value}")
+
+
+@cli.command("version")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output machine-readable JSON.")
+def version_cmd(as_json: bool) -> None:
+    """Show mnemos version and provider contract metadata."""
+    from core.provider import version_payload
+
+    payload = version_payload()
+    if as_json:
+        _echo_json(payload)
+        return
+    click.echo(str(payload["version"]))
 
 
 @cli.command("update")
@@ -874,6 +948,7 @@ def memory_consolidate(dry_run: bool) -> None:
     default=False,
     help="Include score breakdowns in the output.",
 )
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 @click.option(
     "--install-daemon",
     "install_daemon",
@@ -903,6 +978,7 @@ def memory_gc(
     staleness_hours: float | None,
     limit: int | None,
     verbose: bool,
+    as_json: bool,
     install_daemon: bool,
     uninstall_daemon: bool,
 ) -> None:
@@ -957,6 +1033,15 @@ def memory_gc(
         click.echo(f"error: {exc}", err=True)
         import sys
         sys.exit(1)
+
+    if as_json:
+        _echo_json({
+            "status": "dry_run" if dry_run else "completed",
+            "archived_count": report.archived,
+            "regions_processed": report.regions_processed,
+            "items": report.archived_items,
+        })
+        return
 
     for line in report.summary_lines():
         click.echo(line)
@@ -1656,6 +1741,13 @@ def sync_continue_cmd() -> None:
          "Requires --vault-path. --from/--to are ignored when this flag is set.",
 )
 @click.option(
+    "--safe-filenames",
+    "safe_filenames",
+    is_flag=True,
+    default=False,
+    help="Rename legacy unsafe default-store filenames to canonical safe names.",
+)
+@click.option(
     "--commit",
     "do_commit",
     is_flag=True,
@@ -1668,6 +1760,7 @@ def memory_migrate(
     vault_path: str | None,
     dry_run: bool,
     uuid_to_slug: bool,
+    safe_filenames: bool,
     do_commit: bool,
 ) -> None:
     """Migrate memory items between the default backend and an Obsidian vault.
@@ -1698,6 +1791,15 @@ def memory_migrate(
     from core.layers import LAYER_STATIC_PATHS
 
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+
+    if safe_filenames:
+        store = MemoryStore(repo_root=repo_root)
+        changes = store.migrate_unsafe_filenames(dry_run=dry_run)
+        action = "would rename" if dry_run else "renamed"
+        click.echo(f"[mnemos migrate] {action} {len(changes)} unsafe filename(s)")
+        for change in changes:
+            click.echo(f"  {change['from']} -> {change['to']}")
+        return
 
     # ── UUID-to-slug mode ─────────────────────────────────────────────────
     if uuid_to_slug:

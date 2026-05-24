@@ -42,14 +42,14 @@ mnemos ingest-claude-md --project-root .
 mnemos search "capital France"
 
 # Read a specific item
-mnemos memory-read <item-id>
+mnemos read <item-id>
 
 # Promote to next layer
-mnemos memory-promote <item-id>
+mnemos promote <item-id>
 
 # Archive then forget
-mnemos memory-archive <item-id>
-mnemos memory-forget <item-id>
+mnemos archive <item-id>
+mnemos forget <item-id>
 ```
 
 ## Directory Structure
@@ -101,17 +101,56 @@ mnemos/
 |---|---|
 | `mnemos install [PATH]` | Scaffold a wiki repo structure at PATH (default: current directory) |
 | `mnemos capture` | Capture a new memory item into a target layer |
-| `mnemos memory-classify` | Classify/tag a captured item |
+| `mnemos classify` | Classify/tag a captured item |
 | `mnemos search` | Search across memory layers |
-| `mnemos memory-read` | Read a specific item by ID |
-| `mnemos memory-use` | Mark an item as "in use" |
-| `mnemos memory-update` | Update item content |
-| `mnemos memory-promote` | Promote to next (or specified) layer |
-| `mnemos memory-demote` | Demote to a lower layer |
-| `mnemos memory-archive` | Soft-delete (retain content) |
-| `mnemos memory-forget` | Hard-delete (requires archived state; use `--force` to skip prompt) |
-| `mnemos memory-log` | Manually append an entry to the audit log |
+| `mnemos read` | Read a specific item by ID |
+| `mnemos use` | Mark an item as "in use" |
+| `mnemos edit` | Update item content |
+| `mnemos promote` | Promote to next (or specified) layer |
+| `mnemos demote` | Demote to a lower layer |
+| `mnemos archive` | Soft-delete (retain content) |
+| `mnemos forget` | Hard-delete (requires archived state; use `--force` to skip prompt) |
+| `mnemos log` | Manually append or view audit log entries |
+| `mnemos capabilities --json` | Print stable machine-readable provider features |
+| `mnemos version --json` | Print version and compatibility metadata |
 | `mnemos ingest-claude-md` | Discover and ingest CLAUDE.md files into memory |
+
+## Stable Provider Contract
+
+Host integrations should use the CLI/provider contract instead of reading
+mnemos storage paths, SQLite FTS tables, or Markdown filenames directly.
+
+```bash
+mnemos capture --json --content "Architecture decision..." --layer project
+mnemos search --fast --json --limit 5 "architecture decision"
+mnemos read --json <item-id>
+mnemos gc --json --dry-run
+mnemos capabilities --json
+mnemos version --json
+```
+
+Provider JSON search results include `id`, `content`, `summary`, `layer`,
+`tags`, `provenance`, `recency`, optional `score`, and raw `metadata`.
+No-result searches return `count: 0` and `results: []`. Commands that can
+degrade return structured status fields so callers can distinguish supported,
+unsupported, and unknown features via `mnemos capabilities --json`.
+
+`mnemos search --fast --json` is the stable fast-search entry point for host
+integrations. Do not read `.agent/state/fts.db` directly; the database path,
+schema, metadata format, and rank values are internal implementation details.
+
+## Host Install Contract
+
+mnemos owns memory behavior for supported AI hosts. `mnemos install` detects
+available hosts and writes mnemos-managed marker blocks:
+
+- Claude Code: `~/.claude/CLAUDE.md` plus `~/.claude/settings.json` hooks when
+  those files exist.
+- Cursor: `~/.cursor/rules` or `~/.cursor/rules.md` when present.
+
+The managed blocks describe capture, search, read, and GC behavior independently
+of agent-crew. When a host lacks hook support or expected config files, install
+skips that host-specific surface without failing the repo scaffold.
 
 ## Memory Lifecycle
 
@@ -155,6 +194,14 @@ tags: []
 ---
 Content goes here.
 ```
+
+The front-matter `id` is the durable logical identifier. It is not a filesystem
+contract. The default filesystem store percent-encodes reserved filename
+characters, so an ID such as `rule:input-language` is stored as a safe filename
+such as `rule%3Ainput-language.md` while preserving `id: rule:input-language`
+in frontmatter. Legacy raw-ID filenames remain readable by frontmatter lookup.
+Use `mnemos migrate --safe-filenames` to rename legacy unsafe files, or add
+`--dry-run` to preview the migration.
 
 ## Configuration
 

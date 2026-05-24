@@ -166,3 +166,19 @@ def test_install_cli_default_path(tmp_path, monkeypatch):
     result = runner.invoke(cli, ["install"])
     assert result.exit_code == 0, result.output
     assert (tmp_path / "mnemos.yml").exists()
+
+
+def test_install_writes_mnemos_owned_host_block(tmp_path):
+    """Smoke test: detected Claude host receives mnemos-owned install assets."""
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    (claude_dir / "settings.json").write_text("{}\n")
+    (claude_dir / "CLAUDE.md").write_text("# Claude\n")
+
+    install(tmp_path / "repo", home=home)
+
+    claude_md = (claude_dir / "CLAUDE.md").read_text()
+    assert "<!-- mnemos-start -->" in claude_md
+    assert "mnemos search" in claude_md
+    assert "agent-crew-start" not in claude_md

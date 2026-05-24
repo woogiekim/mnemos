@@ -5,6 +5,7 @@ PR-A: lock in the new abstraction surface extracted from MemoryStore.
 from __future__ import annotations
 
 import pytest
+import frontmatter
 from pathlib import Path
 
 
@@ -83,6 +84,48 @@ class TestParseFile:
         public = store.parse_file(md_path)
         private = store._parse_file(md_path)
         assert public == private
+
+
+class TestSafeFilenames:
+    def test_write_uses_safe_filename_for_reserved_id_chars(self, tmp_path):
+        """Logical IDs with reserved filename chars are stored under safe names."""
+        store = _make_store(tmp_path)
+        path = store.write(
+            layer="global",
+            item_id='rule:bad/path?*name',
+            content="safe filename content",
+            metadata={"id": 'rule:bad/path?*name', "layer": "global"},
+        )
+
+        assert path.name == "rule%3Abad%2Fpath%3F%2Aname.md"
+        assert store.read('rule:bad/path?*name')["content"] == "safe filename content"
+
+    def test_read_legacy_raw_id_filename_by_frontmatter(self, tmp_path):
+        """Legacy raw-ID files remain readable through frontmatter id lookup."""
+        legacy_dir = tmp_path / "wiki" / "global"
+        legacy_dir.mkdir(parents=True)
+        legacy_path = legacy_dir / "rule:legacy.md"
+        post = frontmatter.Post("legacy content", id="rule:legacy", layer="global")
+        legacy_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+        item = _make_store(tmp_path).read("rule:legacy")
+
+        assert item["content"] == "legacy content"
+        assert item["_path"] == str(legacy_path)
+
+    def test_migrate_unsafe_filenames_renames_legacy_file(self, tmp_path):
+        """The default store exposes a migration path for unsafe filenames."""
+        legacy_dir = tmp_path / "wiki" / "global"
+        legacy_dir.mkdir(parents=True)
+        legacy_path = legacy_dir / "rule:legacy.md"
+        post = frontmatter.Post("legacy content", id="rule:legacy", layer="global")
+        legacy_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+        changes = _make_store(tmp_path).migrate_unsafe_filenames()
+
+        assert len(changes) == 1
+        assert not legacy_path.exists()
+        assert (legacy_dir / "rule%3Alegacy.md").exists()
 
 
 # ---------------------------------------------------------------------------
