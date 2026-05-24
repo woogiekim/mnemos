@@ -42,14 +42,14 @@ mnemos ingest-claude-md --project-root .
 mnemos search "capital France"
 
 # Read a specific item
-mnemos memory-read <item-id>
+mnemos read <item-id>
 
 # Promote to next layer
-mnemos memory-promote <item-id>
+mnemos promote <item-id>
 
 # Archive then forget
-mnemos memory-archive <item-id>
-mnemos memory-forget <item-id>
+mnemos archive <item-id>
+mnemos forget <item-id>
 ```
 
 ## Directory Structure
@@ -101,17 +101,95 @@ mnemos/
 |---|---|
 | `mnemos install [PATH]` | Scaffold a wiki repo structure at PATH (default: current directory) |
 | `mnemos capture` | Capture a new memory item into a target layer |
-| `mnemos memory-classify` | Classify/tag a captured item |
+| `mnemos classify` | Classify/tag a captured item |
 | `mnemos search` | Search across memory layers |
-| `mnemos memory-read` | Read a specific item by ID |
-| `mnemos memory-use` | Mark an item as "in use" |
-| `mnemos memory-update` | Update item content |
-| `mnemos memory-promote` | Promote to next (or specified) layer |
-| `mnemos memory-demote` | Demote to a lower layer |
-| `mnemos memory-archive` | Soft-delete (retain content) |
-| `mnemos memory-forget` | Hard-delete (requires archived state; use `--force` to skip prompt) |
-| `mnemos memory-log` | Manually append an entry to the audit log |
+| `mnemos read` | Read a specific item by ID |
+| `mnemos use` | Mark an item as "in use" |
+| `mnemos edit` | Update item content |
+| `mnemos promote` | Promote to next (or specified) layer |
+| `mnemos demote` | Demote to a lower layer |
+| `mnemos archive` | Soft-delete (retain content) |
+| `mnemos forget` | Hard-delete (requires archived state; use `--force` to skip prompt) |
+| `mnemos log` | Manually append or view audit log entries |
+| `mnemos capabilities --json` | Print stable machine-readable provider features |
+| `mnemos version --json` | Print version and compatibility metadata |
 | `mnemos ingest-claude-md` | Discover and ingest CLAUDE.md files into memory |
+
+## Stable Provider Contract
+
+Host integrations should use the CLI/provider contract instead of reading
+mnemos storage paths, SQLite FTS tables, or Markdown filenames directly.
+
+```bash
+mnemos capture --json --content "Architecture decision..." --layer project
+mnemos search --fast --json --limit 5 "architecture decision"
+mnemos read --json <item-id>
+mnemos gc --json --dry-run
+mnemos capabilities --json
+mnemos version --json
+```
+
+Provider JSON search results include `id`, `content`, `summary`, `layer`,
+`tags`, `provenance`, `recency`, optional `score`, and raw `metadata`.
+When present, `score` is a stable relevance value from `0.0` to `1.0`;
+higher means more relevant, and scores are relative within a single response.
+No-result searches return `count: 0` and `results: []`. Commands that can
+degrade return structured status fields so callers can distinguish supported,
+unsupported, and unknown features via `mnemos capabilities --json`.
+The `capabilities` object remains a backward-compatible boolean map. New
+integrations should prefer `capability_status`, whose values are one of
+`supported`, `unsupported`, or `unknown`.
+If search cannot fully use its backend or index, JSON output remains parseable
+with `status: "degraded"`, `partial_failure: true`, an empty or partial
+`results` array, and `error.code` such as `timeout`, `locked`, or
+`backend_error`. Missing `read --json` items return `status: "error"` with
+`error.code: "not_found"` and a non-zero exit code. Locked vault or index
+responses are retryable; policy and not-found errors are not.
+
+`mnemos search --fast --json` is the stable fast-search entry point for host
+integrations. Do not read `.agent/state/fts.db` directly; the database path,
+schema, metadata format, and rank values are internal implementation details.
+Existing direct FTS consumers should migrate by shelling out to
+`mnemos search --fast --json --limit N "query"` and reading `results[]` from
+stdout. Detect support with `mnemos capabilities --json` and check
+`capabilities.fast_search` before using the fast-search contract.
+Host callers should run provider commands with their own subprocess timeout and
+treat timeout expiration as an unknown result, not as evidence of no memory.
+Provider JSON never requires prompts or direct reads of `.agent/`, `wiki/`, or
+SQLite internals.
+
+Capability names are part of the stable provider contract for compatibility
+checks:
+
+| Capability | Stable behavior |
+|---|---|
+| `capture_json` | `mnemos capture --json` returns structured capture, duplicate, or error output |
+| `search_json` | `mnemos search --json` returns structured search output |
+| `fast_search` | `mnemos search --fast --json` is the supported low-latency search entry point |
+| `search_scores` | Search results expose normalized relevance scores from `0.0` to `1.0` |
+| `read_json` | `mnemos read --json` returns a structured item or `not_found` error |
+| `gc_json` | `mnemos gc --json` returns structured dry-run and execution summaries |
+| `host_install` | `mnemos install` manages supported host integration files |
+| `safe_filenames` | Filesystem storage safely encodes unsafe item IDs while preserving logical IDs |
+
+These names should not be renamed or removed during the `1.x` provider
+contract. If a behavior becomes unavailable, keep the name and change its
+`capability_status` to `unsupported` or `unknown` so callers can branch safely.
+agent-crew compatibility tracking is maintained in
+[agent-crew#101](https://github.com/woogiekim/agent-crew/issues/101).
+
+## Host Install Contract
+
+mnemos owns memory behavior for supported AI hosts. `mnemos install` detects
+available hosts and writes mnemos-managed marker blocks:
+
+- Claude Code: `~/.claude/CLAUDE.md` plus `~/.claude/settings.json` hooks when
+  those files exist.
+- Cursor: `~/.cursor/rules` or `~/.cursor/rules.md` when present.
+
+The managed blocks describe capture, search, read, and GC behavior independently
+of agent-crew. When a host lacks hook support or expected config files, install
+skips that host-specific surface without failing the repo scaffold.
 
 ## Memory Lifecycle
 
@@ -155,6 +233,15 @@ tags: []
 ---
 Content goes here.
 ```
+
+The front-matter `id` is the durable logical identifier. It is not a filesystem
+contract. The default filesystem store percent-encodes reserved filename
+characters, so an ID such as `rule:input-language` is stored as a safe filename
+such as `rule%3Ainput-language.md` while preserving `id: rule:input-language`
+in frontmatter. Legacy raw-ID filenames remain readable by frontmatter lookup.
+Use `mnemos migrate --safe-filenames` to rename legacy unsafe files. The
+migration uses `git mv` for tracked files when possible; add `--dry-run` to
+preview the migration.
 
 ## Configuration
 

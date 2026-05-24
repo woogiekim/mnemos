@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterator, Protocol, runtime_checkable
+from urllib.parse import quote
 
 import frontmatter
 
+import core.git as git
 from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
 
 
@@ -96,6 +98,12 @@ class MemoryStore:
     def __init__(self, repo_root: str) -> None:
         self._root = Path(repo_root)
 
+    @staticmethod
+    def canonical_filename(item_id: str) -> str:
+        """Return a cross-platform safe filename for a logical memory ID."""
+        encoded = quote(item_id, safe="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        return f"{encoded or 'untitled'}.md"
+
     def _layer_path(
         self,
         layer: str,
@@ -137,9 +145,12 @@ class MemoryStore:
         layer_dir = self._layer_path(layer, run_id=run_id, session_id=session_id)
         layer_dir.mkdir(parents=True, exist_ok=True)
 
-        file_path = layer_dir / f"{item_id}.md"
+        file_path = layer_dir / self.canonical_filename(item_id)
 
-        post = frontmatter.Post(content, **metadata)
+        post_metadata = dict(metadata)
+        post_metadata["id"] = item_id
+
+        post = frontmatter.Post(content, **post_metadata)
         with file_path.open("w", encoding="utf-8") as f:
             f.write(frontmatter.dumps(post))
 
@@ -196,9 +207,20 @@ class MemoryStore:
         for d in search_dirs:
             d = Path(d)
             if d.is_dir():
-                candidate = d / f"{item_id}.md"
-                if candidate.exists():
-                    yield candidate
+                candidates = [d / self.canonical_filename(item_id), d / f"{item_id}.md"]
+                for candidate in candidates:
+                    if candidate.exists():
+                        yield candidate
+                        return
+
+                for md_file in d.glob("*.md"):
+                    try:
+                        parsed = self._parse_file(md_file)
+                    except Exception:
+                        continue
+                    if parsed.get("id") == item_id:
+                        yield md_file
+                        return
 
     def delete(self, item_id_or_path: str) -> None:
         """Remove a memory item file."""
@@ -310,3 +332,55 @@ class MemoryStore:
             f.write(frontmatter.dumps(post))
 
         return file_path
+
+    def migrate_unsafe_filenames(self, dry_run: bool = False) -> list[dict[str, str]]:
+        """Rename legacy unsafe filenames to canonical safe names.
+
+        The logical memory ID is preserved in frontmatter. Existing safe files
+        are skipped, and destination collisions receive a numeric suffix. When
+        the store root is a git worktree, tracked files are renamed with
+        ``git mv`` and untracked files fall back to a filesystem rename.
+        """
+        changes: list[dict[str, str]] = []
+        dirs = [self._root / path for path in LAYER_STATIC_PATHS.values()]
+        dirs.append(self._root / TRANSIENT_PATH)
+        agent_root = self._root / ".agent"
+        if agent_root.exists():
+            dirs.extend(d for d in agent_root.rglob("*") if d.is_dir())
+
+        for directory in dirs:
+            if not directory.is_dir():
+                continue
+            for md_file in directory.glob("*.md"):
+                try:
+                    item = self._parse_file(md_file)
+                except Exception:
+                    continue
+                item_id = item.get("id") or md_file.stem
+                desired = directory / self.canonical_filename(str(item_id))
+                if md_file.name == desired.name:
+                    continue
+                target = desired
+                counter = 2
+                while target.exists() and target != md_file:
+                    target = directory / f"{desired.stem}-{counter}.md"
+                    counter += 1
+                changes.append({
+                    "from": str(md_file),
+                    "to": str(target),
+                    "id": str(item_id),
+                })
+                if not dry_run:
+                    self._rename_memory_file(md_file, target)
+
+        return changes
+
+    def _rename_memory_file(self, source: Path, target: Path) -> None:
+        """Rename a memory file, preferring ``git mv`` inside git worktrees."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            old = source.relative_to(self._root)
+            new = target.relative_to(self._root)
+            git.mv(self._root, old, new)
+        except Exception:
+            source.rename(target)

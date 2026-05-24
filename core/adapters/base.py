@@ -15,6 +15,12 @@ if TYPE_CHECKING:
 
 MNEMOS_BEHAVIOR_BLOCK = """\
 ## Memory (mnemos)
+mnemos is the host-installable AI memory capability for this environment. Its
+host contract is: retrieve with `mnemos search`, inspect with `mnemos read`,
+capture durable knowledge with `mnemos capture`, and let `mnemos gc` maintain
+the store. These instructions are owned by mnemos and live only inside
+mnemos-managed marker blocks.
+
 When asked about past context, notes, or decisions, run:
 `mnemos search <query>`
 This searches your personal memory store managed by mnemos.
@@ -46,13 +52,25 @@ Do NOT capture:
 - Temporary debugging steps or scratch work
 - Transient one-off conversation with no lasting value
 
+### Capture durability policy
+Choose the capture style based on durability:
+
+- **Raw transcript**: do not capture ordinary conversation turns verbatim. Capture
+  a short transcript excerpt only when the exact wording is the durable artifact
+  the user will need later.
+- **Durable decision**: capture as soon as a decision, constraint, preference, or
+  reusable workflow becomes clear. Prefer concise wording that names the decision
+  and its scope.
+- **Session summary**: capture at session end, `/compact`, or meaningful workflow
+  boundaries when several related facts should be preserved together.
+
 ### Layer selection — when to write directly vs. letting promotion handle it
 
 Default to `--layer session` and let mnemos promote automatically. Write directly
 to a higher layer only when the information clearly belongs there from the start:
 
 - **`--layer session`** (default): anything discovered or decided in this session
-  that may be useful later. mnemos auto-promotes to project/global when thresholds
+  that may be useful later. mnemos auto-promotes to project/global when promotion rules
   are met. Use for: debugging findings, session notes, intermediate conclusions.
 
 - **`--layer project`**: stable architectural decisions, reusable constraints, and
@@ -75,6 +93,14 @@ mnemos capture --content "Architecture: hexagonal pattern" --layer project
 mnemos capture --content "User preference: TDD required" --layer global
 mnemos capture --content "Found root cause of auth bug" --layer session
 ```
+
+### Reading and maintenance
+- Use `mnemos read <id>` when a search result needs full content or metadata.
+- Use `mnemos gc --dry-run` to inspect archival candidates before maintenance.
+- Use `mnemos gc` only when routine memory cleanup is appropriate; archived
+  memories are soft-deleted and can still be audited by the store.
+- If host hooks are unavailable or disabled, continue using the CLI commands
+  above. Hook automation is helpful but not required for safe operation.
 
 ### Capture interaction pattern
 - Capture proactively — do NOT ask permission before calling `mnemos capture`

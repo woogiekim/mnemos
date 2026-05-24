@@ -218,7 +218,7 @@ class ClaudeCodeAdapter(HostAdapter):
         messages: list[str] = []
 
         if not settings_path.exists():
-            return messages
+            return [f"[skipped] hooks unavailable ({settings_path})"]
 
         original_text = settings_path.read_text()
         try:
@@ -273,10 +273,9 @@ class ClaudeCodeAdapter(HostAdapter):
         """Write or update the <!-- mnemos-start --> block in CLAUDE.md."""
         messages: list[str] = []
 
-        if not claude_md_path.exists():
-            return messages
+        claude_md_path.parent.mkdir(parents=True, exist_ok=True)
 
-        original = claude_md_path.read_text()
+        original = claude_md_path.read_text() if claude_md_path.exists() else ""
         pattern = re.compile(
             r"<!-- mnemos-start -->.*?<!-- mnemos-end -->",
             re.DOTALL,

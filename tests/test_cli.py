@@ -829,6 +829,11 @@ class TestCapturePositionalArg:
 class TestCaptureANSIOutput:
     """Tests for colored italic ANSI output in capture command (issue #15)."""
 
+    @pytest.fixture(autouse=True)
+    def _clear_no_color_env(self, monkeypatch):
+        """ANSI tests control NO_COLOR explicitly per invocation."""
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
     def test_capture_notice_contains_ansi_by_default(self, runner, cli_with_repo):
         """capture notice must include ANSI escape codes when --no-color is not set."""
         import os
@@ -1275,7 +1280,7 @@ class TestLogDualMode:
     def test_log_partial_args_shows_helpful_error(self, runner, cli_with_repo):
         """Partial write args must print a message naming the missing flags."""
         result = runner.invoke(cli_with_repo, ["log", "--op", "capture"])
-        combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
+        combined = result.output or ""
         assert "--id" in combined or "missing" in combined.lower()
 
     def test_log_partial_args_op_and_id_only(self, runner, cli_with_repo):
