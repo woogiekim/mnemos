@@ -100,6 +100,34 @@ class TestSafeFilenames:
         assert path.name == "rule%3Abad%2Fpath%3F%2Aname.md"
         assert store.read('rule:bad/path?*name')["content"] == "safe filename content"
 
+    def test_write_forces_logical_id_into_frontmatter(self, tmp_path):
+        """The raw logical ID is the durable frontmatter id."""
+        store = _make_store(tmp_path)
+        path = store.write(
+            layer="global",
+            item_id="rule:input-language",
+            content="frontmatter id content",
+            metadata={"id": "wrong-id", "layer": "global"},
+        )
+
+        post = frontmatter.load(str(path))
+
+        assert post.metadata["id"] == "rule:input-language"
+        assert path.name == "rule%3Ainput-language.md"
+
+    def test_canonical_filename_encodes_all_reserved_chars(self):
+        """The canonical filename layer encodes OS-reserved filename chars."""
+        from core.store import MemoryStore
+
+        item_id = 'rule:bad/path\\with?all*"<>|\x01'
+        filename = MemoryStore.canonical_filename(item_id)
+
+        assert filename.endswith(".md")
+        assert "/" not in filename
+        assert "\\" not in filename
+        assert not any(ch in filename for ch in ':?*"<>|\x01')
+        assert filename == 'rule%3Abad%2Fpath%5Cwith%3Fall%2A%22%3C%3E%7C%01.md'
+
     def test_read_legacy_raw_id_filename_by_frontmatter(self, tmp_path):
         """Legacy raw-ID files remain readable through frontmatter id lookup."""
         legacy_dir = tmp_path / "wiki" / "global"
@@ -113,6 +141,31 @@ class TestSafeFilenames:
         assert item["content"] == "legacy content"
         assert item["_path"] == str(legacy_path)
 
+    def test_update_legacy_raw_id_filename_by_frontmatter(self, tmp_path):
+        """Updates resolve legacy files by frontmatter id without renaming them."""
+        legacy_dir = tmp_path / "wiki" / "global"
+        legacy_dir.mkdir(parents=True)
+        legacy_path = legacy_dir / "rule:legacy.md"
+        post = frontmatter.Post("legacy content", id="rule:legacy", layer="global")
+        legacy_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+        path = _make_store(tmp_path).update("rule:legacy", content="updated")
+
+        assert path == legacy_path
+        assert frontmatter.load(str(legacy_path)).content == "updated"
+
+    def test_delete_legacy_raw_id_filename_by_frontmatter(self, tmp_path):
+        """Deletes resolve legacy files by frontmatter id."""
+        legacy_dir = tmp_path / "wiki" / "global"
+        legacy_dir.mkdir(parents=True)
+        legacy_path = legacy_dir / "rule:legacy.md"
+        post = frontmatter.Post("legacy content", id="rule:legacy", layer="global")
+        legacy_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+        _make_store(tmp_path).delete("rule:legacy")
+
+        assert not legacy_path.exists()
+
     def test_migrate_unsafe_filenames_renames_legacy_file(self, tmp_path):
         """The default store exposes a migration path for unsafe filenames."""
         legacy_dir = tmp_path / "wiki" / "global"
@@ -125,6 +178,31 @@ class TestSafeFilenames:
 
         assert len(changes) == 1
         assert not legacy_path.exists()
+        assert (legacy_dir / "rule%3Alegacy.md").exists()
+
+    def test_migrate_unsafe_filenames_uses_git_mv_when_possible(
+        self, tmp_path, monkeypatch
+    ):
+        """Migration prefers git mv and passes repo-relative paths."""
+        legacy_dir = tmp_path / "wiki" / "global"
+        legacy_dir.mkdir(parents=True)
+        legacy_path = legacy_dir / "rule:legacy.md"
+        post = frontmatter.Post("legacy content", id="rule:legacy", layer="global")
+        legacy_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+        calls = []
+
+        def fake_git_mv(root, old, new):
+            calls.append((root, old, new))
+            legacy_path.rename(tmp_path / new)
+
+        monkeypatch.setattr("core.store.git.mv", fake_git_mv)
+
+        changes = _make_store(tmp_path).migrate_unsafe_filenames()
+
+        assert len(changes) == 1
+        assert calls == [
+            (tmp_path, Path("wiki/global/rule:legacy.md"), Path("wiki/global/rule%3Alegacy.md"))
+        ]
         assert (legacy_dir / "rule%3Alegacy.md").exists()
 
 

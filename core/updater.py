@@ -24,43 +24,9 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from core.adapters.claude import CLAUDE_MD_BLOCK
+from core.adapters.cursor import CURSOR_RULES_BLOCK
 
-# ---------------------------------------------------------------------------
-# Canonical managed block content (mirrors install.sh)
-# ---------------------------------------------------------------------------
-
-CLAUDE_MD_BLOCK = """\
-<!-- mnemos-start -->
-## Memory (mnemos)
-When asked about past context, notes, or decisions, run:
-`mnemos search <query>`
-This searches your personal memory store managed by mnemos.
-
-### Capturing knowledge
-Use `mnemos capture "<insight>"` when you identify:
-- Stable project decisions
-- Architecture constraints
-- User preferences
-- Reusable workflows
-- Important operational knowledge
-- Persistent project context
-
-Do NOT capture:
-- Temporary debugging, speculative reasoning, incomplete thoughts
-- Transient conversation, low-confidence assumptions, scratch work
-
-All captured insights begin in the session layer.
-Promotion to project or global layer happens through mnemos promotion rules only.
-<!-- mnemos-end -->"""
-
-CURSOR_RULES_BLOCK = """\
-<!-- mnemos:start -->
-## Memory (mnemos)
-For memory-related, project-history, architecture-history, or prior-decision questions, run:
-`mnemos search <query>`
-before answering. Do not assume the current conversation contains complete context.
-Use mnemos as the persistent memory retrieval system.
-<!-- mnemos:end -->"""
 
 # Hook definitions that install.sh injects.  The MNEMOS_REPO_ROOT placeholder
 # is expanded at install time; on update we keep whatever value is already

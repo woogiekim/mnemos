@@ -19,6 +19,7 @@ Public API
 - :func:`rebase_onto` — rebase current branch onto an explicit ref
 - :func:`rebase_continue` — continue an in-progress rebase
 - :func:`status` — return ahead/behind/dirty information as a dict
+- :func:`mv` — rename a tracked file with ``git mv``
 """
 from __future__ import annotations
 
@@ -210,6 +211,17 @@ def add(path: str | Path, files: Sequence[str]) -> None:
     rc, _, stderr = _git("add", "--", *[str(f) for f in files], cwd=path)
     if rc != 0:
         raise GitCommandError(rc, stderr, ["git", "add", "--"] + [str(f) for f in files])
+
+
+def mv(path: str | Path, old: str | Path, new: str | Path) -> None:
+    """Rename a tracked file using ``git mv``.
+
+    ``old`` and ``new`` may be absolute or relative to *path*. Git handles
+    both forms, but callers should prefer relative paths for readable status.
+    """
+    rc, _, stderr = _git("mv", "--", str(old), str(new), cwd=path)
+    if rc != 0:
+        raise GitCommandError(rc, stderr, ["git", "mv", "--", str(old), str(new)])
 
 
 def commit(path: str | Path, message: str) -> bool:

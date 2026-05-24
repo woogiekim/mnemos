@@ -207,9 +207,25 @@ def memory_capture(
                 # want silent operation.
                 pass
     except PolicyViolationError as exc:
+        if as_json:
+            from core.provider import error_payload
+
+            _echo_json(error_payload(
+                code="policy_violation",
+                message=str(exc),
+                retryable=False,
+            ))
+            sys.exit(1)
+
         click.echo(f"error: policy violation — {exc}", err=True)
         sys.exit(1)
     except Exception as exc:
+        if as_json:
+            from core.provider import provider_error_from_exception
+
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+
         click.echo(f"error: {exc}", err=True)
         sys.exit(1)
 
@@ -384,16 +400,34 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
     gw = _get_gateway()
     layer_list = [l.strip() for l in layers.split(",")] if layers else None
     tag_list = list(tags) if tags else None
-    results = gw.search(query=query, layers=layer_list, limit=limit, tags=tag_list)
+    try:
+        results = gw.search(query=query, layers=layer_list, limit=limit, tags=tag_list)
+    except Exception as exc:
+        if as_json:
+            from core.provider import provider_error_from_exception, search_payload
+
+            payload = search_payload(
+                query=query,
+                results=[],
+                mode="fast" if fast else "standard",
+                partial_failure=True,
+            )
+            payload.update(provider_error_from_exception(exc))
+            payload["status"] = "degraded"
+            _echo_json(payload)
+            return
+
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
     if as_json:
-        from core.provider import search_result_payload
-        _echo_json({
-            "query": query,
-            "count": len(results),
-            "mode": "fast" if fast else "standard",
-            "partial_failure": False,
-            "results": [search_result_payload(r) for r in results],
-        })
+        from core.provider import search_payload
+        _echo_json(search_payload(
+            query=query,
+            results=results,
+            mode="fast" if fast else "standard",
+            partial_failure=False,
+        ))
         return
 
     if not results:
@@ -419,6 +453,14 @@ def memory_read(item_id: str, as_json: bool) -> None:
         else:
             _echo_json(item)
     except FileNotFoundError:
+        if as_json:
+            from core.provider import error_payload
+            _echo_json(error_payload(
+                code="not_found",
+                message=f"item '{item_id}' not found",
+                retryable=False,
+            ))
+            sys.exit(1)
         click.echo(f"error: item '{item_id}' not found", err=True)
         sys.exit(1)
 
@@ -1030,8 +1072,13 @@ def memory_gc(
     try:
         report = gc.run(dry_run=dry_run)
     except Exception as exc:
+        if as_json:
+            from core.provider import provider_error_from_exception
+
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+
         click.echo(f"error: {exc}", err=True)
-        import sys
         sys.exit(1)
 
     if as_json:

@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import frontmatter
 
+import core.git as git
 from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
 
 
@@ -146,7 +147,10 @@ class MemoryStore:
 
         file_path = layer_dir / self.canonical_filename(item_id)
 
-        post = frontmatter.Post(content, **metadata)
+        post_metadata = dict(metadata)
+        post_metadata["id"] = item_id
+
+        post = frontmatter.Post(content, **post_metadata)
         with file_path.open("w", encoding="utf-8") as f:
             f.write(frontmatter.dumps(post))
 
@@ -333,7 +337,9 @@ class MemoryStore:
         """Rename legacy unsafe filenames to canonical safe names.
 
         The logical memory ID is preserved in frontmatter. Existing safe files
-        are skipped, and destination collisions receive a numeric suffix.
+        are skipped, and destination collisions receive a numeric suffix. When
+        the store root is a git worktree, tracked files are renamed with
+        ``git mv`` and untracked files fall back to a filesystem rename.
         """
         changes: list[dict[str, str]] = []
         dirs = [self._root / path for path in LAYER_STATIC_PATHS.values()]
@@ -365,6 +371,16 @@ class MemoryStore:
                     "id": str(item_id),
                 })
                 if not dry_run:
-                    md_file.rename(target)
+                    self._rename_memory_file(md_file, target)
 
         return changes
+
+    def _rename_memory_file(self, source: Path, target: Path) -> None:
+        """Rename a memory file, preferring ``git mv`` inside git worktrees."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            old = source.relative_to(self._root)
+            new = target.relative_to(self._root)
+            git.mv(self._root, old, new)
+        except Exception:
+            source.rename(target)

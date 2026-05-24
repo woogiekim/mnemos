@@ -173,8 +173,8 @@ class TestClaudeCodeAdapterInstall:
         (home / ".claude" / "CLAUDE.md").write_text("# Test\n")
 
         messages = ClaudeCodeAdapter().install(home)
-        # Should not raise; no settings.json message expected
         assert isinstance(messages, list)
+        assert any("hooks unavailable" in msg for msg in messages)
 
     def test_install_skips_missing_claude_md(self, tmp_path):
         home = tmp_path / "home"
@@ -184,6 +184,9 @@ class TestClaudeCodeAdapterInstall:
 
         messages = ClaudeCodeAdapter().install(home)
         assert isinstance(messages, list)
+        claude_md = home / ".claude" / "CLAUDE.md"
+        assert claude_md.exists()
+        assert "<!-- mnemos-start -->" in claude_md.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +440,9 @@ class TestCursorAdapterInstall:
         # No rules file
         messages = CursorAdapter().install(home)
         assert isinstance(messages, list)
+        rules = home / ".cursor" / "rules"
+        assert rules.exists()
+        assert "<!-- mnemos:start -->" in rules.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +596,24 @@ class TestMnemosBehaviorBlockParity:
             assert "global" in block, f"{label} missing global layer reference"
             # Must include layer selection guidance
             assert "layer" in block.lower(), f"{label} missing layer selection guidance"
+
+    def test_behavior_block_defines_host_install_contract(self):
+        """Host instructions must define mnemos as a standalone memory capability."""
+        assert "host-installable AI memory capability" in MNEMOS_BEHAVIOR_BLOCK
+        assert "mnemos-managed marker blocks" in MNEMOS_BEHAVIOR_BLOCK
+        assert "agent-crew" not in MNEMOS_BEHAVIOR_BLOCK
+
+    def test_behavior_block_contains_read_and_gc_guidance(self):
+        """Installed hosts must get search, read, capture, and GC guidance."""
+        for command in ("mnemos search", "mnemos read", "mnemos capture", "mnemos gc"):
+            assert command in MNEMOS_BEHAVIOR_BLOCK
+        assert "hooks are unavailable" in MNEMOS_BEHAVIOR_BLOCK
+
+    def test_behavior_block_contains_capture_durability_policy(self):
+        """Install payload must distinguish transcript, decision, and summary captures."""
+        assert "Raw transcript" in MNEMOS_BEHAVIOR_BLOCK
+        assert "Durable decision" in MNEMOS_BEHAVIOR_BLOCK
+        assert "Session summary" in MNEMOS_BEHAVIOR_BLOCK
 
     def test_adapter_delimiters_are_preserved(self):
         """Adapter-specific HTML comment delimiters must be preserved."""

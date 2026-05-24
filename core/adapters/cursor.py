@@ -35,6 +35,11 @@ def _find_cursor_rules(cursor_dir: Path) -> Optional[Path]:
     return None
 
 
+def _cursor_rules_path(cursor_dir: Path) -> Path:
+    """Return the existing rules file, or the default path for new installs."""
+    return _find_cursor_rules(cursor_dir) or cursor_dir / "rules"
+
+
 def _unified_diff(label: str, before: str, after: str) -> str:
     import difflib
     before_lines = before.splitlines(keepends=True)
@@ -114,11 +119,11 @@ class CursorAdapter(HostAdapter):
 
     def _update_cursor_rules(self, cursor_dir: Path) -> tuple[bool, str]:
         """Replace <!-- mnemos:start --> ... <!-- mnemos:end --> block."""
-        rules_path = _find_cursor_rules(cursor_dir)
-        if rules_path is None:
+        if not cursor_dir.exists():
             return False, ""
 
-        original = rules_path.read_text()
+        rules_path = _cursor_rules_path(cursor_dir)
+        original = rules_path.read_text() if rules_path.exists() else ""
         pattern = re.compile(
             r"<!-- mnemos:start -->.*?<!-- mnemos:end -->",
             re.DOTALL,

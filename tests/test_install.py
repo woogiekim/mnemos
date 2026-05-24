@@ -181,4 +181,21 @@ def test_install_writes_mnemos_owned_host_block(tmp_path):
     claude_md = (claude_dir / "CLAUDE.md").read_text()
     assert "<!-- mnemos-start -->" in claude_md
     assert "mnemos search" in claude_md
+    assert "mnemos read" in claude_md
+    assert "mnemos gc" in claude_md
     assert "agent-crew-start" not in claude_md
+
+
+def test_install_degrades_when_claude_hooks_unavailable(tmp_path):
+    """Host install still writes memory instructions when hook settings are absent."""
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+
+    install(tmp_path / "repo", home=home)
+
+    claude_md = claude_dir / "CLAUDE.md"
+    assert claude_md.exists()
+    content = claude_md.read_text()
+    assert "<!-- mnemos-start -->" in content
+    assert "hooks are unavailable" in content
