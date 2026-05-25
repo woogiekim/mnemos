@@ -1226,6 +1226,183 @@ def memory_gc(
             )
 
 
+@cli.command("lifecycle-run")
+@click.option(
+    "--apply",
+    "apply_changes",
+    is_flag=True,
+    default=False,
+    help="Apply lifecycle transitions. Without this flag the command is a dry run.",
+)
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated list of layers to evaluate (default: all operational layers).",
+)
+@click.option("--limit", default=None, type=int, help="Maximum number of memories to evaluate.")
+@click.option(
+    "--include-retained",
+    "include_retained",
+    is_flag=True,
+    default=False,
+    help="Include retain decisions in the report.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def lifecycle_run_cmd(
+    apply_changes: bool,
+    layers: str | None,
+    limit: int | None,
+    include_retained: bool,
+    as_json: bool,
+) -> None:
+    """Plan or apply managed lifecycle transitions."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        report = MemoryOperationsEngine(gw).run_lifecycle(
+            dry_run=not apply_changes,
+            layers=layer_list,
+            limit=limit,
+            include_retained=include_retained,
+        )
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    if as_json:
+        _echo_json(report.to_dict())
+        return
+
+    mode = "dry-run" if report.dry_run else "applied"
+    click.echo(
+        f"[mnemos lifecycle] {mode}: "
+        f"evaluated={report.evaluated_count} "
+        f"planned={report.planned_count} "
+        f"applied={report.applied_count} "
+        f"failed={report.failed_count}"
+    )
+    for item in report.items:
+        status = "applied" if item.applied else "planned"
+        if item.error:
+            status = "failed"
+        click.echo(
+            f"  {status}: {item.item_id} "
+            f"{item.layer} -> {item.action}"
+            + (f" ({item.reason})" if item.reason else "")
+        )
+
+
+@cli.command("memory-metrics")
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated list of layers to score (default: all operational layers).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_metrics_cmd(layers: str | None, as_json: bool) -> None:
+    """Show Memory OS operational health metrics."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        metrics = MemoryOperationsEngine(gw).compute_metrics(layers=layer_list)
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = metrics.to_dict()
+    if as_json:
+        _echo_json(payload)
+        return
+
+    click.echo("[mnemos metrics] Memory OS operational scores")
+    for name, score in payload["scores"].items():
+        click.echo(f"  {name:<40} {score:.3f}")
+    click.echo(f"  {'item_count':<40} {metrics.item_count}")
+    click.echo(f"  {'issue_count':<40} {metrics.issue_count}")
+
+
+@cli.command("recover")
+@click.option(
+    "--apply",
+    "apply_changes",
+    is_flag=True,
+    default=False,
+    help="Repair metadata and reindex memories. Without this flag the command is a dry run.",
+)
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated list of layers to scan (default: all operational layers).",
+)
+@click.option(
+    "--no-reindex",
+    "no_reindex",
+    is_flag=True,
+    default=False,
+    help="Skip FTS reindexing during apply mode.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def recover_cmd(
+    apply_changes: bool,
+    layers: str | None,
+    no_reindex: bool,
+    as_json: bool,
+) -> None:
+    """Detect and repair recoverable memory store issues."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        report = MemoryOperationsEngine(gw).recover_store(
+            dry_run=not apply_changes,
+            layers=layer_list,
+            reindex=not no_reindex,
+        )
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    if as_json:
+        _echo_json(report.to_dict())
+        return
+
+    mode = "dry-run" if report.dry_run else "applied"
+    click.echo(
+        f"[mnemos recover] {mode}: "
+        f"scanned={report.scanned_count} "
+        f"readable={report.readable_count} "
+        f"corrupt={report.corrupt_count} "
+        f"repaired={report.repaired_count} "
+        f"reindexed={report.reindexed_count}"
+    )
+    for issue in report.issues:
+        state = "repaired" if issue.repaired else "found"
+        click.echo(f"  {state}: {issue.code} {issue.path}")
+
+
 @cli.command("bg-check")
 @click.option(
     "--interval",

@@ -27,6 +27,9 @@ CAPABILITIES: dict[str, bool | str] = {
     "memory_lifecycle_management": "supported",
     "continuity_compression": "supported",
     "operational_retrieval": "supported",
+    "lifecycle_execution": "supported",
+    "operational_metrics": "supported",
+    "memory_recovery": "supported",
 }
 
 
@@ -65,6 +68,9 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "memory_lifecycle_management": "Memory lifecycle policy supports summarize, compress, promote, archive, and expire decisions.",
     "continuity_compression": "Context compression preserves memory identity, relationships, and operational continuity under a budget.",
     "operational_retrieval": "Retrieval ranking combines semantic relevance, workflow relevance, trust, recency, history, and quality.",
+    "lifecycle_execution": "mnemos lifecycle-run plans and applies managed lifecycle transitions with structured reports.",
+    "operational_metrics": "mnemos memory-metrics reports continuity, relevance, history, compression, lifecycle, and stability scores.",
+    "memory_recovery": "mnemos recover detects and repairs recoverable metadata/index issues without hard-deleting memory.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {
