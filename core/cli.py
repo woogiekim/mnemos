@@ -1257,6 +1257,13 @@ def memory_gc(
     default=False,
     help="Persist the lifecycle report under .agent/reports/memory-os.",
 )
+@click.option(
+    "--no-backend-sync",
+    "no_backend_sync",
+    is_flag=True,
+    default=False,
+    help="Skip backend auto-sync hooks during apply mode.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 def lifecycle_run_cmd(
     apply_changes: bool,
@@ -1264,6 +1271,7 @@ def lifecycle_run_cmd(
     limit: int | None,
     include_retained: bool,
     record: bool,
+    no_backend_sync: bool,
     as_json: bool,
 ) -> None:
     """Plan or apply managed lifecycle transitions."""
@@ -1274,7 +1282,7 @@ def lifecycle_run_cmd(
     layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
 
     try:
-        engine = MemoryOperationsEngine(gw)
+        engine = MemoryOperationsEngine(gw, suppress_backend_sync=no_backend_sync)
         report = engine.run_lifecycle(
             dry_run=not apply_changes,
             layers=layer_list,
@@ -1533,6 +1541,13 @@ def memory_readiness_cmd(
     default=False,
     help="Persist the compression report under .agent/reports/memory-os.",
 )
+@click.option(
+    "--no-backend-sync",
+    "no_backend_sync",
+    is_flag=True,
+    default=False,
+    help="Skip backend auto-sync hooks during apply mode.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 def memory_compress_cmd(
     apply_changes: bool,
@@ -1545,6 +1560,7 @@ def memory_compress_cmd(
     limit: int | None,
     label: str | None,
     record: bool,
+    no_backend_sync: bool,
     as_json: bool,
 ) -> None:
     """Build durable continuity pages from operational memory."""
@@ -1555,7 +1571,7 @@ def memory_compress_cmd(
     layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
 
     try:
-        engine = MemoryOperationsEngine(gw)
+        engine = MemoryOperationsEngine(gw, suppress_backend_sync=no_backend_sync)
         report = engine.run_compression_job(
             dry_run=not apply_changes,
             layers=layer_list,
@@ -1786,12 +1802,20 @@ def memory_calibrate_cmd(
     default=False,
     help="Persist the recovery report under .agent/reports/memory-os.",
 )
+@click.option(
+    "--no-backend-sync",
+    "no_backend_sync",
+    is_flag=True,
+    default=False,
+    help="Skip backend auto-sync hooks during apply mode.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 def recover_cmd(
     apply_changes: bool,
     layers: str | None,
     no_reindex: bool,
     record: bool,
+    no_backend_sync: bool,
     as_json: bool,
 ) -> None:
     """Detect and repair recoverable memory store issues."""
@@ -1802,7 +1826,7 @@ def recover_cmd(
     layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
 
     try:
-        engine = MemoryOperationsEngine(gw)
+        engine = MemoryOperationsEngine(gw, suppress_backend_sync=no_backend_sync)
         report = engine.recover_store(
             dry_run=not apply_changes,
             layers=layer_list,

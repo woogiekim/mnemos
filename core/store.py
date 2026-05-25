@@ -247,6 +247,25 @@ class MemoryStore:
         session_id: str | None = None,
     ) -> Iterator[Path]:
         """Yield all item paths in the given layer."""
+        if layer in ("ephemeral", "working") and run_id is None:
+            agent_runs = self._root / ".agent" / "runs"
+            if not agent_runs.exists():
+                return
+            subdir = "scratch" if layer == "ephemeral" else "working"
+            for run_dir in agent_runs.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                layer_dir = run_dir / subdir
+                if layer_dir.exists():
+                    yield from layer_dir.glob("*.md")
+            return
+
+        if layer == "session" and session_id is None:
+            agent_sessions = self._root / ".agent" / "sessions"
+            if agent_sessions.exists():
+                yield from agent_sessions.rglob("*.md")
+            return
+
         try:
             layer_dir = self._layer_path(layer, run_id=run_id, session_id=session_id)
         except ValueError:

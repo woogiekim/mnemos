@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -190,7 +191,31 @@ def test_operational_metrics_expose_memory_os_scores(operations_repo: Path) -> N
     }
     assert all(0.0 <= score <= 1.0 for score in payload["scores"].values())
     assert payload["scores"]["context_continuity_score"] == 1.0
+    assert payload["scores"]["retrieval_relevance_score"] >= 0.95
     assert payload["scores"]["persistent_memory_stability"] == 1.0
+
+
+def test_retrieval_relevance_treats_observed_workflow_memory_as_relevant(
+    operations_repo: Path,
+) -> None:
+    """Observed, tagged operational memories are relevant before repeated access."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="observed-relevance-memory",
+        content="Observed workflow context preserves continuity for future retrieval.",
+        tags=["workflow", "continuity"],
+        quality_score=0.8,
+        extra_metadata={
+            "trust_level": "observed",
+            "access_count": 0,
+        },
+        no_classify=True,
+    )
+
+    metrics = MemoryOperationsEngine(gateway).compute_metrics(layers=["project"])
+
+    assert metrics.retrieval_relevance_score >= 0.85
 
 
 def test_operational_evidence_records_reports_and_metric_history(
@@ -667,6 +692,91 @@ def test_recovery_apply_repairs_metadata_and_reindexes(
     assert results[0]["item_id"] == "recoverable-memory"
     assert recovery_path.exists()
     assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-recovery.json").exists()
+
+
+def test_recovery_uses_storage_backend_paths_for_obsidian(
+    operations_repo: Path,
+    tmp_path: Path,
+) -> None:
+    """Recovery repairs Obsidian vault files instead of policy-root files."""
+    vault = tmp_path / "vault"
+    project_dir = vault / "project"
+    project_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", str(vault)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(vault), "config", "user.email", "test@mnemos.local"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(vault), "config", "user.name", "mnemos test"],
+        capture_output=True,
+        check=True,
+    )
+    vault_memory = project_dir / "recoverable-memory.md"
+    vault_memory.write_text(
+        "---\nlayer: project\n---\nRecoverable vault operational memory.\n",
+        encoding="utf-8",
+    )
+    config = {
+        "storage": {
+            "backend": "obsidian",
+            "vault_path": str(vault),
+            "sync": {"remote": "origin", "branch": "main"},
+        }
+    }
+    (operations_repo / "mnemos.yml").write_text(yaml.dump(config), encoding="utf-8")
+
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    report = MemoryOperationsEngine(gateway).recover_store(
+        dry_run=False,
+        layers=["project"],
+    )
+    item = gateway._store.read(str(vault_memory))
+
+    assert report.status == "completed"
+    assert report.repaired_count > 0
+    assert report.reindexed_count == 1
+    assert {Path(issue.path).parent for issue in report.issues} == {project_dir}
+    assert item["id"] == "recoverable-memory"
+    assert item["content_hash"]
+
+
+def test_recovery_can_suppress_obsidian_backend_sync(
+    operations_repo: Path,
+    tmp_path: Path,
+) -> None:
+    """Maintenance can repair a sync-enabled backend without auto-committing."""
+    vault = tmp_path / "vault"
+    project_dir = vault / "project"
+    project_dir.mkdir(parents=True)
+    vault_memory = project_dir / "recoverable-memory.md"
+    vault_memory.write_text(
+        "---\nlayer: project\n---\nRecoverable vault operational memory.\n",
+        encoding="utf-8",
+    )
+    config = {
+        "storage": {
+            "backend": "obsidian",
+            "vault_path": str(vault),
+            "sync": {"remote": "origin", "branch": "main"},
+        }
+    }
+    (operations_repo / "mnemos.yml").write_text(yaml.dump(config), encoding="utf-8")
+
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    report = MemoryOperationsEngine(
+        gateway,
+        suppress_backend_sync=True,
+    ).recover_store(
+        dry_run=False,
+        layers=["project"],
+    )
+    item = gateway._store.read(str(vault_memory))
+
+    assert report.status == "completed"
+    assert report.repaired_count > 0
+    assert item["id"] == "recoverable-memory"
 
 
 def test_memory_operations_cli_and_capabilities(

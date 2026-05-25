@@ -320,3 +320,37 @@ class TestIterLayerItemsDynamic:
         items = list(store.iter_layer_items("transient"))
         assert len(items) == 1
         assert items[0]["id"] == "trans-item"
+
+
+class TestListLayerDynamic:
+    def test_list_layer_scans_all_run_dirs(self, tmp_path):
+        """list_layer mirrors dynamic iter_layer_items coverage for recovery."""
+        store = _make_store(tmp_path)
+        for run_id in ("run-a", "run-b"):
+            store.write(
+                layer="ephemeral",
+                item_id=f"eph-{run_id}",
+                content=f"eph content {run_id}",
+                metadata={"id": f"eph-{run_id}", "layer": "ephemeral"},
+                run_id=run_id,
+            )
+
+        paths = list(store.list_layer("ephemeral"))
+
+        assert {path.stem for path in paths} == {"eph-run-a", "eph-run-b"}
+
+    def test_list_layer_scans_all_session_dirs(self, tmp_path):
+        """Session recovery sees every session namespace, not only default."""
+        store = _make_store(tmp_path)
+        for session_id in ("sess-a", "sess-b"):
+            store.write(
+                layer="session",
+                item_id=f"ses-{session_id}",
+                content=f"session content {session_id}",
+                metadata={"id": f"ses-{session_id}", "layer": "session"},
+                session_id=session_id,
+            )
+
+        paths = list(store.list_layer("session"))
+
+        assert {path.stem for path in paths} == {"ses-sess-a", "ses-sess-b"}

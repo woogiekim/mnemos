@@ -5,16 +5,17 @@ import hashlib
 import json
 import re
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import frontmatter
 
 from core.compression import ContinuityCompressor
-from core.contracts import TRUST_RANK, TrustLevel, normalize_trust_level
-from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
+from core.contracts import TrustLevel, normalize_trust_level
+from core.layers import LAYER_STATIC_PATHS
 from core.lifecycle import LifecycleAction, LifecycleDecision, MemoryLifecycleManager
 from core.policy import VALID_STAGES
 
@@ -546,6 +547,7 @@ class MemoryOperationsEngine:
         self,
         gateway: Any,
         lifecycle_manager: MemoryLifecycleManager | None = None,
+        suppress_backend_sync: bool = False,
     ) -> None:
         self._gateway = gateway
         self._store = gateway._store
@@ -553,6 +555,7 @@ class MemoryOperationsEngine:
         self._root = Path(gateway._root)
         self._lifecycle = lifecycle_manager or MemoryLifecycleManager()
         self._evidence_dir = self._root / ".agent" / "reports" / "memory-os"
+        self._suppress_backend_sync = suppress_backend_sync
 
     def run_lifecycle(
         self,
@@ -996,12 +999,13 @@ class MemoryOperationsEngine:
                     "estimated_tokens": page.estimated_tokens,
                     "compression_preserves_content": True,
                 }
-                self._store.write(
-                    target_layer,
-                    artifact_id,
-                    content,
-                    metadata,
-                )
+                with self._backend_sync_suppressed():
+                    self._store.write(
+                        target_layer,
+                        artifact_id,
+                        content,
+                        metadata,
+                    )
                 self._fts.index_item(artifact_id, content, metadata)
                 if hasattr(self._gateway, "log"):
                     self._gateway.log(
@@ -1393,7 +1397,8 @@ class MemoryOperationsEngine:
             corrections, item_issues = self._repair_metadata_plan(item, layer, path)
 
             if corrections and not dry_run:
-                self._store.update(str(path), metadata_updates=corrections)
+                with self._backend_sync_suppressed():
+                    self._store.update(str(path), metadata_updates=corrections)
                 repaired_count += len(item_issues)
 
             elif corrections:
@@ -1559,15 +1564,16 @@ class MemoryOperationsEngine:
         item_id = _item_id(item)
 
         if decision.action is LifecycleAction.PROMOTE:
-            self._gateway.promote(
-                item_id=item_id,
-                target_layer=decision.target_layer,
-                run_id=item.get("run_id"),
-                session_id=item.get("session_id"),
-                force=True,
-            )
-            promoted = self._store.read(item_id)
-            self._store.update(str(promoted["_path"]), metadata_updates=decision.metadata_updates)
+            with self._backend_sync_suppressed():
+                self._gateway.promote(
+                    item_id=item_id,
+                    target_layer=decision.target_layer,
+                    run_id=item.get("run_id"),
+                    session_id=item.get("session_id"),
+                    force=True,
+                )
+                promoted = self._store.read(item_id)
+                self._store.update(str(promoted["_path"]), metadata_updates=decision.metadata_updates)
             updated = dict(promoted)
             updated.update(decision.metadata_updates)
             metadata = {
@@ -1587,7 +1593,8 @@ class MemoryOperationsEngine:
             metadata_updates["compression_strategy"] = "continuity-metadata-v1"
             metadata_updates["compression_preserves_content"] = True
 
-        self._store.update(str(item["_path"]), metadata_updates=metadata_updates)
+        with self._backend_sync_suppressed():
+            self._store.update(str(item["_path"]), metadata_updates=metadata_updates)
         updated = dict(item)
         updated.update(metadata_updates)
         metadata = {
@@ -1620,26 +1627,23 @@ class MemoryOperationsEngine:
     ) -> Iterable[tuple[str, Path]]:
         selected = set(_normalize_layers(layers))
 
-        if "transient" in selected:
-            yield from _glob_layer(self._root / TRANSIENT_PATH, "transient")
+        for layer in selected:
+            for path in self._store.list_layer(layer):
+                yield layer, path
 
-        for layer, rel_path in LAYER_STATIC_PATHS.items():
-            if layer in selected:
-                yield from _glob_layer(self._root / rel_path, layer)
+    @contextmanager
+    def _backend_sync_suppressed(self) -> Iterator[None]:
+        sync = getattr(self._store, "_sync", None)
+        previous_enabled = getattr(sync, "enabled", None)
+        if not self._suppress_backend_sync or sync is None or previous_enabled is None:
+            yield
+            return
 
-        runs_root = self._root / ".agent" / "runs"
-        if runs_root.exists():
-            for run_dir in runs_root.iterdir():
-                if not run_dir.is_dir():
-                    continue
-                if "ephemeral" in selected:
-                    yield from _glob_layer(run_dir / "scratch", "ephemeral")
-                if "working" in selected:
-                    yield from _glob_layer(run_dir / "working", "working")
-
-        sessions_root = self._root / ".agent" / "sessions"
-        if "session" in selected and sessions_root.exists():
-            yield from _glob_layer(sessions_root, "session", recursive=True)
+        sync.enabled = False
+        try:
+            yield
+        finally:
+            sync.enabled = previous_enabled
 
     def _parse_path(self, path: Path) -> dict[str, Any]:
         if hasattr(self._store, "parse_file"):
@@ -1744,20 +1748,6 @@ def _normalize_layers(layers: list[str] | None) -> tuple[str, ...]:
     return tuple(selected)
 
 
-def _glob_layer(
-    directory: Path,
-    layer: str,
-    *,
-    recursive: bool = False,
-) -> Iterable[tuple[str, Path]]:
-    if not directory.exists():
-        return
-    pattern = "**/*.md" if recursive else "*.md"
-    for path in sorted(directory.glob(pattern)):
-        if path.is_file():
-            yield layer, path
-
-
 def _item_id(item: dict[str, Any]) -> str:
     raw_path = item.get("_path")
     return str(item.get("id") or item.get("item_id") or (Path(raw_path).stem if raw_path else "unknown"))
@@ -1807,10 +1797,41 @@ def _has_historical_context(item: dict[str, Any]) -> bool:
 
 def _retrieval_relevance_score(item: dict[str, Any]) -> float:
     quality = _clamp(_safe_float(item.get("quality_score")) if item.get("quality_score") is not None else 0.8)
-    trust = TRUST_RANK[normalize_trust_level(item.get("trust_level"))] / max(TRUST_RANK.values())
+    trust = _retrieval_trust_score(item.get("trust_level"))
+    continuity = 1.0 if _has_continuity_metadata(item) else 0.0
+    lifecycle = _retrieval_lifecycle_score(item.get("stage"))
     access_count = max(0, _safe_int(item.get("access_count")) or 0)
     history = min(1.0, access_count / 5)
-    return quality * 0.6 + trust * 0.25 + history * 0.15
+    return (
+        quality * 0.4
+        + trust * 0.25
+        + continuity * 0.22
+        + lifecycle * 0.08
+        + history * 0.05
+    )
+
+
+def _retrieval_trust_score(value: Any) -> float:
+    trust = normalize_trust_level(value)
+    scores = {
+        TrustLevel.UNVERIFIED: 0.4,
+        TrustLevel.INFERRED: 0.75,
+        TrustLevel.OBSERVED: 0.95,
+        TrustLevel.VERIFIED: 1.0,
+        TrustLevel.SYSTEM: 1.0,
+    }
+    return scores[trust]
+
+
+def _retrieval_lifecycle_score(value: Any) -> float:
+    stage = str(value or "")
+    if stage in {"forgotten", "expired"}:
+        return 0.0
+    if stage == "archived":
+        return 0.7
+    if stage in VALID_STAGES:
+        return 1.0
+    return 0.0
 
 
 def _compression_preservation_score(items: list[dict[str, Any]]) -> float:
