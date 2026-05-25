@@ -64,6 +64,8 @@ def test_context_json_and_render_shapes(repo_root: Path, monkeypatch: pytest.Mon
     assert payload["provider"] == "mnemos"
     assert payload["mode"] == "deterministic-v1"
     assert payload["host"] == "claude-code"
+    assert payload["partial_failure"] is False
+    assert payload["retrieval_diagnostics"]["status"] == "ok"
     assert payload["results"][0]["id"] == "ctx-001"
     assert {"id", "layer", "score", "recency", "content"}.issubset(payload["results"][0])
 
@@ -74,6 +76,7 @@ def test_context_json_and_render_shapes(repo_root: Path, monkeypatch: pytest.Mon
     assert rendered.exit_code == 0, rendered.output
     assert rendered.output.startswith("<mnemos-context")
     assert 'advisory="true"' in rendered.output
+    assert 'retrieval-status="ok"' in rendered.output
     assert '<memory id="ctx-001"' in rendered.output
 
 
@@ -229,8 +232,51 @@ def test_context_quietly_degrades_for_empty_and_failed_retrieval(repo_root: Path
     )
 
     assert payload["status"] == "degraded"
+    assert payload["partial_failure"] is True
+    assert payload["retrieval_diagnostics"]["status"] == "degraded"
+    assert "context_search" in payload["retrieval_diagnostics"]["degraded_reasons"][0]
     assert payload["results"] == []
     assert render_context_block(payload) == ""
+
+
+def test_context_exposes_backend_degradation_without_dropping_memory(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Context JSON carries retrieval degradation evidence when vector search is degraded."""
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "invalid_backend")
+    gw = MemoryGateway(repo_root=str(repo_root))
+    gw.capture(
+        layer="project",
+        item_id="ctx-backend-diagnostic",
+        content="Backend diagnostics should not block deterministic context retrieval.",
+        quality_score=0.95,
+        no_classify=True,
+    )
+
+    payload = retrieve_context(
+        prompt="backend diagnostics deterministic context",
+        session_id="sess-backend",
+        host="test",
+        gateway=gw,
+        limit=1,
+    )
+    rendered = render_context_block(payload)
+
+    assert payload["status"] == "degraded"
+    assert payload["partial_failure"] is True
+    assert payload["results"][0]["id"] == "ctx-backend-diagnostic"
+    diagnostics = payload["retrieval_diagnostics"]
+    vector = next(
+        backend
+        for attempt in diagnostics["attempts"]
+        for backend in attempt.get("backends", [])
+        if backend.get("name") == "vector"
+    )
+    assert diagnostics["status"] == "degraded"
+    assert vector["status"] == "unsupported"
+    assert 'retrieval-status="degraded"' in rendered
 
 
 def test_capabilities_include_autonomous_flags() -> None:

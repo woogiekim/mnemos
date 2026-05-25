@@ -210,6 +210,63 @@ def _skip_reason(score: float, item: dict[str, Any], content: str, components: d
     return None
 
 
+def _search_diagnostics(gw: Any, query: str) -> dict[str, Any] | None:
+    diagnostics = getattr(gw, "last_search_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return None
+
+    payload = dict(diagnostics)
+    payload["query"] = query
+    return payload
+
+
+def _combine_retrieval_diagnostics(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a compact context-level retrieval diagnostics payload."""
+    if not attempts:
+        return {
+            "status": "unknown",
+            "partial_failure": False,
+            "fallback_used": False,
+            "attempt_count": 0,
+            "degraded_reasons": [],
+            "attempts": [],
+        }
+
+    partial_failure = any(bool(attempt.get("partial_failure")) for attempt in attempts)
+    fallback_used = any(bool(attempt.get("fallback_used")) for attempt in attempts)
+    degraded_reasons: list[str] = []
+    seen_reasons: set[str] = set()
+    for attempt in attempts:
+        for reason in attempt.get("degraded_reasons", []):
+            reason_text = str(reason)
+            if reason_text in seen_reasons:
+                continue
+            seen_reasons.add(reason_text)
+            degraded_reasons.append(reason_text)
+
+    return {
+        "status": "degraded" if partial_failure else "ok",
+        "partial_failure": partial_failure,
+        "fallback_used": fallback_used,
+        "attempt_count": len(attempts),
+        "degraded_reasons": degraded_reasons,
+        "attempts": attempts[:8],
+    }
+
+
+def _error_diagnostics(query: str, exc: Exception) -> dict[str, Any]:
+    reason = _format_error(exc)
+    return {
+        "query": query,
+        "status": "degraded",
+        "partial_failure": True,
+        "fallback_used": False,
+        "degraded_reasons": [f"context_search: {reason}"],
+        "backends": [],
+        "result_count": 0,
+    }
+
+
 def _enrich(gw: MemoryGateway, result: dict[str, Any], score: float) -> dict[str, Any]:
     item_id = result.get("item_id") or result.get("id") or ""
     metadata = result.get("metadata") or {}
@@ -256,17 +313,25 @@ def retrieve_context(
         partial_failure = False
     keywords = extract_keywords(prompt)
     query = " ".join(keywords) if keywords else prompt[:120]
+    diagnostic_attempts: list[dict[str, Any]] = []
     if gw is None:
         raw_results = []
     else:
         try:
             search_limit = max(limit * 3, _DEFAULT_LIMIT, 1)
             raw_results = gw.search(query=query, limit=search_limit) if query else []
+            diagnostics = _search_diagnostics(gw, query)
+            if diagnostics is not None:
+                diagnostic_attempts.append(diagnostics)
             if not raw_results:
                 seen_ids: set[str] = set()
                 fallback_results: list[dict[str, Any]] = []
                 for keyword in keywords:
-                    for result in gw.search(query=keyword, limit=search_limit):
+                    keyword_results = gw.search(query=keyword, limit=search_limit)
+                    diagnostics = _search_diagnostics(gw, keyword)
+                    if diagnostics is not None:
+                        diagnostic_attempts.append(diagnostics)
+                    for result in keyword_results:
                         result_id = str(result.get("item_id") or result.get("id") or "")
                         if result_id in seen_ids:
                             continue
@@ -277,9 +342,10 @@ def retrieve_context(
                     if len(fallback_results) >= search_limit:
                         break
                 raw_results = fallback_results
-        except Exception:
+        except Exception as exc:
             raw_results = []
             partial_failure = True
+            diagnostic_attempts.append(_error_diagnostics(query, exc))
 
     skipped: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []
@@ -332,10 +398,14 @@ def retrieve_context(
         item["content"] = content
         results.append(item)
 
+    retrieval_diagnostics = _combine_retrieval_diagnostics(diagnostic_attempts)
+    partial_failure = partial_failure or bool(retrieval_diagnostics.get("partial_failure"))
+
     return {
         "provider": "mnemos",
         "provider_contract_version": PROVIDER_CONTRACT_VERSION,
         "status": "degraded" if partial_failure else "ok",
+        "partial_failure": partial_failure,
         "mode": "deterministic-v1",
         "host": host,
         "session_id": session_id,
@@ -347,6 +417,7 @@ def retrieve_context(
         "max_chars": max_chars,
         "used_chars": used_chars,
         "score_scale": SCORE_SCALE,
+        "retrieval_diagnostics": retrieval_diagnostics,
         "selection": {
             "candidate_count": total_candidates,
             "selected_count": len(results),
@@ -366,6 +437,7 @@ def render_context_block(payload: dict[str, Any]) -> str:
         return promotion_block
 
     selection = payload.get("selection") or {}
+    retrieval = payload.get("retrieval_diagnostics") or {}
     attrs = {
         "mode": payload.get("mode", "deterministic-v1"),
         "host": payload.get("host") or "",
@@ -374,6 +446,8 @@ def render_context_block(payload: dict[str, Any]) -> str:
         "count": str(payload.get("count", 0)),
         "selected": str(selection.get("selected_count", payload.get("count", 0))),
         "skipped": str(selection.get("skipped_count", 0)),
+        "retrieval-status": str(retrieval.get("status") or ""),
+        "fallback-used": "true" if retrieval.get("fallback_used") else "false",
         "advisory": "true",
     }
     attr_text = " ".join(f'{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items() if value != "")
@@ -459,3 +533,11 @@ def render_promotion_block(*, repo_root: str | None) -> str:
     lines.extend(f"<promotion>{html.escape(item)}</promotion>" for item in promotions)
     lines.append("</mnemos-promotion>")
     return "\n".join(lines)
+
+
+def _format_error(exc: Exception) -> str:
+    """Return a compact, JSON-safe exception summary."""
+    message = str(exc)
+    if message:
+        return f"{exc.__class__.__name__}: {message}"
+    return exc.__class__.__name__
