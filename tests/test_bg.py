@@ -638,6 +638,7 @@ class TestBgCheckCliCommand:
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-backends.json").exists()
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-health.json").exists()
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-readiness.json").exists()
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "readiness-history.jsonl").exists()
 
     def test_bg_check_memory_os_recover_repairs_before_scoring(self, repo_root: Path, tmp_path):
         """Opt-in recovery repairs metadata and records recovery evidence before scoring."""
@@ -726,9 +727,11 @@ class TestBgCheckCliCommand:
         latest_metrics = repo_root / ".agent" / "reports" / "memory-os" / "latest-metrics.json"
         latest_backends = repo_root / ".agent" / "reports" / "memory-os" / "latest-backends.json"
         latest_readiness = repo_root / ".agent" / "reports" / "memory-os" / "latest-readiness.json"
+        readiness_history = repo_root / ".agent" / "reports" / "memory-os" / "readiness-history.jsonl"
         assert latest_metrics.exists()
         assert latest_backends.exists()
         assert latest_readiness.exists()
+        assert readiness_history.exists()
         payload = json.loads(latest_metrics.read_text(encoding="utf-8"))
         assert payload["kind"] == "metrics_snapshot"
 
@@ -763,6 +766,7 @@ class TestBgCheckCliCommand:
         assert result.has_activity is True
         assert "Memory OS readiness not_ready" in result.to_context_block()
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-readiness.json").exists()
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "readiness-history.jsonl").exists()
 
 
 # ---------------------------------------------------------------------------

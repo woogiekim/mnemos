@@ -514,6 +514,8 @@ class MemoryOSReadinessReport:
 
     status: str
     ready: bool
+    thresholds: dict[str, Any]
+    trend: dict[str, Any]
     metrics: OperationalMetrics
     validation: OperationalValidationReport | None
     backend_health: RetrievalBackendHealthReport
@@ -527,6 +529,8 @@ class MemoryOSReadinessReport:
             "status": self.status,
             "ready": self.ready,
             "generated_at": self.generated_at,
+            "thresholds": dict(self.thresholds),
+            "trend": dict(self.trend),
             "metrics": self.metrics.to_dict(),
             "validation": self.validation.to_dict() if self.validation is not None else None,
             "backend_health": self.backend_health.to_dict(),
@@ -1160,9 +1164,33 @@ class MemoryOperationsEngine:
         else:
             status = "ready"
 
+        ready = not has_critical
+        thresholds = {
+            "max_evidence_age_hours": max_evidence_age_hours,
+            "required_evidence": list(READINESS_REQUIRED_EVIDENCE),
+            "calibrated": calibrated,
+            "min_score": min_score,
+            "validation_gates": (
+                {
+                    gate.name: gate.threshold
+                    for gate in validation.gates
+                }
+                if validation is not None
+                else {}
+            ),
+        }
+        trend = self._readiness_trend(
+            status=status,
+            ready=ready,
+            gaps=tuple(gaps),
+            metrics=metrics,
+        )
+
         return MemoryOSReadinessReport(
             status=status,
-            ready=not has_critical,
+            ready=ready,
+            thresholds=thresholds,
+            trend=trend,
             metrics=metrics,
             validation=validation,
             backend_health=backend_health,
@@ -1185,7 +1213,32 @@ class MemoryOperationsEngine:
         path = self._evidence_path("readiness", label or report.status)
         _write_json(path, payload)
         _write_json(self._evidence_dir / "latest-readiness.json", payload)
+        self._append_jsonl(self._evidence_dir / "readiness-history.jsonl", payload)
         return path
+
+    def readiness_history(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Read persisted Memory OS readiness snapshots."""
+        path = self._evidence_dir / "readiness-history.jsonl"
+        if not path.exists():
+            return []
+
+        records: list[dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+
+        if limit is not None:
+            return records[-limit:]
+        return records
 
     def retrieval_backend_health(self) -> RetrievalBackendHealthReport:
         """Report retrieval backend health, vector availability, and fallback readiness."""
@@ -1422,6 +1475,70 @@ class MemoryOperationsEngine:
             "status": status,
             "previous_recorded_at": previous_record.get("recorded_at"),
             "deltas": deltas,
+        }
+
+    def _readiness_trend(
+        self,
+        *,
+        status: str,
+        ready: bool,
+        gaps: tuple[ReadinessGap, ...],
+        metrics: OperationalMetrics,
+    ) -> dict[str, Any]:
+        history = self.readiness_history(limit=1)
+        current_scores = metrics.to_dict()["scores"]
+        if not history:
+            return {
+                "status": "no_history",
+                "previous_recorded_at": None,
+                "status_changed": False,
+                "ready_delta": 0,
+                "gap_count_delta": 0,
+                "score_deltas": {},
+            }
+
+        previous_record = history[-1]
+        previous_report = (
+            previous_record.get("report", {})
+            if isinstance(previous_record, dict)
+            else {}
+        )
+        previous_scores = (
+            previous_report.get("metrics", {}).get("scores", {})
+            if isinstance(previous_report, dict)
+            else {}
+        )
+        score_deltas = {
+            name: _round_delta(
+                float(current_scores.get(name, 0.0)) - float(previous_scores.get(name, 0.0))
+            )
+            for name in SCORE_NAMES
+            if name in previous_scores
+        }
+        previous_ready = bool(previous_report.get("ready")) if isinstance(previous_report, dict) else False
+        previous_gaps = previous_report.get("gaps", []) if isinstance(previous_report, dict) else []
+        previous_gap_count = len(previous_gaps) if isinstance(previous_gaps, list) else 0
+        ready_delta = int(ready) - int(previous_ready)
+        gap_count_delta = len(gaps) - previous_gap_count
+        status_changed = str(previous_report.get("status") or "") != status
+
+        improving = ready_delta > 0 or gap_count_delta < 0 or any(value > 0 for value in score_deltas.values())
+        declining = ready_delta < 0 or gap_count_delta > 0 or any(value < 0 for value in score_deltas.values())
+        if declining:
+            trend_status = "declining"
+        elif improving:
+            trend_status = "improving"
+        else:
+            trend_status = "stable"
+
+        return {
+            "status": trend_status,
+            "previous_recorded_at": previous_record.get("recorded_at"),
+            "status_changed": status_changed,
+            "previous_status": previous_report.get("status"),
+            "ready_delta": ready_delta,
+            "gap_count_delta": gap_count_delta,
+            "score_deltas": score_deltas,
         }
 
     def _evidence_path(self, category: str, label: str) -> Path:

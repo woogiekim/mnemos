@@ -556,12 +556,22 @@ def test_readiness_audit_records_consolidated_report_when_evidence_is_fresh(
 
     report = engine.audit_readiness(layers=["project"], min_score=0.7)
     readiness_path = engine.record_readiness_report(report)
+    second_report = engine.audit_readiness(layers=["project"], min_score=0.7)
+    engine.record_readiness_report(second_report)
 
     assert report.ready is True
     assert report.status == "ready"
+    assert report.thresholds["max_evidence_age_hours"] == 24.0
+    assert report.thresholds["validation_gates"]["retrieval_backend_health"] == 1.0
+    assert report.trend["status"] == "no_history"
+    assert second_report.trend["status"] == "stable"
+    assert second_report.trend["gap_count_delta"] == 0
+    assert second_report.trend["score_deltas"]["retrieval_relevance_score"] == 0.0
     assert {item.kind: item.status for item in report.evidence}["metrics"] == "fresh"
     assert readiness_path.exists()
     assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-readiness.json").exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "readiness-history.jsonl").exists()
+    assert len(engine.readiness_history()) == 2
 
 
 def test_readiness_audit_fails_on_backend_degradation(
@@ -718,8 +728,11 @@ def test_memory_operations_cli_and_capabilities(
     readiness_payload = json.loads(readiness_result.output)
     assert readiness_payload["ready"] is True
     assert readiness_payload["status"] in {"ready", "needs_attention"}
+    assert readiness_payload["thresholds"]["required_evidence"] == ["metrics", "health", "backends"]
+    assert readiness_payload["trend"]["status"] == "no_history"
     assert readiness_payload["validation"]["status"] == "passed"
     assert Path(readiness_payload["evidence_path"]).exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "readiness-history.jsonl").exists()
     assert compress_result.exit_code == 0, compress_result.output
     compress_payload = json.loads(compress_result.output)
     assert compress_payload["status"] == "completed"
