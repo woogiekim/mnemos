@@ -347,6 +347,9 @@ def test_health_validation_tracks_trend_from_metric_history(
 
     assert report.passed is True
     assert report.status == "passed"
+    assert report.backend_health is not None
+    assert report.backend_health.status == "ok"
+    assert {gate.name for gate in report.gates} >= {"retrieval_backend_health"}
     assert report.trend["status"] == "improving"
     assert report.trend["deltas"]["retrieval_relevance_score"] > 0
     assert validation_path.exists()
@@ -450,6 +453,41 @@ def test_health_validation_fails_when_operational_scores_are_below_threshold(
     assert report.status == "failed"
     assert gates["context_continuity_score"].passed is False
     assert gates["retrieval_relevance_score"].passed is False
+
+
+def test_health_validation_fails_on_configured_backend_degradation(
+    operations_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured retrieval backend degradation is a Memory OS health failure."""
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "invalid_backend")
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="backend-health-gate",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "backend-health-gate",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
+
+    report = MemoryOperationsEngine(gateway).validate_health(
+        layers=["project"],
+        min_score=0.0,
+    )
+    gates = {gate.name: gate for gate in report.gates}
+
+    assert report.passed is False
+    assert report.status == "failed"
+    assert report.backend_health is not None
+    assert report.backend_health.status == "degraded"
+    assert gates["retrieval_backend_health"].passed is False
+    assert report.to_dict()["backend_health"]["backends"][1]["status"] == "unsupported"
 
 
 def test_recovery_dry_run_detects_metadata_and_parse_issues(
@@ -578,6 +616,7 @@ def test_memory_operations_cli_and_capabilities(
     assert validate_result.exit_code == 0, validate_result.output
     validate_payload = json.loads(validate_result.output)
     assert validate_payload["status"] == "passed"
+    assert validate_payload["backend_health"]["status"] == "ok"
     assert Path(validate_payload["evidence_path"]).exists()
     assert calibrate_result.exit_code == 0, calibrate_result.output
     calibrate_payload = json.loads(calibrate_result.output)

@@ -237,11 +237,12 @@ class OperationalValidationReport:
     gates: tuple[HealthGateResult, ...]
     metrics: OperationalMetrics
     trend: dict[str, Any]
+    backend_health: "RetrievalBackendHealthReport | None" = None
     generated_at: str = field(default_factory=_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
-        return {
+        payload = {
             "status": self.status,
             "passed": self.passed,
             "generated_at": self.generated_at,
@@ -249,6 +250,9 @@ class OperationalValidationReport:
             "metrics": self.metrics.to_dict(),
             "trend": self.trend,
         }
+        if self.backend_health is not None:
+            payload["backend_health"] = self.backend_health.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -674,6 +678,14 @@ class MemoryOperationsEngine:
             )
             for name in SCORE_NAMES
         )
+        backend_health = self.retrieval_backend_health()
+        backend_gate = HealthGateResult(
+            name="retrieval_backend_health",
+            actual=1.0 if backend_health.status == "ok" else 0.0,
+            threshold=1.0,
+            passed=backend_health.status == "ok",
+        )
+        gates = gates + (backend_gate,)
         passed = all(gate.passed for gate in gates)
         return OperationalValidationReport(
             status="passed" if passed else "failed",
@@ -681,6 +693,7 @@ class MemoryOperationsEngine:
             gates=gates,
             metrics=metrics,
             trend=self._metric_trend(metrics),
+            backend_health=backend_health,
         )
 
     def calibrate_health(
