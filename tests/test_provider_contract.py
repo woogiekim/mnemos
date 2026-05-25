@@ -91,6 +91,7 @@ class TestProviderCapabilities:
         assert payload["capabilities"]["search_scores"] is True
         assert payload["capability_status"]["retrieval_backend_health"] == "supported"
         assert payload["capability_status"]["retrieval_degradation_evidence"] == "supported"
+        assert payload["capability_status"]["memory_os_readiness_audit"] == "supported"
         assert payload["status_values"] == ["supported", "unsupported", "unknown"]
         assert payload["capability_status"]["capture_json"] == "supported"
         assert payload["capability_status"]["read_json"] == "supported"

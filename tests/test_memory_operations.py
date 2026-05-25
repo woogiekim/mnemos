@@ -490,6 +490,111 @@ def test_health_validation_fails_on_configured_backend_degradation(
     assert report.to_dict()["backend_health"]["backends"][1]["status"] == "unsupported"
 
 
+def test_readiness_audit_reports_missing_evidence_as_actionable_gap(
+    operations_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness audit aggregates health and reports durable evidence gaps."""
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "none")
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="readiness-gap-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "readiness-gap",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
+
+    report = MemoryOperationsEngine(gateway).audit_readiness(
+        layers=["project"],
+        min_score=0.7,
+    )
+    gap_codes = {gap.code for gap in report.gaps}
+
+    assert report.ready is True
+    assert report.status == "needs_attention"
+    assert report.validation is not None
+    assert report.validation.passed is True
+    assert "evidence_missing:metrics" in gap_codes
+    assert "evidence_missing:health" in gap_codes
+    assert "evidence_missing:backends" in gap_codes
+
+
+def test_readiness_audit_records_consolidated_report_when_evidence_is_fresh(
+    operations_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh evidence plus passing health produces a persisted readiness report."""
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "none")
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="readiness-ready-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "readiness-ready",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
+    engine = MemoryOperationsEngine(gateway)
+    metrics = engine.compute_metrics(layers=["project"])
+    engine.record_metrics_snapshot(metrics)
+    engine.record_backend_health_report(engine.retrieval_backend_health())
+    engine.record_validation_report(
+        engine.validate_health(layers=["project"], metrics=metrics, min_score=0.7)
+    )
+
+    report = engine.audit_readiness(layers=["project"], min_score=0.7)
+    readiness_path = engine.record_readiness_report(report)
+
+    assert report.ready is True
+    assert report.status == "ready"
+    assert {item.kind: item.status for item in report.evidence}["metrics"] == "fresh"
+    assert readiness_path.exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-readiness.json").exists()
+
+
+def test_readiness_audit_fails_on_backend_degradation(
+    operations_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness audit is not ready when configured retrieval backends are unhealthy."""
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "invalid_backend")
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="readiness-backend-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "readiness-backend",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
+
+    report = MemoryOperationsEngine(gateway).audit_readiness(
+        layers=["project"],
+        min_score=0.0,
+    )
+
+    assert report.ready is False
+    assert report.status == "not_ready"
+    assert any(gap.code == "gate_failed:retrieval_backend_health" for gap in report.gaps)
+
+
 def test_recovery_dry_run_detects_metadata_and_parse_issues(
     operations_repo: Path,
 ) -> None:
@@ -578,6 +683,7 @@ def test_memory_operations_cli_and_capabilities(
 
     metrics_result = runner.invoke(cli, ["memory-metrics", "--record", "--json"])
     backends_result = runner.invoke(cli, ["memory-backends", "--record", "--json"])
+    readiness_result = runner.invoke(cli, ["memory-readiness", "--min-score", "0.7", "--record", "--json"])
     compress_result = runner.invoke(
         cli,
         [
@@ -608,6 +714,12 @@ def test_memory_operations_cli_and_capabilities(
     assert backends_payload["retrieval_contract"] == "fts-primary-vector-optional-grep-fallback"
     assert Path(backends_payload["evidence_path"]).exists()
     assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-backends.json").exists()
+    assert readiness_result.exit_code == 0, readiness_result.output
+    readiness_payload = json.loads(readiness_result.output)
+    assert readiness_payload["ready"] is True
+    assert readiness_payload["status"] in {"ready", "needs_attention"}
+    assert readiness_payload["validation"]["status"] == "passed"
+    assert Path(readiness_payload["evidence_path"]).exists()
     assert compress_result.exit_code == 0, compress_result.output
     compress_payload = json.loads(compress_result.output)
     assert compress_payload["status"] == "completed"
@@ -639,3 +751,4 @@ def test_memory_operations_cli_and_capabilities(
     assert capabilities["capability_status"]["empirical_metric_calibration"] == "supported"
     assert capabilities["capability_status"]["retrieval_backend_health"] == "supported"
     assert capabilities["capability_status"]["retrieval_degradation_evidence"] == "supported"
+    assert capabilities["capability_status"]["memory_os_readiness_audit"] == "supported"

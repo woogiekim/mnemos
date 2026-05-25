@@ -41,6 +41,18 @@ SCORE_NAMES: tuple[str, ...] = (
     "persistent_memory_stability",
 )
 
+READINESS_EVIDENCE_FILES: dict[str, str] = {
+    "metrics": "latest-metrics.json",
+    "health": "latest-health.json",
+    "backends": "latest-backends.json",
+    "calibration": "latest-calibration.json",
+    "compression": "latest-compression.json",
+    "lifecycle": "latest-lifecycle.json",
+    "recovery": "latest-recovery.json",
+}
+
+READINESS_REQUIRED_EVIDENCE: tuple[str, ...] = ("metrics", "health", "backends")
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -449,6 +461,77 @@ class RetrievalBackendHealthReport:
             "generated_at": self.generated_at,
             "degraded_reasons": list(self.degraded_reasons),
             "backends": [dict(backend) for backend in self.backends],
+        }
+
+
+@dataclass(frozen=True)
+class ReadinessGap:
+    """One actionable Memory OS readiness gap."""
+
+    code: str
+    severity: str
+    message: str
+    remediation: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "remediation": self.remediation,
+        }
+
+
+@dataclass(frozen=True)
+class EvidenceFreshness:
+    """Freshness metadata for one durable evidence artifact."""
+
+    kind: str
+    path: str
+    status: str
+    required: bool
+    recorded_at: str | None = None
+    age_hours: float | None = None
+    message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "kind": self.kind,
+            "path": self.path,
+            "status": self.status,
+            "required": self.required,
+            "recorded_at": self.recorded_at,
+            "age_hours": self.age_hours,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
+class MemoryOSReadinessReport:
+    """Consolidated Memory OS readiness and audit report."""
+
+    status: str
+    ready: bool
+    metrics: OperationalMetrics
+    validation: OperationalValidationReport | None
+    backend_health: RetrievalBackendHealthReport
+    evidence: tuple[EvidenceFreshness, ...]
+    gaps: tuple[ReadinessGap, ...]
+    generated_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "status": self.status,
+            "ready": self.ready,
+            "generated_at": self.generated_at,
+            "metrics": self.metrics.to_dict(),
+            "validation": self.validation.to_dict() if self.validation is not None else None,
+            "backend_health": self.backend_health.to_dict(),
+            "evidence": [item.to_dict() for item in self.evidence],
+            "gaps": [gap.to_dict() for gap in self.gaps],
         }
 
 
@@ -997,6 +1080,113 @@ class MemoryOperationsEngine:
         _write_json(self._evidence_dir / "latest-compression.json", payload)
         return path
 
+    def audit_readiness(
+        self,
+        *,
+        layers: list[str] | None = None,
+        min_score: float | None = None,
+        calibrated: bool = False,
+        max_evidence_age_hours: float = 24.0,
+    ) -> MemoryOSReadinessReport:
+        """Build a consolidated Memory OS readiness report without mutating memory."""
+        metrics = self.compute_metrics(layers=layers)
+        gaps: list[ReadinessGap] = []
+        try:
+            validation = self.validate_health(
+                layers=layers,
+                metrics=metrics,
+                min_score=min_score,
+                calibrated=calibrated,
+            )
+            backend_health = validation.backend_health or self.retrieval_backend_health()
+        except FileNotFoundError as exc:
+            validation = None
+            backend_health = self.retrieval_backend_health()
+            gaps.append(
+                ReadinessGap(
+                    code="calibration_missing",
+                    severity="critical",
+                    message=str(exc),
+                    remediation="Run `mnemos memory-calibrate --record` or omit `--calibrated`.",
+                )
+            )
+
+        if metrics.item_count == 0:
+            gaps.append(
+                ReadinessGap(
+                    code="memory_empty",
+                    severity="critical",
+                    message="No operational memory items were available for readiness scoring.",
+                    remediation="Capture or import Memory OS items before validating readiness.",
+                )
+            )
+
+        if validation is not None and not validation.passed:
+            for gate in validation.gates:
+                if gate.passed:
+                    continue
+                gaps.append(
+                    ReadinessGap(
+                        code=f"gate_failed:{gate.name}",
+                        severity="critical",
+                        message=(
+                            f"{gate.name} is {gate.actual:.3f}, "
+                            f"below required {gate.threshold:.3f}."
+                        ),
+                        remediation=_gate_remediation(gate.name),
+                    )
+                )
+
+        evidence = self._evidence_freshness(max_age_hours=max_evidence_age_hours)
+        for item in evidence:
+            if item.status == "fresh":
+                continue
+            severity = "warning" if item.required else "info"
+            gaps.append(
+                ReadinessGap(
+                    code=f"evidence_{item.status}:{item.kind}",
+                    severity=severity,
+                    message=item.message or f"{item.kind} evidence is {item.status}.",
+                    remediation=_evidence_remediation(item.kind),
+                )
+            )
+
+        has_critical = any(gap.severity == "critical" for gap in gaps)
+        has_warning = any(gap.severity == "warning" for gap in gaps)
+        if has_critical:
+            status = "not_ready"
+        elif has_warning:
+            status = "needs_attention"
+        else:
+            status = "ready"
+
+        return MemoryOSReadinessReport(
+            status=status,
+            ready=not has_critical,
+            metrics=metrics,
+            validation=validation,
+            backend_health=backend_health,
+            evidence=evidence,
+            gaps=tuple(gaps),
+        )
+
+    def record_readiness_report(
+        self,
+        report: MemoryOSReadinessReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist a consolidated Memory OS readiness report."""
+        payload = {
+            "kind": "memory_os_readiness",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("readiness", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-readiness.json", payload)
+        return path
+
     def retrieval_backend_health(self) -> RetrievalBackendHealthReport:
         """Report retrieval backend health, vector availability, and fallback readiness."""
         if hasattr(self._gateway, "retrieval_backend_health"):
@@ -1040,6 +1230,78 @@ class MemoryOperationsEngine:
         _write_json(path, payload)
         _write_json(self._evidence_dir / "latest-backends.json", payload)
         return path
+
+    def _evidence_freshness(
+        self,
+        *,
+        max_age_hours: float,
+    ) -> tuple[EvidenceFreshness, ...]:
+        items: list[EvidenceFreshness] = []
+        now = datetime.now(timezone.utc)
+        for kind, filename in READINESS_EVIDENCE_FILES.items():
+            path = self._evidence_dir / filename
+            required = kind in READINESS_REQUIRED_EVIDENCE
+            if not path.exists():
+                items.append(
+                    EvidenceFreshness(
+                        kind=kind,
+                        path=str(path),
+                        status="missing",
+                        required=required,
+                        message=f"{kind} evidence has not been recorded.",
+                    )
+                )
+                continue
+
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                items.append(
+                    EvidenceFreshness(
+                        kind=kind,
+                        path=str(path),
+                        status="corrupt",
+                        required=required,
+                        message=f"{kind} evidence could not be parsed: {exc}",
+                    )
+                )
+                continue
+
+            recorded_at = str(payload.get("recorded_at") or "")
+            recorded_dt = _parse_iso(recorded_at)
+            if recorded_dt is None:
+                items.append(
+                    EvidenceFreshness(
+                        kind=kind,
+                        path=str(path),
+                        status="corrupt",
+                        required=required,
+                        recorded_at=recorded_at or None,
+                        message=f"{kind} evidence is missing a valid recorded_at timestamp.",
+                    )
+                )
+                continue
+
+            age_hours = round(max(0.0, (now - recorded_dt).total_seconds() / 3600.0), 6)
+            status = "fresh" if age_hours <= max_age_hours else "stale"
+            message = None
+            if status == "stale":
+                message = (
+                    f"{kind} evidence is {age_hours:.2f} hours old, "
+                    f"above the {max_age_hours:.2f} hour threshold."
+                )
+            items.append(
+                EvidenceFreshness(
+                    kind=kind,
+                    path=str(path),
+                    status=status,
+                    required=required,
+                    recorded_at=recorded_at,
+                    age_hours=age_hours,
+                    message=message,
+                )
+            )
+        return tuple(items)
 
     def recover_store(
         self,
@@ -1490,6 +1752,45 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_iso(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _gate_remediation(name: str) -> str:
+    remediations = {
+        "context_continuity_score": "Capture workflow IDs, summaries, relationships, or source references for operational memories.",
+        "retrieval_relevance_score": "Improve tags, trust metadata, quality scores, and access history for workflow-relevant memories.",
+        "historical_awareness_accuracy": "Add decision history, source item links, and workflow continuity metadata.",
+        "compression_preservation_quality": "Run `mnemos memory-compress --record` and review continuity page preservation.",
+        "lifecycle_consistency_rate": "Run `mnemos recover --apply --record` and `mnemos lifecycle-run --record`.",
+        "persistent_memory_stability": "Run `mnemos recover --apply --record` to repair parse or metadata issues.",
+        "retrieval_backend_health": "Run `mnemos memory-backends --record` and fix configured vector/index backends.",
+    }
+    return remediations.get(name, "Inspect Memory OS metrics and rerun the relevant maintenance command.")
+
+
+def _evidence_remediation(kind: str) -> str:
+    commands = {
+        "metrics": "Run `mnemos memory-metrics --record`.",
+        "health": "Run `mnemos memory-validate --record`.",
+        "backends": "Run `mnemos memory-backends --record`.",
+        "calibration": "Run `mnemos memory-calibrate --record`.",
+        "compression": "Run `mnemos memory-compress --record` after selecting source layers.",
+        "lifecycle": "Run `mnemos lifecycle-run --record`.",
+        "recovery": "Run `mnemos recover --record`.",
+    }
+    return commands.get(kind, "Regenerate the corresponding Memory OS evidence artifact.")
 
 
 def _content_hash(content: str) -> str:

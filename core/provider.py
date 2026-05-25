@@ -38,6 +38,7 @@ CAPABILITIES: dict[str, bool | str] = {
     "empirical_metric_calibration": "supported",
     "retrieval_backend_health": "supported",
     "retrieval_degradation_evidence": "supported",
+    "memory_os_readiness_audit": "supported",
 }
 
 
@@ -87,6 +88,7 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "empirical_metric_calibration": "mnemos memory-calibrate derives and persists health validation baselines from metric history.",
     "retrieval_backend_health": "mnemos memory-backends reports FTS, vector, and fallback retrieval health.",
     "retrieval_degradation_evidence": "Search and Memory OS evidence expose backend degradation, vector availability, and fallback use.",
+    "memory_os_readiness_audit": "mnemos memory-readiness aggregates metrics, validation, backend health, evidence freshness, and remediation gaps.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {

@@ -1418,6 +1418,93 @@ def memory_backends_cmd(record: bool, as_json: bool) -> None:
         click.echo(f"  {'evidence':<8} {evidence_path}")
 
 
+@cli.command("memory-readiness")
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated list of layers to audit (default: all operational layers).",
+)
+@click.option(
+    "--min-score",
+    "min_score",
+    default=None,
+    type=float,
+    help="Uniform minimum score for validation gates.",
+)
+@click.option(
+    "--calibrated",
+    "calibrated",
+    is_flag=True,
+    default=False,
+    help="Validate readiness against the latest empirical calibration baseline.",
+)
+@click.option(
+    "--max-evidence-age-hours",
+    "max_evidence_age_hours",
+    default=24.0,
+    type=float,
+    help="Freshness threshold for durable Memory OS evidence.",
+)
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist the readiness report under .agent/reports/memory-os.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_readiness_cmd(
+    layers: str | None,
+    min_score: float | None,
+    calibrated: bool,
+    max_evidence_age_hours: float,
+    record: bool,
+    as_json: bool,
+) -> None:
+    """Audit consolidated Memory OS readiness."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        engine = MemoryOperationsEngine(gw)
+        report = engine.audit_readiness(
+            layers=layer_list,
+            min_score=min_score,
+            calibrated=calibrated,
+            max_evidence_age_hours=max_evidence_age_hours,
+        )
+        evidence_path = str(engine.record_readiness_report(report)) if record else None
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = report.to_dict()
+    if evidence_path:
+        payload["evidence_path"] = evidence_path
+    if as_json:
+        _echo_json(payload)
+    else:
+        click.echo(f"[mnemos readiness] {report.status}")
+        click.echo(f"  ready: {str(report.ready).lower()}")
+        click.echo(f"  memories: {report.metrics.item_count}")
+        click.echo(f"  backend_health: {report.backend_health.status}")
+        for gap in report.gaps:
+            click.echo(f"  {gap.severity}: {gap.code} — {gap.message}")
+            click.echo(f"    remediation: {gap.remediation}")
+        if evidence_path:
+            click.echo(f"  evidence: {evidence_path}")
+
+    if not report.ready:
+        sys.exit(1)
+
+
 @cli.command("memory-compress")
 @click.option(
     "--apply",
