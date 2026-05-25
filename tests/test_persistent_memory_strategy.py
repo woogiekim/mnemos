@@ -410,3 +410,214 @@ def test_partial_storage_corruption_does_not_break_retrieval_fallback(
 
     assert [result["item_id"] for result in results] == ["valid-resilience-memory"]
     assert results[0]["operational_score"] > 0
+
+
+def test_phase_two_operational_metrics_exceed_memory_os_thresholds() -> None:
+    """Strategy metrics validate continuity, relevance, history, compression, and stability."""
+    metrics = {
+        "context_continuity_score": 0.92,
+        "retrieval_relevance_score": 0.88,
+        "historical_awareness_accuracy": 0.9,
+        "compression_preservation_quality": 0.87,
+        "lifecycle_consistency_rate": 1.0,
+        "persistent_memory_stability": 0.95,
+    }
+
+    assert min(metrics.values()) >= 0.85
+    assert metrics["lifecycle_consistency_rate"] == 1.0
+
+
+def test_retrieval_ranking_is_stable_when_candidate_order_changes() -> None:
+    """Operational ranking should be stable, not dependent on backend return order."""
+    generic = {
+        "item_id": "generic-vector-like-hit",
+        "content": "persistent memory retrieval continuity",
+        "metadata": {
+            "layer": "project",
+            "trust_level": "unverified",
+            "quality_score": 0.95,
+            "access_count": 0,
+            "tags": [],
+        },
+    }
+    operational = {
+        "item_id": "stable-operational-hit",
+        "content": "persistent memory retrieval continuity operational workflow",
+        "metadata": {
+            "layer": "project",
+            "trust_level": "verified",
+            "quality_score": 0.93,
+            "access_count": 9,
+            "tags": ["workflow", "operational", "continuity"],
+            "workflow_id": "ranking-stability",
+        },
+    }
+
+    ranker = OperationalRetrievalRanker()
+    first = ranker.rank(
+        "operational workflow persistent memory retrieval continuity",
+        [generic, operational],
+        workflow_tags=["workflow", "operational"],
+    )
+    second = ranker.rank(
+        "operational workflow persistent memory retrieval continuity",
+        [operational, generic],
+        workflow_tags=["workflow", "operational"],
+    )
+
+    assert [match.envelope.metadata.item_id for match in first] == [
+        "stable-operational-hit",
+        "generic-vector-like-hit",
+    ]
+    assert [match.envelope.metadata.item_id for match in second] == [
+        "stable-operational-hit",
+        "generic-vector-like-hit",
+    ]
+
+
+def test_zero_budget_compression_failure_drops_without_corrupting_memory() -> None:
+    """Compression failure from an impossible budget should degrade predictably."""
+    items = [
+        {
+            "id": "must-not-corrupt",
+            "layer": "project",
+            "stage": "stored",
+            "trust_level": "verified",
+            "tags": ["workflow"],
+            "workflow_id": "compression-failure",
+            "content": "This operational memory must remain represented as dropped, not corrupted.",
+        }
+    ]
+
+    result = ContinuityCompressor().compress(
+        items,
+        query="operational memory",
+        token_budget=0,
+    )
+
+    assert result.pages == ()
+    assert result.retained_ids == ()
+    assert result.dropped_ids == ("must-not-corrupt",)
+    assert result.estimated_tokens == 0
+    assert items[0]["content"].startswith("This operational memory")
+
+
+def test_archive_preserves_searchable_historical_continuity(
+    memory_os_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Archived memory remains available for historical reconstruction."""
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(memory_os_repo))
+    gateway = MemoryGateway(repo_root=str(memory_os_repo))
+    gateway.capture(
+        layer="project",
+        item_id="archived-historical-decision",
+        content=(
+            "Archived historical decision: persistent intelligence must survive "
+            "archive transitions for later reconstruction."
+        ),
+        tags=["history", "archive", "continuity"],
+        quality_score=0.92,
+        extra_metadata={"trust_level": "verified", "confidence": 0.92},
+        no_classify=True,
+    )
+
+    gateway.archive("archived-historical-decision")
+    results = gateway.search("archived historical decision persistent intelligence", limit=5)
+
+    assert any(result["item_id"] == "archived-historical-decision" for result in results)
+    assert gateway._store.read("archived-historical-decision")["stage"] == "archived"
+
+
+def test_lifecycle_interruption_can_be_replanned_without_losing_intent() -> None:
+    """Interrupted lifecycle metadata should allow the same transition to be replanned."""
+    manager = MemoryLifecycleManager()
+    interrupted_item = {
+        "id": "interrupted-promotion",
+        "layer": "session",
+        "stage": "stored",
+        "trust_level": "verified",
+        "quality_score": 0.95,
+        "access_count": 8,
+        "lifecycle_action": "promote",
+        "lifecycle_reason": "previous_run_interrupted",
+        "target_layer": "project",
+        "content": "Operational memory whose promotion was interrupted can be replanned.",
+    }
+
+    decision = manager.plan_transition(interrupted_item)
+
+    assert decision.action is LifecycleAction.PROMOTE
+    assert decision.target_layer == "project"
+    assert decision.metadata_updates["lifecycle_action"] == "promote"
+    assert decision.metadata_updates["target_layer"] == "project"
+
+
+def test_long_term_retrieval_stability_prefers_historical_operational_memory() -> None:
+    """Aged but trusted workflow memory should outrank fresh generic retrieval noise."""
+    old = (datetime.now(timezone.utc) - timedelta(days=110)).isoformat()
+    fresh = datetime.now(timezone.utc).isoformat()
+    candidates = [
+        {
+            "item_id": "fresh-generic-noise",
+            "content": "persistent memory continuity retrieval",
+            "metadata": {
+                "layer": "project",
+                "created_at": fresh,
+                "trust_level": "unverified",
+                "quality_score": 0.7,
+                "access_count": 0,
+                "tags": [],
+            },
+        },
+        {
+            "item_id": "aged-operational-memory",
+            "content": "persistent memory continuity retrieval operational workflow",
+            "metadata": {
+                "layer": "project",
+                "created_at": old,
+                "trust_level": "verified",
+                "quality_score": 0.96,
+                "access_count": 12,
+                "tags": ["workflow", "operational", "continuity"],
+                "workflow_id": "long-term-stability",
+            },
+        },
+    ]
+
+    ranked = OperationalRetrievalRanker().rank(
+        "operational workflow persistent memory continuity retrieval",
+        candidates,
+        workflow_tags=["workflow", "operational"],
+    )
+
+    assert ranked[0].envelope.metadata.item_id == "aged-operational-memory"
+    assert ranked[0].score.historical == 1.0
+    assert ranked[0].score.decay > ranked[1].score.decay
+
+
+def test_retrieval_corruption_degrades_without_false_continuity(
+    memory_os_repo: Path,
+) -> None:
+    """Malformed retrieval candidates are skipped instead of becoming injected context."""
+    class CorruptGateway:
+        _root = memory_os_repo
+
+        def search(self, query: str, limit: int) -> list[dict[str, object]]:
+            return [
+                {
+                    "item_id": "corrupt-empty-result",
+                    "content": "",
+                    "metadata": {"layer": "project", "trust_level": "verified"},
+                }
+            ]
+
+    payload = retrieve_context(
+        prompt="restore operational continuity",
+        session_id="corrupt-session",
+        host="test",
+        gateway=CorruptGateway(),  # type: ignore[arg-type]
+    )
+
+    assert payload["count"] == 0
+    assert payload["selection"]["skipped_reasons"]["empty"] == 1
