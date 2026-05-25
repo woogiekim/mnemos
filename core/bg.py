@@ -338,6 +338,13 @@ class BackgroundCheckResult:
     duplicate_groups: list[DuplicateGroup] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     elapsed_ms: float = 0.0
+    memory_os_enabled: bool = False
+    memory_os_lifecycle_planned: int = 0
+    memory_os_lifecycle_applied: int = 0
+    memory_os_health_status: str | None = None
+    memory_os_validation_passed: bool | None = None
+    memory_os_evidence_paths: list[str] = field(default_factory=list)
+    memory_os_errors: list[str] = field(default_factory=list)
 
     @property
     def has_activity(self) -> bool:
@@ -346,6 +353,9 @@ class BackgroundCheckResult:
             self.gc_archived > 0
             or self.promoted > 0
             or self.duplicate_groups
+            or self.memory_os_lifecycle_applied > 0
+            or self.memory_os_validation_passed is False
+            or self.memory_os_errors
         )
 
     def to_context_block(self) -> str:
@@ -371,6 +381,14 @@ class BackgroundCheckResult:
             )
         if len(self.duplicate_groups) > 3:
             lines.append(f"[mnemos bg] ... and {len(self.duplicate_groups) - 3} more duplicate group(s)")
+        if self.memory_os_lifecycle_applied:
+            lines.append(
+                f"[mnemos bg] Memory OS applied {self.memory_os_lifecycle_applied} lifecycle transition(s)"
+            )
+        if self.memory_os_validation_passed is False:
+            lines.append("[mnemos bg] Memory OS health validation failed")
+        for error in self.memory_os_errors[:2]:
+            lines.append(f"[mnemos bg] Memory OS maintenance error: {error}")
         lines.append("</mnemos-context>")
         return "\n".join(lines)
 
@@ -390,6 +408,11 @@ def run_background_check(
     auto_promote_enabled: bool = True,
     dedup_enabled: bool = True,
     dedup_layers: list[str] | None = None,
+    memory_os_enabled: bool = False,
+    memory_os_apply: bool = False,
+    memory_os_min_score: float | None = None,
+    memory_os_layers: list[str] | None = None,
+    memory_os_record: bool = True,
     force: bool = False,
 ) -> BackgroundCheckResult:
     """Run all background maintenance operations.
@@ -421,6 +444,16 @@ def run_background_check(
         Run duplicate detection phase.
     dedup_layers:
         Layers to scan for duplicates. Defaults to session, project, global.
+    memory_os_enabled:
+        Run opt-in Memory OS lifecycle reporting, metrics snapshot, and health validation.
+    memory_os_apply:
+        Apply lifecycle transitions during the Memory OS phase. Defaults to dry-run reporting.
+    memory_os_min_score:
+        Optional uniform health validation threshold.
+    memory_os_layers:
+        Optional Memory OS layer filter.
+    memory_os_record:
+        Persist Memory OS lifecycle, metrics, and validation evidence.
     force:
         Skip the throttle check and always run.
 
@@ -481,6 +514,55 @@ def run_background_check(
                 )
         except Exception:
             pass  # Dedup failure is non-fatal
+
+    # Phase 4: opt-in Memory OS operational evidence and validation
+    if memory_os_enabled:
+        result.memory_os_enabled = True
+        try:
+            from core.gateway import MemoryGateway
+            from core.operations import MemoryOperationsEngine
+
+            gw = MemoryGateway(repo_root=repo_root)
+            engine = MemoryOperationsEngine(gw)
+            lifecycle_report = engine.run_lifecycle(
+                dry_run=not memory_os_apply,
+                layers=memory_os_layers,
+            )
+            result.memory_os_lifecycle_planned = lifecycle_report.planned_count
+            result.memory_os_lifecycle_applied = lifecycle_report.applied_count
+
+            if memory_os_record:
+                result.memory_os_evidence_paths.append(
+                    str(engine.record_lifecycle_report(lifecycle_report, label="bg-check"))
+                )
+
+            metrics = engine.compute_metrics(layers=memory_os_layers)
+            if memory_os_record:
+                result.memory_os_evidence_paths.append(
+                    str(engine.record_metrics_snapshot(metrics, label="bg-check"))
+                )
+
+            validation = engine.validate_health(
+                layers=memory_os_layers,
+                metrics=metrics,
+                min_score=memory_os_min_score,
+            )
+            result.memory_os_health_status = validation.status
+            result.memory_os_validation_passed = validation.passed
+            if memory_os_record:
+                result.memory_os_evidence_paths.append(
+                    str(engine.record_validation_report(validation, label="bg-check"))
+                )
+
+            if lifecycle_report.applied_count:
+                messages.append(
+                    f"Memory OS: applied {lifecycle_report.applied_count} lifecycle transition(s)"
+                )
+            if not validation.passed:
+                messages.append("Memory OS: health validation failed")
+        except Exception as exc:
+            result.memory_os_errors.append(str(exc))
+            messages.append("Memory OS: maintenance failed")
 
     t_end = time.monotonic()
     result.elapsed_ms = (t_end - t_start) * 1000

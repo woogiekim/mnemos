@@ -1550,6 +1550,40 @@ def recover_cmd(
         "Useful when called from daemons or crew:update where stdout must stay clean."
     ),
 )
+@click.option(
+    "--memory-os",
+    "memory_os_enabled",
+    is_flag=True,
+    default=False,
+    help="Run opt-in Memory OS lifecycle evidence, metrics snapshot, and health validation.",
+)
+@click.option(
+    "--memory-os-apply",
+    "memory_os_apply",
+    is_flag=True,
+    default=False,
+    help="Apply lifecycle transitions during the Memory OS bg-check phase.",
+)
+@click.option(
+    "--memory-os-min-score",
+    "memory_os_min_score",
+    default=None,
+    type=float,
+    help="Uniform minimum score for Memory OS health validation.",
+)
+@click.option(
+    "--memory-os-layer",
+    "memory_os_layers",
+    default=None,
+    help="Comma-separated Memory OS layers to evaluate.",
+)
+@click.option(
+    "--no-memory-os-record",
+    "memory_os_record_disabled",
+    is_flag=True,
+    default=False,
+    help="Run Memory OS checks without persisting evidence files.",
+)
 def bg_check_cmd(
     interval_minutes: int | None,
     gc_disabled: bool,
@@ -1558,6 +1592,11 @@ def bg_check_cmd(
     force: bool,
     verbose: bool,
     quiet: bool,
+    memory_os_enabled: bool,
+    memory_os_apply: bool,
+    memory_os_min_score: float | None,
+    memory_os_layers: str | None,
+    memory_os_record_disabled: bool,
 ) -> None:
     """Run autonomous background maintenance (GC + auto-promote + dedup).
 
@@ -1576,6 +1615,7 @@ def bg_check_cmd(
       mnemos bg-check --force --verbose # always run, always print summary
       mnemos bg-check --no-gc           # skip GC phase
       mnemos bg-check --quiet           # completely silent (daemon / update use)
+      mnemos bg-check --memory-os       # record Memory OS health evidence
     """
     from core.bg import (
         run_background_check,
@@ -1586,6 +1626,7 @@ def bg_check_cmd(
     repo_root = str(gw._root)
 
     effective_interval = DEFAULT_INTERVAL_MINUTES if interval_minutes is None else interval_minutes
+    memory_os_layer_list = [layer.strip() for layer in memory_os_layers.split(",")] if memory_os_layers else None
 
     result = run_background_check(
         repo_root=repo_root,
@@ -1593,6 +1634,11 @@ def bg_check_cmd(
         gc_enabled=not gc_disabled,
         auto_promote_enabled=not promote_disabled,
         dedup_enabled=not dedup_disabled,
+        memory_os_enabled=memory_os_enabled,
+        memory_os_apply=memory_os_apply,
+        memory_os_min_score=memory_os_min_score,
+        memory_os_layers=memory_os_layer_list,
+        memory_os_record=not memory_os_record_disabled,
         force=force or (interval_minutes == 0),
     )
 
@@ -1611,6 +1657,12 @@ def bg_check_cmd(
             f"[mnemos bg] check complete — nothing to do "
             f"({result.elapsed_ms:.0f} ms)"
         )
+        if result.memory_os_enabled:
+            click.echo(
+                "[mnemos bg] Memory OS "
+                f"health={result.memory_os_health_status or 'unknown'} "
+                f"evidence={len(result.memory_os_evidence_paths)}"
+            )
 
 
 @cli.command("audit")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import os
 import re
 import time
@@ -591,6 +592,100 @@ class TestBgCheckCliCommand:
             result = runner.invoke(cli, ["bg-check", "--interval", "0", "--verbose"])
         assert result.exit_code == 0
         assert "mnemos bg" in result.output
+
+    def test_bg_check_memory_os_records_evidence(self, repo_root: Path, tmp_path):
+        """Opt-in Memory OS phase records health evidence from background maintenance."""
+        from core.bg import run_background_check
+        from core.gateway import MemoryGateway
+
+        gateway = MemoryGateway(repo_root=str(repo_root))
+        gateway.capture(
+            layer="project",
+            item_id="bg-memory-os",
+            content="Workflow-aware operational memory preserves historical continuity.",
+            tags=["workflow", "continuity"],
+            quality_score=0.96,
+            extra_metadata={
+                "trust_level": "verified",
+                "workflow_id": "bg-memory-os",
+                "access_count": 5,
+            },
+            no_classify=True,
+        )
+
+        ts_file = tmp_path / "ts.ts"
+        with patch("core.bg._timestamp_path", return_value=ts_file):
+            result = run_background_check(
+                str(repo_root),
+                force=True,
+                gc_enabled=False,
+                auto_promote_enabled=False,
+                dedup_enabled=False,
+                memory_os_enabled=True,
+                memory_os_min_score=0.7,
+                memory_os_layers=["project"],
+            )
+
+        assert result.ran is True
+        assert result.memory_os_enabled is True
+        assert result.memory_os_validation_passed is True
+        assert result.memory_os_health_status == "passed"
+        assert len(result.memory_os_evidence_paths) == 3
+        assert all(Path(path).exists() for path in result.memory_os_evidence_paths)
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-health.json").exists()
+
+    def test_bg_check_memory_os_quiet_records_without_output(
+        self,
+        runner,
+        repo_root: Path,
+        monkeypatch,
+        tmp_path,
+    ):
+        """--quiet suppresses output while opt-in Memory OS evidence is still recorded."""
+        from core.cli import cli
+        from core.gateway import MemoryGateway
+
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+        MemoryGateway(repo_root=str(repo_root)).capture(
+            layer="project",
+            item_id="bg-cli-memory-os",
+            content="Workflow-aware operational memory preserves historical continuity.",
+            tags=["workflow", "continuity"],
+            quality_score=0.96,
+            extra_metadata={
+                "trust_level": "verified",
+                "workflow_id": "bg-cli-memory-os",
+                "access_count": 5,
+            },
+            no_classify=True,
+        )
+
+        ts_file = tmp_path / "ts.ts"
+        with patch("core.bg._timestamp_path", return_value=ts_file):
+            result = runner.invoke(
+                cli,
+                [
+                    "bg-check",
+                    "--force",
+                    "--quiet",
+                    "--no-gc",
+                    "--no-promote",
+                    "--no-dedup",
+                    "--memory-os",
+                    "--memory-os-min-score",
+                    "0.7",
+                    "--memory-os-layer",
+                    "project",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert result.output == ""
+        latest_metrics = repo_root / ".agent" / "reports" / "memory-os" / "latest-metrics.json"
+        assert latest_metrics.exists()
+        payload = json.loads(latest_metrics.read_text(encoding="utf-8"))
+        assert payload["kind"] == "metrics_snapshot"
 
 
 # ---------------------------------------------------------------------------

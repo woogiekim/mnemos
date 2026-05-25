@@ -32,6 +32,7 @@ CAPABILITIES: dict[str, bool | str] = {
     "memory_recovery": "supported",
     "operational_evidence": "supported",
     "health_validation": "supported",
+    "autonomous_health_maintenance": "supported",
 }
 
 
@@ -75,6 +76,7 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "memory_recovery": "mnemos recover detects and repairs recoverable metadata/index issues without hard-deleting memory.",
     "operational_evidence": "Lifecycle, metrics, and validation commands can persist durable evidence under .agent/reports/memory-os.",
     "health_validation": "mnemos memory-validate evaluates Memory OS health against calibrated operational score gates.",
+    "autonomous_health_maintenance": "mnemos bg-check --memory-os records lifecycle, metrics, and health evidence from the autonomous maintenance path.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {

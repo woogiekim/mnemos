@@ -374,3 +374,4 @@ def test_memory_operations_cli_and_capabilities(
     assert capabilities["capability_status"]["memory_recovery"] == "supported"
     assert capabilities["capability_status"]["operational_evidence"] == "supported"
     assert capabilities["capability_status"]["health_validation"] == "supported"
+    assert capabilities["capability_status"]["autonomous_health_maintenance"] == "supported"
