@@ -631,10 +631,13 @@ class TestBgCheckCliCommand:
         assert result.memory_os_validation_passed is True
         assert result.memory_os_health_status == "passed"
         assert result.memory_os_retrieval_status == "ok"
-        assert len(result.memory_os_evidence_paths) == 4
+        assert result.memory_os_ready is True
+        assert result.memory_os_readiness_status == "ready"
+        assert len(result.memory_os_evidence_paths) == 5
         assert all(Path(path).exists() for path in result.memory_os_evidence_paths)
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-backends.json").exists()
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-health.json").exists()
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-readiness.json").exists()
 
     def test_bg_check_memory_os_recover_repairs_before_scoring(self, repo_root: Path, tmp_path):
         """Opt-in recovery repairs metadata and records recovery evidence before scoring."""
@@ -664,7 +667,8 @@ class TestBgCheckCliCommand:
         assert result.memory_os_repaired > 0
         assert result.memory_os_reindexed == 1
         assert result.memory_os_validation_passed is True
-        assert len(result.memory_os_evidence_paths) == 5
+        assert result.memory_os_ready is True
+        assert len(result.memory_os_evidence_paths) == 6
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-recovery.json").exists()
 
         repaired_text = recoverable.read_text(encoding="utf-8")
@@ -721,10 +725,44 @@ class TestBgCheckCliCommand:
         assert result.output == ""
         latest_metrics = repo_root / ".agent" / "reports" / "memory-os" / "latest-metrics.json"
         latest_backends = repo_root / ".agent" / "reports" / "memory-os" / "latest-backends.json"
+        latest_readiness = repo_root / ".agent" / "reports" / "memory-os" / "latest-readiness.json"
         assert latest_metrics.exists()
         assert latest_backends.exists()
+        assert latest_readiness.exists()
         payload = json.loads(latest_metrics.read_text(encoding="utf-8"))
         assert payload["kind"] == "metrics_snapshot"
+
+    def test_bg_check_memory_os_readiness_failure_is_activity(
+        self,
+        repo_root: Path,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        """Autonomous readiness failures surface as background activity."""
+        from core.bg import run_background_check
+
+        monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "invalid_backend")
+
+        ts_file = tmp_path / "ts.ts"
+        with patch("core.bg._timestamp_path", return_value=ts_file):
+            result = run_background_check(
+                str(repo_root),
+                force=True,
+                gc_enabled=False,
+                auto_promote_enabled=False,
+                dedup_enabled=False,
+                memory_os_enabled=True,
+                memory_os_min_score=0.0,
+                memory_os_record=True,
+            )
+
+        assert result.ran is True
+        assert result.memory_os_ready is False
+        assert result.memory_os_readiness_status == "not_ready"
+        assert result.memory_os_readiness_gaps > 0
+        assert result.has_activity is True
+        assert "Memory OS readiness not_ready" in result.to_context_block()
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-readiness.json").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -347,6 +347,9 @@ class BackgroundCheckResult:
     memory_os_reindexed: int = 0
     memory_os_corrupt: int = 0
     memory_os_retrieval_status: str | None = None
+    memory_os_readiness_status: str | None = None
+    memory_os_ready: bool | None = None
+    memory_os_readiness_gaps: int = 0
     memory_os_evidence_paths: list[str] = field(default_factory=list)
     memory_os_errors: list[str] = field(default_factory=list)
 
@@ -360,6 +363,7 @@ class BackgroundCheckResult:
             or self.memory_os_lifecycle_applied > 0
             or self.memory_os_repaired > 0
             or self.memory_os_retrieval_status in {"degraded", "failed"}
+            or self.memory_os_ready is False
             or self.memory_os_validation_passed is False
             or self.memory_os_errors
         )
@@ -397,6 +401,12 @@ class BackgroundCheckResult:
             )
         if self.memory_os_retrieval_status in {"degraded", "failed"}:
             lines.append(f"[mnemos bg] Memory OS retrieval backends {self.memory_os_retrieval_status}")
+        if self.memory_os_ready is False:
+            lines.append(
+                "[mnemos bg] Memory OS readiness "
+                f"{self.memory_os_readiness_status or 'not_ready'} "
+                f"({self.memory_os_readiness_gaps} gap(s))"
+            )
         if self.memory_os_validation_passed is False:
             lines.append("[mnemos bg] Memory OS health validation failed")
         for error in self.memory_os_errors[:2]:
@@ -596,9 +606,26 @@ def run_background_check(
                     str(engine.record_validation_report(validation, label="bg-check"))
                 )
 
+            readiness = engine.audit_readiness(
+                layers=memory_os_layers,
+                min_score=memory_os_min_score,
+            )
+            result.memory_os_readiness_status = readiness.status
+            result.memory_os_ready = readiness.ready
+            result.memory_os_readiness_gaps = len(readiness.gaps)
+            if memory_os_record:
+                result.memory_os_evidence_paths.append(
+                    str(engine.record_readiness_report(readiness, label="bg-check"))
+                )
+
             if lifecycle_report.applied_count:
                 messages.append(
                     f"Memory OS: applied {lifecycle_report.applied_count} lifecycle transition(s)"
+                )
+            if not readiness.ready:
+                messages.append(
+                    f"Memory OS: readiness {readiness.status} "
+                    f"({len(readiness.gaps)} gap(s))"
                 )
             if not validation.passed:
                 messages.append("Memory OS: health validation failed")

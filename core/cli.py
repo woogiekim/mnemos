@@ -2013,6 +2013,7 @@ def bg_check_cmd(
             click.echo(
                 "[mnemos bg] Memory OS "
                 f"health={result.memory_os_health_status or 'unknown'} "
+                f"readiness={result.memory_os_readiness_status or 'unknown'} "
                 f"evidence={len(result.memory_os_evidence_paths)}"
             )
 
