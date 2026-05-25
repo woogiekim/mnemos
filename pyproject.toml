@@ -23,8 +23,29 @@ mnemos = "core.cli:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-ra"]
+addopts = [
+    "-ra",
+    "--cov=core",
+    "--cov=agents",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-fail-under=100",
+]
 filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = false
+source = ["core", "agents"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "\\.\\.\\.",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

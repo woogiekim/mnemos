@@ -9,6 +9,9 @@ build/
 .venv/
 venv/
 *.db
+.coverage
+coverage.xml
+htmlcov/
 # mnemos
 .agent/runs/
 .agent/sessions/
