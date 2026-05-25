@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 from core.fts import FTSIndex
 from core.korean import expand_query, preprocess_query
 from core.layers import LAYER_STATIC_PATHS
+from core.retrieval import rank_search_results
 from core.vector import VectorBackend
 
 if TYPE_CHECKING:
@@ -80,7 +81,7 @@ class SearchMiddleware:
                     results.append(r)
                     seen_ids.add(r_id)
 
-        return results[:limit]
+        return rank_search_results(query, results, limit=limit)
 
     def _grep_fallback(
         self,

@@ -87,6 +87,10 @@ mnemos/
 | `core/search.py` | Search Middleware — three-stage pipeline: FTS5 → vector → pathlib grep |
 | `core/fts.py` | SQLite FTS5 index for full-text search |
 | `core/vector.py` | Optional vector search backend (Qdrant / Chroma; graceful fallback) |
+| `core/contracts.py` | Runtime-independent persistent memory protocol and retrieval contracts |
+| `core/lifecycle.py` | Managed lifecycle policy for summarize, compress, promote, archive, and expire decisions |
+| `core/compression.py` | Continuity-aware compression that preserves memory identity and relationships |
+| `core/retrieval.py` | Operational retrieval ranking based on relevance, trust, workflow, recency, history, and quality |
 | `core/layers.py` | Shared layer-to-path mapping used by store and search modules |
 | `core/hooks.py` | Hook Dispatcher — fires shell scripts on post-capture, post-promote, post-archive, post-forget |
 | `core/log.py` | Audit Logger — append-only log written to `wiki/log.md` and `wiki/log.jsonl` |
@@ -181,6 +185,10 @@ checks:
 | `gc_json` | `mnemos gc --json` returns structured dry-run and execution summaries |
 | `host_install` | `mnemos install` manages supported host integration files |
 | `safe_filenames` | Filesystem storage safely encodes unsafe item IDs while preserving logical IDs |
+| `persistent_memory_protocol` | Runtime-independent contracts define capture, retrieval, lifecycle, trust, and backend boundaries |
+| `memory_lifecycle_management` | Policy-driven lifecycle decisions cover summarize, compress, promote, archive, and expire |
+| `continuity_compression` | Compression preserves memory IDs, relationships, and operational history within context budgets |
+| `operational_retrieval` | Ranking optimizes for operational continuity, trust, workflow relevance, historical use, and semantic match |
 
 These names should not be renamed or removed during the `1.x` provider
 contract. If a behavior becomes unavailable, keep the name and change its

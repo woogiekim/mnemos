@@ -23,6 +23,10 @@ CAPABILITIES: dict[str, bool | str] = {
     "autonomous_capture": "supported",
     "context_injection": "supported",
     "daemon_runtime": "supported",
+    "persistent_memory_protocol": "supported",
+    "memory_lifecycle_management": "supported",
+    "continuity_compression": "supported",
+    "operational_retrieval": "supported",
 }
 
 
@@ -57,6 +61,10 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "autonomous_capture": "Transcript capture can run from host lifecycle hooks without AI-authored capture prompts.",
     "context_injection": "Host adapters can inject deterministic context before prompt handling.",
     "daemon_runtime": "mnemos daemon run/status/install/uninstall manages autonomous background maintenance.",
+    "persistent_memory_protocol": "Execution systems can depend on runtime-independent persistent memory contracts.",
+    "memory_lifecycle_management": "Memory lifecycle policy supports summarize, compress, promote, archive, and expire decisions.",
+    "continuity_compression": "Context compression preserves memory identity, relationships, and operational continuity under a budget.",
+    "operational_retrieval": "Retrieval ranking combines semantic relevance, workflow relevance, trust, recency, history, and quality.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {

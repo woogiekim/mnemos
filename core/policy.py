@@ -16,12 +16,15 @@ VALID_STAGES = [
     "captured",
     "classified",
     "stored",
+    "summarized",
+    "compressed",
     "retrieved",
     "used",
     "validated",
     "promoted",
     "demoted",
     "archived",
+    "expired",
     "forgotten",
 ]
 
