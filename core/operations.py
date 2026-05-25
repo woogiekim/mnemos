@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -27,6 +28,16 @@ OPERATIONAL_LAYERS: tuple[str, ...] = (
     "entities",
     "claims",
     "topics",
+)
+
+
+SCORE_NAMES: tuple[str, ...] = (
+    "context_continuity_score",
+    "retrieval_relevance_score",
+    "historical_awareness_accuracy",
+    "compression_preservation_quality",
+    "lifecycle_consistency_rate",
+    "persistent_memory_stability",
 )
 
 
@@ -127,6 +138,84 @@ class OperationalMetrics:
 
 
 @dataclass(frozen=True)
+class OperationalHealthThresholds:
+    """Calibration thresholds for Memory OS health validation."""
+
+    context_continuity_score: float = 0.85
+    retrieval_relevance_score: float = 0.85
+    historical_awareness_accuracy: float = 0.85
+    compression_preservation_quality: float = 0.85
+    lifecycle_consistency_rate: float = 0.95
+    persistent_memory_stability: float = 0.95
+
+    @classmethod
+    def uniform(cls, min_score: float) -> "OperationalHealthThresholds":
+        """Use one threshold for every operational score."""
+        score = _round_score(min_score)
+        return cls(
+            context_continuity_score=score,
+            retrieval_relevance_score=score,
+            historical_awareness_accuracy=score,
+            compression_preservation_quality=score,
+            lifecycle_consistency_rate=score,
+            persistent_memory_stability=score,
+        )
+
+    def to_dict(self) -> dict[str, float]:
+        """Return a JSON-serializable representation."""
+        return {
+            "context_continuity_score": self.context_continuity_score,
+            "retrieval_relevance_score": self.retrieval_relevance_score,
+            "historical_awareness_accuracy": self.historical_awareness_accuracy,
+            "compression_preservation_quality": self.compression_preservation_quality,
+            "lifecycle_consistency_rate": self.lifecycle_consistency_rate,
+            "persistent_memory_stability": self.persistent_memory_stability,
+        }
+
+
+@dataclass(frozen=True)
+class HealthGateResult:
+    """One calibrated validation gate result."""
+
+    name: str
+    actual: float
+    threshold: float
+    passed: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "name": self.name,
+            "actual": self.actual,
+            "threshold": self.threshold,
+            "passed": self.passed,
+        }
+
+
+@dataclass(frozen=True)
+class OperationalValidationReport:
+    """Validation report for Memory OS operational health."""
+
+    status: str
+    passed: bool
+    gates: tuple[HealthGateResult, ...]
+    metrics: OperationalMetrics
+    trend: dict[str, Any]
+    generated_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "status": self.status,
+            "passed": self.passed,
+            "generated_at": self.generated_at,
+            "gates": [gate.to_dict() for gate in self.gates],
+            "metrics": self.metrics.to_dict(),
+            "trend": self.trend,
+        }
+
+
+@dataclass(frozen=True)
 class MemoryRecoveryIssue:
     """One recovery or reconciliation finding."""
 
@@ -191,6 +280,7 @@ class MemoryOperationsEngine:
         self._fts = gateway._fts
         self._root = Path(gateway._root)
         self._lifecycle = lifecycle_manager or MemoryLifecycleManager()
+        self._evidence_dir = self._root / ".agent" / "reports" / "memory-os"
 
     def run_lifecycle(
         self,
@@ -311,6 +401,119 @@ class MemoryOperationsEngine:
             issue_count=len(recovery.issues),
         )
 
+    def record_lifecycle_report(
+        self,
+        report: LifecycleExecutionReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist a lifecycle report as durable operational evidence."""
+        payload = {
+            "kind": "lifecycle_report",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("lifecycle", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-lifecycle.json", payload)
+        return path
+
+    def record_metrics_snapshot(
+        self,
+        metrics: OperationalMetrics | None = None,
+        *,
+        layers: list[str] | None = None,
+        label: str | None = None,
+    ) -> Path:
+        """Persist metrics as a snapshot and append trendable history."""
+        metrics = metrics or self.compute_metrics(layers=layers)
+        payload = {
+            "kind": "metrics_snapshot",
+            "recorded_at": _now_iso(),
+            "metrics": metrics.to_dict(),
+        }
+        path = self._evidence_path("metrics", label or "snapshot")
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-metrics.json", payload)
+        self._append_jsonl(self._evidence_dir / "metrics-history.jsonl", payload)
+        return path
+
+    def metric_history(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Read persisted Memory OS metric snapshots."""
+        path = self._evidence_dir / "metrics-history.jsonl"
+        if not path.exists():
+            return []
+
+        records: list[dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            return []
+
+        if limit is not None:
+            return records[-limit:]
+        return records
+
+    def validate_health(
+        self,
+        *,
+        layers: list[str] | None = None,
+        metrics: OperationalMetrics | None = None,
+        thresholds: OperationalHealthThresholds | None = None,
+        min_score: float | None = None,
+    ) -> OperationalValidationReport:
+        """Validate operational health against calibrated score gates."""
+        metrics = metrics or self.compute_metrics(layers=layers)
+        thresholds = thresholds or (
+            OperationalHealthThresholds.uniform(min_score)
+            if min_score is not None
+            else OperationalHealthThresholds()
+        )
+        score_payload = metrics.to_dict()["scores"]
+        threshold_payload = thresholds.to_dict()
+        gates = tuple(
+            HealthGateResult(
+                name=name,
+                actual=_round_score(float(score_payload[name])),
+                threshold=_round_score(float(threshold_payload[name])),
+                passed=float(score_payload[name]) >= float(threshold_payload[name]),
+            )
+            for name in SCORE_NAMES
+        )
+        passed = all(gate.passed for gate in gates)
+        return OperationalValidationReport(
+            status="passed" if passed else "failed",
+            passed=passed,
+            gates=gates,
+            metrics=metrics,
+            trend=self._metric_trend(metrics),
+        )
+
+    def record_validation_report(
+        self,
+        report: OperationalValidationReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist a health validation report as operational evidence."""
+        payload = {
+            "kind": "health_validation",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("health", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-health.json", payload)
+        return path
+
     def recover_store(
         self,
         *,
@@ -393,6 +596,54 @@ class MemoryOperationsEngine:
             reindexed_count=reindexed_count,
             issues=tuple(issues),
         )
+
+    def _metric_trend(self, metrics: OperationalMetrics) -> dict[str, Any]:
+        history = self.metric_history(limit=1)
+        current = metrics.to_dict()["scores"]
+        if not history:
+            return {
+                "status": "no_history",
+                "previous_recorded_at": None,
+                "deltas": {},
+            }
+
+        previous_record = history[-1]
+        previous_scores = (
+            previous_record.get("metrics", {}).get("scores", {})
+            if isinstance(previous_record, dict)
+            else {}
+        )
+        deltas = {
+            name: _round_delta(
+                float(current.get(name, 0.0)) - float(previous_scores.get(name, 0.0))
+            )
+            for name in SCORE_NAMES
+            if name in previous_scores
+        }
+        improving = sum(1 for value in deltas.values() if value > 0)
+        declining = sum(1 for value in deltas.values() if value < 0)
+        if declining:
+            status = "declining"
+        elif improving:
+            status = "improving"
+        else:
+            status = "stable"
+
+        return {
+            "status": status,
+            "previous_recorded_at": previous_record.get("recorded_at"),
+            "deltas": deltas,
+        }
+
+    def _evidence_path(self, category: str, label: str) -> Path:
+        stamp = _now_iso().replace(":", "").replace("-", "")
+        safe_label = _safe_label(label)
+        return self._evidence_dir / category / f"{stamp}-{safe_label}.json"
+
+    def _append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
     def _apply_lifecycle_decision(
         self,
@@ -688,6 +939,10 @@ def _round_score(value: float) -> float:
     return round(_clamp(value), 6)
 
 
+def _round_delta(value: float) -> float:
+    return round(float(value), 6)
+
+
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -710,3 +965,17 @@ def _content_hash(content: str) -> str:
     normalized = unicodedata.normalize("NFKC", content)
     normalized = re.sub(r"\s+", " ", normalized.strip()).lower()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _safe_label(value: str) -> str:
+    label = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "snapshot").strip().lower())
+    label = label.strip("-")
+    return label or "snapshot"
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )

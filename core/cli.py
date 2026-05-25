@@ -1248,12 +1248,20 @@ def memory_gc(
     default=False,
     help="Include retain decisions in the report.",
 )
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist the lifecycle report under .agent/reports/memory-os.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 def lifecycle_run_cmd(
     apply_changes: bool,
     layers: str | None,
     limit: int | None,
     include_retained: bool,
+    record: bool,
     as_json: bool,
 ) -> None:
     """Plan or apply managed lifecycle transitions."""
@@ -1264,12 +1272,14 @@ def lifecycle_run_cmd(
     layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
 
     try:
-        report = MemoryOperationsEngine(gw).run_lifecycle(
+        engine = MemoryOperationsEngine(gw)
+        report = engine.run_lifecycle(
             dry_run=not apply_changes,
             layers=layer_list,
             limit=limit,
             include_retained=include_retained,
         )
+        evidence_path = str(engine.record_lifecycle_report(report)) if record else None
     except Exception as exc:
         if as_json:
             _echo_json(provider_error_from_exception(exc))
@@ -1278,7 +1288,10 @@ def lifecycle_run_cmd(
         sys.exit(1)
 
     if as_json:
-        _echo_json(report.to_dict())
+        payload = report.to_dict()
+        if evidence_path:
+            payload["evidence_path"] = evidence_path
+        _echo_json(payload)
         return
 
     mode = "dry-run" if report.dry_run else "applied"
@@ -1289,6 +1302,8 @@ def lifecycle_run_cmd(
         f"applied={report.applied_count} "
         f"failed={report.failed_count}"
     )
+    if evidence_path:
+        click.echo(f"  evidence: {evidence_path}")
     for item in report.items:
         status = "applied" if item.applied else "planned"
         if item.error:
@@ -1307,8 +1322,15 @@ def lifecycle_run_cmd(
     default=None,
     help="Comma-separated list of layers to score (default: all operational layers).",
 )
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist a metrics snapshot under .agent/reports/memory-os.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
-def memory_metrics_cmd(layers: str | None, as_json: bool) -> None:
+def memory_metrics_cmd(layers: str | None, record: bool, as_json: bool) -> None:
     """Show Memory OS operational health metrics."""
     from core.operations import MemoryOperationsEngine
     from core.provider import provider_error_from_exception
@@ -1317,7 +1339,9 @@ def memory_metrics_cmd(layers: str | None, as_json: bool) -> None:
     layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
 
     try:
-        metrics = MemoryOperationsEngine(gw).compute_metrics(layers=layer_list)
+        engine = MemoryOperationsEngine(gw)
+        metrics = engine.compute_metrics(layers=layer_list)
+        evidence_path = str(engine.record_metrics_snapshot(metrics)) if record else None
     except Exception as exc:
         if as_json:
             _echo_json(provider_error_from_exception(exc))
@@ -1326,6 +1350,8 @@ def memory_metrics_cmd(layers: str | None, as_json: bool) -> None:
         sys.exit(1)
 
     payload = metrics.to_dict()
+    if evidence_path:
+        payload["evidence_path"] = evidence_path
     if as_json:
         _echo_json(payload)
         return
@@ -1335,6 +1361,74 @@ def memory_metrics_cmd(layers: str | None, as_json: bool) -> None:
         click.echo(f"  {name:<40} {score:.3f}")
     click.echo(f"  {'item_count':<40} {metrics.item_count}")
     click.echo(f"  {'issue_count':<40} {metrics.issue_count}")
+    if evidence_path:
+        click.echo(f"  {'evidence':<40} {evidence_path}")
+
+
+@cli.command("memory-validate")
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated list of layers to validate (default: all operational layers).",
+)
+@click.option(
+    "--min-score",
+    "min_score",
+    default=None,
+    type=float,
+    help="Uniform minimum score for every gate. Defaults to calibrated Memory OS thresholds.",
+)
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist a validation report under .agent/reports/memory-os.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_validate_cmd(
+    layers: str | None,
+    min_score: float | None,
+    record: bool,
+    as_json: bool,
+) -> None:
+    """Validate Memory OS health against calibrated gates."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        engine = MemoryOperationsEngine(gw)
+        report = engine.validate_health(layers=layer_list, min_score=min_score)
+        evidence_path = str(engine.record_validation_report(report)) if record else None
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = report.to_dict()
+    if evidence_path:
+        payload["evidence_path"] = evidence_path
+    if as_json:
+        _echo_json(payload)
+    else:
+        click.echo(f"[mnemos validate] {report.status}")
+        for gate in report.gates:
+            state = "ok" if gate.passed else "fail"
+            click.echo(
+                f"  {state}: {gate.name:<40} "
+                f"{gate.actual:.3f} >= {gate.threshold:.3f}"
+            )
+        if evidence_path:
+            click.echo(f"  evidence: {evidence_path}")
+
+    if not report.passed:
+        sys.exit(1)
 
 
 @cli.command("recover")

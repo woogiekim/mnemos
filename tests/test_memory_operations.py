@@ -193,6 +193,87 @@ def test_operational_metrics_expose_memory_os_scores(operations_repo: Path) -> N
     assert payload["scores"]["persistent_memory_stability"] == 1.0
 
 
+def test_operational_evidence_records_reports_and_metric_history(
+    operations_repo: Path,
+) -> None:
+    """Lifecycle and metrics evidence is persisted for audit and trend analysis."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="evidence-memory",
+        content="evidence candidate " * 80,
+        tags=["workflow"],
+        quality_score=0.91,
+        extra_metadata={"trust_level": "verified", "workflow_id": "evidence-flow"},
+        no_classify=True,
+    )
+    engine = MemoryOperationsEngine(gateway)
+
+    lifecycle_report = engine.run_lifecycle(dry_run=True, layers=["project"])
+    lifecycle_path = engine.record_lifecycle_report(lifecycle_report)
+    metrics = engine.compute_metrics(layers=["project"])
+    metrics_path = engine.record_metrics_snapshot(metrics)
+    history = engine.metric_history()
+
+    assert lifecycle_path.exists()
+    assert metrics_path.exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-lifecycle.json").exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-metrics.json").exists()
+    assert len(history) == 1
+    assert history[0]["kind"] == "metrics_snapshot"
+    assert history[0]["metrics"]["scores"]["context_continuity_score"] == 1.0
+
+
+def test_health_validation_tracks_trend_from_metric_history(
+    operations_repo: Path,
+) -> None:
+    """Validation gates compare current health against prior metric snapshots."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="trend-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "trend-flow",
+            "access_count": 0,
+        },
+        no_classify=True,
+    )
+    engine = MemoryOperationsEngine(gateway)
+    engine.record_metrics_snapshot(engine.compute_metrics(layers=["project"]))
+
+    item = gateway._store.read("trend-memory")
+    gateway._store.update(item["_path"], metadata_updates={"access_count": 5})
+    report = engine.validate_health(layers=["project"], min_score=0.7)
+    validation_path = engine.record_validation_report(report)
+
+    assert report.passed is True
+    assert report.status == "passed"
+    assert report.trend["status"] == "improving"
+    assert report.trend["deltas"]["retrieval_relevance_score"] > 0
+    assert validation_path.exists()
+
+
+def test_health_validation_fails_when_operational_scores_are_below_threshold(
+    operations_repo: Path,
+) -> None:
+    """Health validation fails closed when continuity evidence is insufficient."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    report = MemoryOperationsEngine(gateway).validate_health(
+        layers=["project"],
+        min_score=0.85,
+    )
+    gates = {gate.name: gate for gate in report.gates}
+
+    assert report.passed is False
+    assert report.status == "failed"
+    assert gates["context_continuity_score"].passed is False
+    assert gates["retrieval_relevance_score"].passed is False
+
+
 def test_recovery_dry_run_detects_metadata_and_parse_issues(
     operations_repo: Path,
 ) -> None:
@@ -260,14 +341,36 @@ def test_memory_operations_cli_and_capabilities(
     """CLI and provider metadata expose operational Memory OS surfaces."""
     monkeypatch.setenv("MNEMOS_REPO_ROOT", str(operations_repo))
     runner = CliRunner()
+    MemoryGateway(repo_root=str(operations_repo)).capture(
+        layer="project",
+        item_id="cli-health-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "cli-health-flow",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
 
-    metrics_result = runner.invoke(cli, ["memory-metrics", "--json"])
+    metrics_result = runner.invoke(cli, ["memory-metrics", "--record", "--json"])
+    validate_result = runner.invoke(cli, ["memory-validate", "--min-score", "0.7", "--record", "--json"])
     capabilities_result = runner.invoke(cli, ["capabilities", "--json"])
 
     assert metrics_result.exit_code == 0, metrics_result.output
-    assert json.loads(metrics_result.output)["status"] == "ok"
+    metrics_payload = json.loads(metrics_result.output)
+    assert metrics_payload["status"] == "ok"
+    assert Path(metrics_payload["evidence_path"]).exists()
+    assert validate_result.exit_code == 0, validate_result.output
+    validate_payload = json.loads(validate_result.output)
+    assert validate_payload["status"] == "passed"
+    assert Path(validate_payload["evidence_path"]).exists()
     assert capabilities_result.exit_code == 0, capabilities_result.output
     capabilities = json.loads(capabilities_result.output)
     assert capabilities["capability_status"]["lifecycle_execution"] == "supported"
     assert capabilities["capability_status"]["operational_metrics"] == "supported"
     assert capabilities["capability_status"]["memory_recovery"] == "supported"
+    assert capabilities["capability_status"]["operational_evidence"] == "supported"
+    assert capabilities["capability_status"]["health_validation"] == "supported"

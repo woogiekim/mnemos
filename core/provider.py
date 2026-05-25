@@ -30,6 +30,8 @@ CAPABILITIES: dict[str, bool | str] = {
     "lifecycle_execution": "supported",
     "operational_metrics": "supported",
     "memory_recovery": "supported",
+    "operational_evidence": "supported",
+    "health_validation": "supported",
 }
 
 
@@ -71,6 +73,8 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "lifecycle_execution": "mnemos lifecycle-run plans and applies managed lifecycle transitions with structured reports.",
     "operational_metrics": "mnemos memory-metrics reports continuity, relevance, history, compression, lifecycle, and stability scores.",
     "memory_recovery": "mnemos recover detects and repairs recoverable metadata/index issues without hard-deleting memory.",
+    "operational_evidence": "Lifecycle, metrics, and validation commands can persist durable evidence under .agent/reports/memory-os.",
+    "health_validation": "mnemos memory-validate evaluates Memory OS health against calibrated operational score gates.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {
