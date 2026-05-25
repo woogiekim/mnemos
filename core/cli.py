@@ -1483,11 +1483,19 @@ def memory_compress_cmd(
     default=False,
     help="Persist a validation report under .agent/reports/memory-os.",
 )
+@click.option(
+    "--calibrated",
+    "calibrated",
+    is_flag=True,
+    default=False,
+    help="Validate against the latest persisted empirical calibration baseline.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 def memory_validate_cmd(
     layers: str | None,
     min_score: float | None,
     record: bool,
+    calibrated: bool,
     as_json: bool,
 ) -> None:
     """Validate Memory OS health against calibrated gates."""
@@ -1499,7 +1507,11 @@ def memory_validate_cmd(
 
     try:
         engine = MemoryOperationsEngine(gw)
-        report = engine.validate_health(layers=layer_list, min_score=min_score)
+        report = engine.validate_health(
+            layers=layer_list,
+            min_score=min_score,
+            calibrated=calibrated,
+        )
         evidence_path = str(engine.record_validation_report(report)) if record else None
     except Exception as exc:
         if as_json:
@@ -1526,6 +1538,84 @@ def memory_validate_cmd(
 
     if not report.passed:
         sys.exit(1)
+
+
+@cli.command("memory-calibrate")
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated layers used when current metrics are included.",
+)
+@click.option("--history-limit", default=20, type=int, help="Number of metric snapshots used for calibration.")
+@click.option("--floor", default=0.7, type=float, help="Minimum threshold for each calibrated score.")
+@click.option("--tolerance", default=0.05, type=float, help="Allowed drop below empirical baseline.")
+@click.option(
+    "--no-current",
+    "include_current_disabled",
+    is_flag=True,
+    default=False,
+    help="Calibrate from history only instead of adding the current metrics sample.",
+)
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist the calibration baseline under .agent/reports/memory-os.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_calibrate_cmd(
+    layers: str | None,
+    history_limit: int,
+    floor: float,
+    tolerance: float,
+    include_current_disabled: bool,
+    record: bool,
+    as_json: bool,
+) -> None:
+    """Calibrate Memory OS health gates from observed metric history."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        engine = MemoryOperationsEngine(gw)
+        report = engine.calibrate_health(
+            layers=layer_list,
+            history_limit=history_limit,
+            floor=floor,
+            tolerance=tolerance,
+            include_current=not include_current_disabled,
+        )
+        evidence_path = str(engine.record_calibration_report(report)) if record else None
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = report.to_dict()
+    if evidence_path:
+        payload["evidence_path"] = evidence_path
+    if as_json:
+        _echo_json(payload)
+        return
+
+    click.echo(
+        f"[mnemos calibrate] {report.status}: "
+        f"samples={report.sample_count} strategy={report.strategy}"
+    )
+    for calibration in report.calibrations:
+        click.echo(
+            f"  {calibration.name:<40} "
+            f"baseline={calibration.baseline:.3f} threshold={calibration.threshold:.3f}"
+        )
+    if evidence_path:
+        click.echo(f"  evidence: {evidence_path}")
 
 
 @cli.command("recover")

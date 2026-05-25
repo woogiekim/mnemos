@@ -352,6 +352,89 @@ def test_health_validation_tracks_trend_from_metric_history(
     assert validation_path.exists()
 
 
+def test_metric_calibration_persists_empirical_health_baseline(
+    operations_repo: Path,
+) -> None:
+    """Calibration derives thresholds from observed metric history."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="calibration-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.96,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "calibration-flow",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
+    engine = MemoryOperationsEngine(gateway)
+    engine.record_metrics_snapshot(engine.compute_metrics(layers=["project"]))
+
+    calibration = engine.calibrate_health(
+        layers=["project"],
+        floor=0.7,
+        tolerance=0.02,
+    )
+    calibration_path = engine.record_calibration_report(calibration)
+    validation = engine.validate_health(layers=["project"], calibrated=True)
+
+    assert calibration.status == "calibrated"
+    assert calibration.sample_count == 2
+    assert calibration.thresholds.retrieval_relevance_score >= 0.7
+    assert calibration_path.exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-calibration.json").exists()
+    assert validation.passed is True
+
+
+def test_calibrated_health_validation_detects_metric_regression(
+    operations_repo: Path,
+) -> None:
+    """Calibrated validation fails when current metrics regress below the baseline."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="regression-memory",
+        content="Workflow-aware operational memory preserves historical continuity.",
+        tags=["workflow", "continuity"],
+        quality_score=0.98,
+        extra_metadata={
+            "trust_level": "verified",
+            "workflow_id": "regression-flow",
+            "access_count": 5,
+        },
+        no_classify=True,
+    )
+    engine = MemoryOperationsEngine(gateway)
+    engine.record_metrics_snapshot(engine.compute_metrics(layers=["project"]))
+    engine.record_calibration_report(
+        engine.calibrate_health(
+            layers=["project"],
+            floor=0.7,
+            tolerance=0.02,
+        )
+    )
+
+    item = gateway._store.read("regression-memory")
+    gateway._store.update(
+        item["_path"],
+        metadata_updates={
+            "quality_score": 0.1,
+            "trust_level": "unverified",
+            "access_count": 0,
+        },
+    )
+    validation = engine.validate_health(layers=["project"], calibrated=True)
+    gates = {gate.name: gate for gate in validation.gates}
+
+    assert validation.passed is False
+    assert validation.status == "failed"
+    assert gates["retrieval_relevance_score"].passed is False
+    assert gates["retrieval_relevance_score"].threshold > gates["retrieval_relevance_score"].actual
+
+
 def test_health_validation_fails_when_operational_scores_are_below_threshold(
     operations_repo: Path,
 ) -> None:
@@ -471,6 +554,8 @@ def test_memory_operations_cli_and_capabilities(
         ],
     )
     validate_result = runner.invoke(cli, ["memory-validate", "--min-score", "0.7", "--record", "--json"])
+    calibrate_result = runner.invoke(cli, ["memory-calibrate", "--floor", "0.7", "--record", "--json"])
+    calibrated_validate_result = runner.invoke(cli, ["memory-validate", "--calibrated", "--record", "--json"])
     capabilities_result = runner.invoke(cli, ["capabilities", "--json"])
 
     assert metrics_result.exit_code == 0, metrics_result.output
@@ -486,6 +571,14 @@ def test_memory_operations_cli_and_capabilities(
     validate_payload = json.loads(validate_result.output)
     assert validate_payload["status"] == "passed"
     assert Path(validate_payload["evidence_path"]).exists()
+    assert calibrate_result.exit_code == 0, calibrate_result.output
+    calibrate_payload = json.loads(calibrate_result.output)
+    assert calibrate_payload["status"] in {"calibrated", "bootstrapped"}
+    assert Path(calibrate_payload["evidence_path"]).exists()
+    assert calibrated_validate_result.exit_code == 0, calibrated_validate_result.output
+    calibrated_payload = json.loads(calibrated_validate_result.output)
+    assert calibrated_payload["status"] == "passed"
+    assert Path(calibrated_payload["evidence_path"]).exists()
     assert capabilities_result.exit_code == 0, capabilities_result.output
     capabilities = json.loads(capabilities_result.output)
     assert capabilities["capability_status"]["lifecycle_execution"] == "supported"
@@ -496,3 +589,4 @@ def test_memory_operations_cli_and_capabilities(
     assert capabilities["capability_status"]["autonomous_health_maintenance"] == "supported"
     assert capabilities["capability_status"]["autonomous_memory_recovery"] == "supported"
     assert capabilities["capability_status"]["managed_compression_jobs"] == "supported"
+    assert capabilities["capability_status"]["empirical_metric_calibration"] == "supported"

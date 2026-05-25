@@ -162,6 +162,41 @@ class OperationalHealthThresholds:
             persistent_memory_stability=score,
         )
 
+    @classmethod
+    def from_mapping(cls, values: dict[str, Any]) -> "OperationalHealthThresholds":
+        """Build thresholds from a persisted mapping."""
+        defaults = cls()
+        def value_for(name: str, default: float) -> float:
+            parsed = _safe_float(values.get(name))
+            return _round_score(default if parsed is None else parsed)
+
+        return cls(
+            context_continuity_score=value_for(
+                "context_continuity_score",
+                defaults.context_continuity_score,
+            ),
+            retrieval_relevance_score=value_for(
+                "retrieval_relevance_score",
+                defaults.retrieval_relevance_score,
+            ),
+            historical_awareness_accuracy=value_for(
+                "historical_awareness_accuracy",
+                defaults.historical_awareness_accuracy,
+            ),
+            compression_preservation_quality=value_for(
+                "compression_preservation_quality",
+                defaults.compression_preservation_quality,
+            ),
+            lifecycle_consistency_rate=value_for(
+                "lifecycle_consistency_rate",
+                defaults.lifecycle_consistency_rate,
+            ),
+            persistent_memory_stability=value_for(
+                "persistent_memory_stability",
+                defaults.persistent_memory_stability,
+            ),
+        )
+
     def to_dict(self) -> dict[str, float]:
         """Return a JSON-serializable representation."""
         return {
@@ -213,6 +248,56 @@ class OperationalValidationReport:
             "gates": [gate.to_dict() for gate in self.gates],
             "metrics": self.metrics.to_dict(),
             "trend": self.trend,
+        }
+
+
+@dataclass(frozen=True)
+class MetricCalibration:
+    """Empirical calibration for one Memory OS metric."""
+
+    name: str
+    baseline: float
+    threshold: float
+    sample_count: int
+    minimum: float
+    maximum: float
+    floor: float
+    tolerance: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "name": self.name,
+            "baseline": self.baseline,
+            "threshold": self.threshold,
+            "sample_count": self.sample_count,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "floor": self.floor,
+            "tolerance": self.tolerance,
+        }
+
+
+@dataclass(frozen=True)
+class OperationalCalibrationReport:
+    """Empirical calibration baseline derived from metric history."""
+
+    status: str
+    strategy: str
+    sample_count: int
+    thresholds: OperationalHealthThresholds
+    calibrations: tuple[MetricCalibration, ...]
+    generated_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "status": self.status,
+            "strategy": self.strategy,
+            "sample_count": self.sample_count,
+            "thresholds": self.thresholds.to_dict(),
+            "generated_at": self.generated_at,
+            "calibrations": [calibration.to_dict() for calibration in self.calibrations],
         }
 
 
@@ -542,14 +627,19 @@ class MemoryOperationsEngine:
         metrics: OperationalMetrics | None = None,
         thresholds: OperationalHealthThresholds | None = None,
         min_score: float | None = None,
+        calibrated: bool = False,
     ) -> OperationalValidationReport:
         """Validate operational health against calibrated score gates."""
         metrics = metrics or self.compute_metrics(layers=layers)
-        thresholds = thresholds or (
-            OperationalHealthThresholds.uniform(min_score)
-            if min_score is not None
-            else OperationalHealthThresholds()
-        )
+        if thresholds is None:
+            if calibrated:
+                thresholds = self.latest_calibrated_thresholds()
+                if thresholds is None:
+                    raise FileNotFoundError("No Memory OS calibration baseline found.")
+            elif min_score is not None:
+                thresholds = OperationalHealthThresholds.uniform(min_score)
+            else:
+                thresholds = OperationalHealthThresholds()
         score_payload = metrics.to_dict()["scores"]
         threshold_payload = thresholds.to_dict()
         gates = tuple(
@@ -569,6 +659,104 @@ class MemoryOperationsEngine:
             metrics=metrics,
             trend=self._metric_trend(metrics),
         )
+
+    def calibrate_health(
+        self,
+        *,
+        layers: list[str] | None = None,
+        history_limit: int = 20,
+        floor: float = 0.7,
+        tolerance: float = 0.05,
+        include_current: bool = True,
+    ) -> OperationalCalibrationReport:
+        """Derive health thresholds from observed Memory OS metric history."""
+        history = self.metric_history(limit=history_limit)
+        samples_by_name: dict[str, list[float]] = {name: [] for name in SCORE_NAMES}
+        for record in history:
+            scores = record.get("metrics", {}).get("scores", {}) if isinstance(record, dict) else {}
+            for name in SCORE_NAMES:
+                value = _safe_float(scores.get(name))
+                if value is not None:
+                    samples_by_name[name].append(_round_score(value))
+
+        if include_current or not any(samples_by_name.values()):
+            current_scores = self.compute_metrics(layers=layers).to_dict()["scores"]
+            for name in SCORE_NAMES:
+                value = _safe_float(current_scores.get(name))
+                if value is not None:
+                    samples_by_name[name].append(_round_score(value))
+
+        floor = _round_score(floor)
+        tolerance = _round_score(tolerance)
+        calibration_items: list[MetricCalibration] = []
+        threshold_values: dict[str, float] = {}
+        for name in SCORE_NAMES:
+            samples = samples_by_name[name]
+            if samples:
+                baseline = _round_score(sum(samples) / len(samples))
+                minimum = _round_score(min(samples))
+                maximum = _round_score(max(samples))
+                threshold = _round_score(max(floor, min(minimum, baseline - tolerance)))
+            else:
+                baseline = 0.0
+                minimum = 0.0
+                maximum = 0.0
+                threshold = floor
+
+            threshold_values[name] = threshold
+            calibration_items.append(
+                MetricCalibration(
+                    name=name,
+                    baseline=baseline,
+                    threshold=threshold,
+                    sample_count=len(samples),
+                    minimum=minimum,
+                    maximum=maximum,
+                    floor=floor,
+                    tolerance=tolerance,
+                )
+            )
+
+        sample_count = max((item.sample_count for item in calibration_items), default=0)
+        status = "calibrated" if history else "bootstrapped"
+        return OperationalCalibrationReport(
+            status=status,
+            strategy="history-mean-minus-tolerance-v1",
+            sample_count=sample_count,
+            thresholds=OperationalHealthThresholds.from_mapping(threshold_values),
+            calibrations=tuple(calibration_items),
+        )
+
+    def record_calibration_report(
+        self,
+        report: OperationalCalibrationReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist an empirical calibration baseline as operational evidence."""
+        payload = {
+            "kind": "health_calibration",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("calibration", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-calibration.json", payload)
+        return path
+
+    def latest_calibrated_thresholds(self) -> OperationalHealthThresholds | None:
+        """Return thresholds from the latest persisted calibration baseline."""
+        path = self._evidence_dir / "latest-calibration.json"
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        thresholds = payload.get("report", {}).get("thresholds", {})
+        if not isinstance(thresholds, dict):
+            return None
+        return OperationalHealthThresholds.from_mapping(thresholds)
 
     def record_validation_report(
         self,
