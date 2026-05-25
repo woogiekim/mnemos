@@ -5,6 +5,16 @@ memory lifecycle for AI agents. It provides a single Memory Gateway entry point,
 a Policy Engine that enforces lifecycle transitions, memory layers, and CLI tools
 that agents use instead of accessing the filesystem directly.
 
+## Foundational Direction
+
+mnemos is governed by permanent architectural direction documents that define
+its identity as an AI Memory Operating System and the memory layer for
+persistent intelligence:
+
+- [AI memory operating system philosophy](docs/ai-memory-operating-system-philosophy.md)
+- [Memory lifecycle management direction](docs/memory-lifecycle-management-direction.md)
+- [Context persistence as a first-class concern](docs/context-persistence-first-class-concern.md)
+
 ## Quick Start
 
 ### Option A — One-line remote install (recommended)
