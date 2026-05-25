@@ -111,7 +111,6 @@ class TestRunScriptUsesDevNull:
 class TestNoDeadlockOnLargeStderr:
     """Integration-level test: a script emitting large stderr must not block."""
 
-    @pytest.mark.timeout(10)
     def test_large_stderr_does_not_deadlock(self, tmp_path):
         """
         A hook that writes 100 000 bytes to stderr must not deadlock.

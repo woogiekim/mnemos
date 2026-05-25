@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -48,12 +49,13 @@ class HookDispatcher:
         env = os.environ.copy()
         env.update(env_extras)
         try:
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [str(script)],
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            threading.Thread(target=proc.wait, daemon=True).start()
         except OSError as exc:
             logger.warning("Hook script failed to start: %s — %s", script, exc)
         except Exception as exc:

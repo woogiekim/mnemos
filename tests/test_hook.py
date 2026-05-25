@@ -453,192 +453,40 @@ class TestSearchOutput:
 
 
 # ---------------------------------------------------------------------------
-# Capture protocol reminder
+# Autonomous capture delegation
 # ---------------------------------------------------------------------------
 
-class TestCaptureProtocol:
-    pytestmark = pytest.mark.skip(
-        reason=(
-            "V1 autonomous memory delegates capture to mnemos capture-transcript; "
-            "UserPromptSubmit no longer injects AI-authored capture protocol text."
-        )
-    )
+class TestAutonomousCaptureDelegation:
+    def test_user_prompt_submit_does_not_emit_capture_protocol(self, tmp_path):
+        """V1 capture is transcript-driven; prompt hooks should not instruct AI to capture."""
+        rc, output = _run_hook("how does caching work?", mnemos_repo_root=str(tmp_path))
 
-    def test_capture_protocol_emitted_on_normal_prompt(self, tmp_path):
-        """The hook must emit a <mnemos-capture-protocol> block on every normal prompt."""
-        rc, output = _run_hook("how does caching work?",
-                               mnemos_repo_root=str(tmp_path))
         assert rc == 0
-        assert "<mnemos-capture-protocol>" in output
-        assert "</mnemos-capture-protocol>" in output
+        assert "<mnemos-capture-protocol>" not in output
+        assert "mnemos capture" not in output
 
-    def test_capture_protocol_contains_command(self, tmp_path):
-        """The capture protocol block must include the mnemos capture command.
-
-        Method E (closes #22): the capture command no longer uses --quiet because
-        the CLI stdout IS the notification. Without --quiet, the CLI emits both
-        the machine-readable 'captured: <uuid>' and the human-friendly notification.
-        The protocol still includes --layer session and --session-id.
-        """
-        rc, output = _run_hook("explain the architecture",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "mnemos capture" in output
-        assert "--layer session" in output
-        # Method E: --quiet is no longer in the protocol's example capture command
-        # (the CLI needs to emit the notification, which --quiet would suppress)
-        assert "--quiet" not in output, (
-            "Method E: capture protocol must NOT use --quiet; "
-            "the CLI stdout IS the notification and --quiet would suppress it"
-        )
-
-    def test_capture_protocol_emitted_even_without_search_results(self, tmp_path):
-        """The capture protocol block must fire even when no search results are found."""
-        # tmp_path has no memories, so search returns nothing — protocol still fires
-        rc, output = _run_hook("xyzzy quux plugh nosuchterm",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "<mnemos-capture-protocol>" in output
-
-    def test_compact_does_not_emit_capture_protocol_block(self, tmp_path):
-        """/compact exits early with its own reminder; capture protocol block must NOT appear."""
+    def test_compact_keeps_capture_protocol_absent(self, tmp_path):
+        """/compact should not reintroduce the old AI-authored capture protocol."""
         rc, output = _run_hook("/compact", mnemos_repo_root=str(tmp_path))
+
         assert rc == 0
         assert "<mnemos-capture-protocol>" not in output
 
-    def test_capture_protocol_uses_liberal_language(self, tmp_path):
-        """Protocol must encourage liberal capturing, not just 'worth recalling'."""
-        rc, output = _run_hook("how does this work?", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "liberally" in output
-        assert "when in doubt" in output
-
-    def test_capture_protocol_sets_minimum_frequency(self, tmp_path):
-        """Protocol must state a minimum capture frequency per response."""
-        rc, output = _run_hook("explain the flow", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "at least 1" in output
-
-    def test_capture_protocol_includes_expanded_categories(self, tmp_path):
-        """Protocol must list expanded capture categories including root causes and constraints."""
-        rc, output = _run_hook("why did this fail?", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "root cause" in output
-        assert "constraint" in output
-
-    def test_capture_protocol_prohibits_ai_written_notification(self, tmp_path):
-        """Protocol must PROHIBIT AI from writing ✻ ... notification text (Method E, closes #22).
-
-        Method E removes AI's responsibility for writing the notification entirely.
-        The CLI's own stdout IS the notification. The protocol must include an explicit
-        prohibition against duplicating the CLI output as AI-authored text.
-
-        Replaces Method A (#19) which still allowed AI to write the notification
-        (just requiring a mandatory [id: <uuid>] suffix — still bypassable).
-        """
-        rc, output = _run_hook("explain this system", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        # Old Method-C wording must be gone
-        assert "NEVER emit" not in output, (
-            "Old Method-C wording 'NEVER emit' must not be present"
-        )
-        # Old Method-A wording (mandatory id format in notification) must be gone:
-        # Under Method E, AI never writes the notification at all.
-        assert "[id: <uuid>]" not in output, (
-            "Method-A [id: <uuid>] format template must be removed under Method E; "
-            "AI is prohibited from writing any ✻ notification"
-        )
-        # Method E prohibition must be present
-        assert "DO NOT" in output or "forbidden" in output or "prohibited" in output, (
-            "Protocol must contain an explicit prohibition (DO NOT / forbidden / prohibited) "
-            "against AI writing ✻ ... notification text (Method E)"
-        )
-        assert "mnemos capture" in output
-
-    def test_capture_protocol_notification_is_cli_output(self, tmp_path):
-        """Protocol must state that the CLI output IS the notification (Method E).
-
-        The architectural shift: notification is the CLI's stdout, not AI text.
-        """
-        rc, output = _run_hook("describe the architecture", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        # Protocol must explain that CLI output is the canonical notification
-        assert "CLI" in output or "tool result" in output or "stdout" in output, (
-            "Protocol must explain that the mnemos capture CLI output IS the notification "
-            "(Method E — CLI stdout is the canonical notification channel)"
-        )
-
-    def test_capture_protocol_no_mandatory_id_suffix_instruction(self, tmp_path):
-        """Protocol must NOT instruct AI to include MANDATORY [id: <uuid>] suffix (Method E).
-
-        Under Method E, the CLI prints the notification (with the real id) directly.
-        AI is prohibited from writing any notification at all — so the MANDATORY
-        id-suffix instruction from Method A (#19) is no longer needed or correct.
-        """
-        rc, output = _run_hook("describe the system design", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "MANDATORY" not in output, (
-            "Method-A 'MANDATORY' id-suffix instruction must be removed under Method E; "
-            "AI is prohibited from writing any ✻ notification"
-        )
-
-    def test_capture_protocol_no_notification_format_template(self, tmp_path):
-        """Protocol must NOT include a notification format template for AI to follow (Method E).
-
-        Under Method E, AI writes no notification — the CLI does. Providing a
-        format template would imply AI should write the notification, which is forbidden.
-        """
-        rc, output = _run_hook("what is the capture flow?", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        # The exact Method-A format string must not appear
-        assert "[id: <uuid>]" not in output, (
-            "Method-A [id: <uuid>] notification format template must be removed; "
-            "under Method E AI never writes the notification"
-        )
-
-    def test_capture_protocol_no_old_method_c_wording(self, tmp_path):
-        """The old Method-C prohibition text ('NEVER emit ✻ 🧠 without') must be absent.
-        It was replaced by Method-A structural enforcement in #19."""
-        rc, output = _run_hook("how does the pipeline work?", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "NEVER emit" not in output, (
-            "Old 'NEVER emit ✻ 🧠 without' wording from #17 must be removed; "
-            "Method A ([id: <uuid>] enforcement) supersedes it"
-        )
-
-    def test_capture_protocol_includes_session_id_flag(self, tmp_path):
-        """The capture protocol command must include --session-id so captures are
-        correlated with hook_search events sharing the same session (closes #18)."""
-        session_id = "test-session-mnemos-18"
-        rc, output = _run_hook("explain the observability pipeline",
-                               session_id=session_id,
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "--session-id" in output, (
-            "Capture protocol command must include --session-id for observability correlation"
-        )
-        assert session_id in output, (
-            f"Capture protocol must embed the actual session_id ({session_id!r}) in the command"
-        )
-
-    def test_hook_exports_mnemos_session_id_env_var(self, tmp_path):
-        """Hook must export MNEMOS_SESSION_ID so the CLI env-var fallback works
-        even if Claude omits --session-id from the mnemos capture call (closes #18)."""
-        # We verify indirectly: the capture protocol block in the hook output must
-        # carry the session_id in the --session-id argument. The export is a
-        # side-effect visible only to child processes of the hook; testing it
-        # directly would require running a child that reads the env, which the
-        # hook itself does not produce output for. The presence of the session_id
-        # in the injected command text is the user-facing observable behaviour.
+    def test_stop_hook_passes_session_id_to_transcript_capture(self, tmp_path):
+        """Stop hook owns capture correlation by forwarding the host session id."""
         session_id = "env-export-test-session"
-        rc, output = _run_hook("any prompt", session_id=session_id,
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        # The injected command must show the actual session_id (confirms SESSION_ID
-        # was correctly read and exported as MNEMOS_SESSION_ID).
-        assert session_id in output, (
-            "Hook output must include the session_id to confirm MNEMOS_SESSION_ID export"
+        rc, output, calls = _run_stop_hook_json(
+            [{"role": "assistant", "content": "Root cause: transcript capture is autonomous."}],
+            tmp_path,
+            session_id=session_id,
         )
+
+        assert rc == 0, output
+        assert calls
+        call = calls[0]
+        assert call[:2] == ["capture-transcript", "--json"]
+        assert "--session-id" in call
+        assert session_id in call
 
 
 # ---------------------------------------------------------------------------
@@ -947,119 +795,42 @@ class TestKeywordExtraction:
 # Search trigger hints in the capture-protocol block (gap 2 — mnemos #20)
 # ---------------------------------------------------------------------------
 
-class TestSearchTriggerHints:
-    pytestmark = pytest.mark.skip(
-        reason=(
-            "Search trigger guidance moved out of per-prompt capture protocol; "
-            "autonomous prompts use mnemos context and managed behavior block guidance."
+class TestAutonomousSearchGuidance:
+    """Search guidance now lives in managed host behavior, not prompt protocol text."""
+
+    def test_prompt_hook_delegates_retrieval_to_context_command(self, tmp_path):
+        """Per-prompt search policy is implemented by `mnemos context`."""
+        fake_bin = tmp_path / "mnemos"
+        log_file = tmp_path / "mnemos_calls.log"
+        fake_bin.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo \"$@\" >> {log_file}\n"
+            "if [ \"$1\" = \"context\" ]; then echo '<mnemos-context advisory=\"true\"></mnemos-context>'; fi\n"
+            "exit 0\n",
+            encoding="utf-8",
         )
-    )
+        fake_bin.chmod(0o755)
 
-    """The capture-protocol block must also guide AI toward explicit mid-session search.
-
-    Stats from observability.jsonl show hook_search (118) and explicit search (120)
-    are nearly equal, but AI rarely calls mnemos search when new questions arise
-    mid-session — relying instead on session-start auto-injection. These tests
-    verify the hook now surfaces concrete 'when to search' guidance alongside
-    the existing capture guidance.
-
-    Trigger phrases that should prompt AI to call mnemos search proactively:
-    - Analyzing a bug / error / exception — search related root-cause memories first
-    - Answering 'why was X decided' / 'why does X work this way' — search prior decisions
-    - Before refactoring — search known constraints
-    - Architecture / design questions — search architecture decisions
-    - Constraint check / 'can we' / 'is it allowed' — search project constraints
-    """
-
-    def test_capture_protocol_includes_search_trigger_guidance(self, tmp_path):
-        """The <mnemos-capture-protocol> block must include 'mnemos search' guidance.
-
-        Trigger phrase: any prompt — search guidance is always injected as part
-        of the protocol block so AI has standing instructions for when to search.
-        """
-        rc, output = _run_hook("how does caching work?",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "mnemos search" in output, (
-            "Capture-protocol block must mention 'mnemos search' to guide mid-session search"
+        rc, output = _run_hook(
+            "why does the parser fail on empty input?",
+            mnemos_repo_root=str(tmp_path),
+            env_extras={"PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"},
         )
 
-    def test_capture_protocol_mentions_bug_analysis_trigger(self, tmp_path):
-        """Protocol must include 'bug' or 'error' as a trigger to run mnemos search first.
+        assert rc == 0, output
+        assert "<mnemos-context" in output
+        assert "<mnemos-capture-protocol>" not in output
+        assert "context --render" in log_file.read_text(encoding="utf-8")
 
-        Expected wording: 'when analyzing a bug' / 'before debugging' / 'error analysis'.
-        """
-        rc, output = _run_hook("why does the parser fail on empty input?",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "bug" in output or "error" in output, (
-            "Protocol must mention bug/error as a search trigger so AI searches "
-            "root-cause memories before starting debugging"
-        )
+    def test_behavior_block_owns_concrete_search_trigger_guidance(self):
+        """Managed behavior text keeps concrete mid-session search triggers."""
+        from core.adapters.base import MNEMOS_BEHAVIOR_BLOCK
 
-    def test_capture_protocol_mentions_decision_review_trigger(self, tmp_path):
-        """Protocol must guide AI to search prior decisions before answering 'why' questions.
-
-        Expected wording: 'decision' or 'why was X decided'.
-        """
-        rc, output = _run_hook("why was the session layer designed this way?",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "decision" in output, (
-            "Protocol must tell AI to search prior decisions when answering 'why' questions"
-        )
-
-    def test_capture_protocol_mentions_constraint_trigger(self, tmp_path):
-        """Protocol must remind AI to search known constraints before refactoring.
-
-        Expected wording: 'constraint' in the search-trigger section.
-        """
-        rc, output = _run_hook("I want to refactor the storage layer",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        assert "constraint" in output, (
-            "Protocol must remind AI to search known constraints before refactoring"
-        )
-
-    def test_search_hint_contains_concrete_example_query(self, tmp_path):
-        """The protocol block must show a concrete example mnemos search call.
-
-        A bare 'run mnemos search' is insufficient — AI needs a pattern to match.
-        The hint must show 'mnemos search <topic>' or similar concrete form.
-        """
-        rc, output = _run_hook("explain the event bus architecture",
-                               mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        # The protocol must include a concrete search invocation pattern,
-        # not just a generic mention of 'mnemos search'.
-        assert "mnemos search" in output, (
-            "Protocol must include a concrete 'mnemos search <topic>' example"
-        )
-        # Additionally verify it appears in a search-guidance context,
-        # not only in the capture command context.
-        lines = output.splitlines()
-        search_lines = [l for l in lines if "mnemos search" in l]
-        assert len(search_lines) >= 1, (
-            "Expected at least one 'mnemos search' line in protocol output"
-        )
-
-    def test_search_trigger_guidance_appears_inside_capture_protocol_block(self, tmp_path):
-        """Search trigger guidance must be INSIDE the <mnemos-capture-protocol> block.
-
-        It must not be emitted as a separate free-form block outside the protocol —
-        placing it inside ensures it fires on every prompt turn alongside capture guidance.
-        """
-        rc, output = _run_hook("describe the architecture", mnemos_repo_root=str(tmp_path))
-        assert rc == 0
-        # Extract content inside the protocol block
-        start = output.find("<mnemos-capture-protocol>")
-        end = output.find("</mnemos-capture-protocol>")
-        assert start != -1 and end != -1, "Protocol block not found in output"
-        protocol_content = output[start:end]
-        assert "mnemos search" in protocol_content, (
-            "Search trigger guidance must appear inside <mnemos-capture-protocol> block, "
-            "not outside it"
-        )
+        block = MNEMOS_BEHAVIOR_BLOCK.lower()
+        assert "mnemos search" in block
+        assert "bug" in block or "error" in block
+        assert "decision" in block
+        assert "constraint" in block
 
 
 # ---------------------------------------------------------------------------
