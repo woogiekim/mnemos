@@ -630,8 +630,10 @@ class TestBgCheckCliCommand:
         assert result.memory_os_enabled is True
         assert result.memory_os_validation_passed is True
         assert result.memory_os_health_status == "passed"
-        assert len(result.memory_os_evidence_paths) == 3
+        assert result.memory_os_retrieval_status == "ok"
+        assert len(result.memory_os_evidence_paths) == 4
         assert all(Path(path).exists() for path in result.memory_os_evidence_paths)
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-backends.json").exists()
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-health.json").exists()
 
     def test_bg_check_memory_os_recover_repairs_before_scoring(self, repo_root: Path, tmp_path):
@@ -662,7 +664,7 @@ class TestBgCheckCliCommand:
         assert result.memory_os_repaired > 0
         assert result.memory_os_reindexed == 1
         assert result.memory_os_validation_passed is True
-        assert len(result.memory_os_evidence_paths) == 4
+        assert len(result.memory_os_evidence_paths) == 5
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-recovery.json").exists()
 
         repaired_text = recoverable.read_text(encoding="utf-8")
@@ -718,7 +720,9 @@ class TestBgCheckCliCommand:
         assert result.exit_code == 0
         assert result.output == ""
         latest_metrics = repo_root / ".agent" / "reports" / "memory-os" / "latest-metrics.json"
+        latest_backends = repo_root / ".agent" / "reports" / "memory-os" / "latest-backends.json"
         assert latest_metrics.exists()
+        assert latest_backends.exists()
         payload = json.loads(latest_metrics.read_text(encoding="utf-8"))
         assert payload["kind"] == "metrics_snapshot"
 

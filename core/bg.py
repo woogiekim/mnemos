@@ -346,6 +346,7 @@ class BackgroundCheckResult:
     memory_os_repaired: int = 0
     memory_os_reindexed: int = 0
     memory_os_corrupt: int = 0
+    memory_os_retrieval_status: str | None = None
     memory_os_evidence_paths: list[str] = field(default_factory=list)
     memory_os_errors: list[str] = field(default_factory=list)
 
@@ -358,6 +359,7 @@ class BackgroundCheckResult:
             or self.duplicate_groups
             or self.memory_os_lifecycle_applied > 0
             or self.memory_os_repaired > 0
+            or self.memory_os_retrieval_status in {"degraded", "failed"}
             or self.memory_os_validation_passed is False
             or self.memory_os_errors
         )
@@ -393,6 +395,8 @@ class BackgroundCheckResult:
             lines.append(
                 f"[mnemos bg] Memory OS repaired {self.memory_os_repaired} metadata/index issue(s)"
             )
+        if self.memory_os_retrieval_status in {"degraded", "failed"}:
+            lines.append(f"[mnemos bg] Memory OS retrieval backends {self.memory_os_retrieval_status}")
         if self.memory_os_validation_passed is False:
             lines.append("[mnemos bg] Memory OS health validation failed")
         for error in self.memory_os_errors[:2]:
@@ -535,6 +539,15 @@ def run_background_check(
 
             gw = MemoryGateway(repo_root=repo_root)
             engine = MemoryOperationsEngine(gw)
+            backend_report = engine.retrieval_backend_health()
+            result.memory_os_retrieval_status = backend_report.status
+            if memory_os_record:
+                result.memory_os_evidence_paths.append(
+                    str(engine.record_backend_health_report(backend_report, label="bg-check"))
+                )
+            if backend_report.partial_failure:
+                messages.append(f"Memory OS: retrieval backends {backend_report.status}")
+
             if memory_os_recover:
                 recovery_report = engine.recover_store(
                     dry_run=False,

@@ -522,6 +522,7 @@ def test_memory_operations_cli_and_capabilities(
 ) -> None:
     """CLI and provider metadata expose operational Memory OS surfaces."""
     monkeypatch.setenv("MNEMOS_REPO_ROOT", str(operations_repo))
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "none")
     runner = CliRunner()
     MemoryGateway(repo_root=str(operations_repo)).capture(
         layer="project",
@@ -538,6 +539,7 @@ def test_memory_operations_cli_and_capabilities(
     )
 
     metrics_result = runner.invoke(cli, ["memory-metrics", "--record", "--json"])
+    backends_result = runner.invoke(cli, ["memory-backends", "--record", "--json"])
     compress_result = runner.invoke(
         cli,
         [
@@ -562,6 +564,12 @@ def test_memory_operations_cli_and_capabilities(
     metrics_payload = json.loads(metrics_result.output)
     assert metrics_payload["status"] == "ok"
     assert Path(metrics_payload["evidence_path"]).exists()
+    assert backends_result.exit_code == 0, backends_result.output
+    backends_payload = json.loads(backends_result.output)
+    assert backends_payload["status"] == "ok"
+    assert backends_payload["retrieval_contract"] == "fts-primary-vector-optional-grep-fallback"
+    assert Path(backends_payload["evidence_path"]).exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-backends.json").exists()
     assert compress_result.exit_code == 0, compress_result.output
     compress_payload = json.loads(compress_result.output)
     assert compress_payload["status"] == "completed"
@@ -590,3 +598,5 @@ def test_memory_operations_cli_and_capabilities(
     assert capabilities["capability_status"]["autonomous_memory_recovery"] == "supported"
     assert capabilities["capability_status"]["managed_compression_jobs"] == "supported"
     assert capabilities["capability_status"]["empirical_metric_calibration"] == "supported"
+    assert capabilities["capability_status"]["retrieval_backend_health"] == "supported"
+    assert capabilities["capability_status"]["retrieval_degradation_evidence"] == "supported"

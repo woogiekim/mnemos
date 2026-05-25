@@ -425,6 +425,29 @@ class ManagedCompressionReport:
         }
 
 
+@dataclass(frozen=True)
+class RetrievalBackendHealthReport:
+    """Operational health report for retrieval backends and fallbacks."""
+
+    status: str
+    partial_failure: bool
+    retrieval_contract: str
+    backends: tuple[dict[str, Any], ...]
+    degraded_reasons: tuple[str, ...]
+    generated_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "status": self.status,
+            "partial_failure": self.partial_failure,
+            "retrieval_contract": self.retrieval_contract,
+            "generated_at": self.generated_at,
+            "degraded_reasons": list(self.degraded_reasons),
+            "backends": [dict(backend) for backend in self.backends],
+        }
+
+
 class MemoryOperationsEngine:
     """Execute Memory OS operations through the existing gateway surface."""
 
@@ -959,6 +982,50 @@ class MemoryOperationsEngine:
         path = self._evidence_path("compression", label or report.status)
         _write_json(path, payload)
         _write_json(self._evidence_dir / "latest-compression.json", payload)
+        return path
+
+    def retrieval_backend_health(self) -> RetrievalBackendHealthReport:
+        """Report retrieval backend health, vector availability, and fallback readiness."""
+        if hasattr(self._gateway, "retrieval_backend_health"):
+            payload = self._gateway.retrieval_backend_health()
+        elif hasattr(self._gateway, "_search") and hasattr(self._gateway._search, "backend_health"):
+            payload = self._gateway._search.backend_health()
+        else:
+            payload = {
+                "status": "unknown",
+                "partial_failure": True,
+                "retrieval_contract": "unknown",
+                "degraded_reasons": ["retrieval backend health is unavailable"],
+                "backends": [],
+            }
+
+        return RetrievalBackendHealthReport(
+            status=str(payload.get("status") or "unknown"),
+            partial_failure=bool(payload.get("partial_failure")),
+            retrieval_contract=str(payload.get("retrieval_contract") or "unknown"),
+            backends=tuple(
+                dict(backend)
+                for backend in payload.get("backends", [])
+                if isinstance(backend, dict)
+            ),
+            degraded_reasons=tuple(str(reason) for reason in payload.get("degraded_reasons", [])),
+        )
+
+    def record_backend_health_report(
+        self,
+        report: RetrievalBackendHealthReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist retrieval backend health as operational evidence."""
+        payload = {
+            "kind": "retrieval_backend_health",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("backends", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-backends.json", payload)
         return path
 
     def recover_store(

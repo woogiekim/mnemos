@@ -36,6 +36,8 @@ CAPABILITIES: dict[str, bool | str] = {
     "autonomous_memory_recovery": "supported",
     "managed_compression_jobs": "supported",
     "empirical_metric_calibration": "supported",
+    "retrieval_backend_health": "supported",
+    "retrieval_degradation_evidence": "supported",
 }
 
 
@@ -83,6 +85,8 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "autonomous_memory_recovery": "mnemos bg-check --memory-os --memory-os-recover repairs metadata and reindexes before health scoring.",
     "managed_compression_jobs": "mnemos memory-compress builds durable continuity page artifacts from operational memory.",
     "empirical_metric_calibration": "mnemos memory-calibrate derives and persists health validation baselines from metric history.",
+    "retrieval_backend_health": "mnemos memory-backends reports FTS, vector, and fallback retrieval health.",
+    "retrieval_degradation_evidence": "Search and Memory OS evidence expose backend degradation, vector availability, and fallback use.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {
@@ -234,6 +238,7 @@ def search_payload(
     results: list[dict[str, Any]],
     mode: str,
     partial_failure: bool = False,
+    retrieval_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the stable JSON payload for provider search commands.
 
@@ -248,7 +253,10 @@ def search_payload(
     else:
         scores = [1.0 - (idx / (count - 1)) for idx in range(count)]
 
-    return {
+    if retrieval_diagnostics:
+        partial_failure = partial_failure or bool(retrieval_diagnostics.get("partial_failure"))
+
+    payload = {
         "status": "degraded" if partial_failure else "ok",
         "query": query,
         "count": count,
@@ -260,6 +268,9 @@ def search_payload(
             for result, score in zip(results, scores)
         ],
     }
+    if retrieval_diagnostics:
+        payload["retrieval_diagnostics"] = retrieval_diagnostics
+    return payload
 
 
 def error_payload(

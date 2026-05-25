@@ -642,6 +642,15 @@ class MemoryGateway:
 
         return results
 
+    @property
+    def last_search_diagnostics(self) -> dict[str, Any]:
+        """Return backend diagnostics from the most recent search."""
+        return self._search.last_diagnostics
+
+    def retrieval_backend_health(self) -> dict[str, Any]:
+        """Return operational health for retrieval backends and fallbacks."""
+        return self._search.backend_health()
+
     # ------------------------------------------------------------------ #
     # Read                                                                  #
     # ------------------------------------------------------------------ #

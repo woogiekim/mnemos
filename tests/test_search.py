@@ -69,23 +69,29 @@ class TestFTSIndex:
 
 
 class TestVectorFallback:
-    def test_vector_fallback_when_backend_unavailable(self):
+    def test_vector_fallback_when_backend_unavailable(self, monkeypatch):
         """VectorBackend with backend=none returns empty list gracefully."""
-        import os
-        os.environ["MNEMOS_VECTOR_BACKEND"] = "none"
+        monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "none")
         from core.vector import VectorBackend
-        backend = VectorBackend()
-        results = backend.search("some query")
-        assert results == []
 
-    def test_vector_fallback_on_invalid_backend(self):
-        """VectorBackend with unknown backend returns empty list gracefully."""
-        import os
-        os.environ["MNEMOS_VECTOR_BACKEND"] = "invalid_backend"
-        from core.vector import VectorBackend
         backend = VectorBackend()
         results = backend.search("some query")
+
         assert results == []
+        assert backend.diagnostics()["status"] == "disabled"
+
+    def test_vector_fallback_on_invalid_backend(self, monkeypatch):
+        """VectorBackend with unknown backend returns empty list gracefully."""
+        monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "invalid_backend")
+        from core.vector import VectorBackend
+
+        backend = VectorBackend()
+        results = backend.search("some query")
+
+        assert results == []
+        diagnostics = backend.diagnostics()
+        assert diagnostics["status"] == "unsupported"
+        assert diagnostics["degraded"] is True
 
 
 class TestFTSFrontmatterStripping:
@@ -314,3 +320,64 @@ class TestSearchMiddleware:
         item_ids = [r["item_id"] for r in results]
         assert "global-item" in item_ids
         assert "project-item" not in item_ids
+
+    def test_search_middleware_records_vector_degradation(self, tmp_path):
+        """Search diagnostics expose vector failures while preserving FTS results."""
+        from core.fts import FTSIndex
+        from core.search import SearchMiddleware
+
+        class BrokenVector:
+            backend_name = "qdrant"
+
+            def search(self, query, limit=10):
+                raise RuntimeError("vector service unavailable")
+
+        db_path = str(tmp_path / "fts.db")
+        fts = FTSIndex(db_path=db_path)
+        fts.index_item(
+            item_id="diagnostic-item",
+            content="retrieval backend health evidence",
+            metadata={"layer": "project"},
+        )
+
+        middleware = SearchMiddleware(
+            repo_root=str(tmp_path),
+            fts_index=fts,
+            vector_backend=BrokenVector(),
+        )
+
+        results = middleware.search("retrieval")
+        diagnostics = middleware.last_diagnostics
+
+        assert results[0]["item_id"] == "diagnostic-item"
+        assert diagnostics["status"] == "degraded"
+        assert diagnostics["partial_failure"] is True
+        vector = next(backend for backend in diagnostics["backends"] if backend["name"] == "vector")
+        assert vector["status"] == "error"
+        assert "vector service unavailable" in vector["reason"]
+
+    def test_search_middleware_records_grep_fallback_use(self, tmp_path):
+        """Search diagnostics show when grep fallback supplies continuity evidence."""
+        from core.fts import FTSIndex
+        from core.search import SearchMiddleware
+
+        wiki_global = tmp_path / "wiki" / "global"
+        wiki_global.mkdir(parents=True)
+        (wiki_global / "fallback-memory.md").write_text(
+            "Grep fallback preserves operational retrieval continuity.",
+            encoding="utf-8",
+        )
+
+        db_path = str(tmp_path / "fts.db")
+        middleware = SearchMiddleware(
+            repo_root=str(tmp_path),
+            fts_index=FTSIndex(db_path=db_path),
+        )
+
+        results = middleware.search("fallback")
+        diagnostics = middleware.last_diagnostics
+
+        assert results[0]["item_id"] == "fallback-memory"
+        assert diagnostics["fallback_used"] is True
+        grep = next(backend for backend in diagnostics["backends"] if backend["name"] == "grep")
+        assert grep["status"] == "used"

@@ -422,11 +422,13 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
 
     if as_json:
         from core.provider import search_payload
+        diagnostics = getattr(gw, "last_search_diagnostics", None)
         _echo_json(search_payload(
             query=query,
             results=results,
             mode="fast" if fast else "standard",
             partial_failure=False,
+            retrieval_diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
         ))
         return
 
@@ -1363,6 +1365,57 @@ def memory_metrics_cmd(layers: str | None, record: bool, as_json: bool) -> None:
     click.echo(f"  {'issue_count':<40} {metrics.issue_count}")
     if evidence_path:
         click.echo(f"  {'evidence':<40} {evidence_path}")
+
+
+@cli.command("memory-backends")
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist retrieval backend health under .agent/reports/memory-os.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_backends_cmd(record: bool, as_json: bool) -> None:
+    """Show retrieval backend health and fallback readiness."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+
+    try:
+        engine = MemoryOperationsEngine(gw)
+        report = engine.retrieval_backend_health()
+        evidence_path = str(engine.record_backend_health_report(report)) if record else None
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = report.to_dict()
+    if evidence_path:
+        payload["evidence_path"] = evidence_path
+    if as_json:
+        _echo_json(payload)
+        return
+
+    click.echo(
+        "[mnemos backends] "
+        f"status={report.status} contract={report.retrieval_contract}"
+    )
+    for backend in report.backends:
+        status = backend.get("status", "unknown")
+        name = backend.get("name", "backend")
+        configured = "configured" if backend.get("configured") else "not-configured"
+        available = "available" if backend.get("available") else "unavailable"
+        detail = backend.get("reason")
+        click.echo(f"  {name:<8} {status:<11} {configured:<14} {available}")
+        if detail:
+            click.echo(f"           reason: {detail}")
+    if evidence_path:
+        click.echo(f"  {'evidence':<8} {evidence_path}")
 
 
 @cli.command("memory-compress")

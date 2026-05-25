@@ -73,6 +73,7 @@ def runner():
 def cli_with_repo(repo_root, monkeypatch):
     """Return the CLI with MNEMOS_REPO_ROOT pointing at the temp repo."""
     monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "none")
     return cli
 
 
@@ -88,6 +89,8 @@ class TestProviderCapabilities:
         assert payload["capabilities"]["capture_json"] is True
         assert payload["capabilities"]["fast_search"] is True
         assert payload["capabilities"]["search_scores"] is True
+        assert payload["capability_status"]["retrieval_backend_health"] == "supported"
+        assert payload["capability_status"]["retrieval_degradation_evidence"] == "supported"
         assert payload["status_values"] == ["supported", "unsupported", "unknown"]
         assert payload["capability_status"]["capture_json"] == "supported"
         assert payload["capability_status"]["read_json"] == "supported"
@@ -139,6 +142,7 @@ class TestProviderCommandJson:
         assert payload["status"] == "ok"
         assert payload["count"] == 0
         assert payload["partial_failure"] is False
+        assert payload["retrieval_diagnostics"]["status"] == "ok"
         assert payload["results"] == []
 
     def test_capture_search_read_json_contract(self, runner, cli_with_repo) -> None:
@@ -308,3 +312,23 @@ class TestProviderCommandJson:
         assert payload["partial_failure"] is True
         assert payload["error"]["code"] == "locked"
         assert payload["error"]["retryable"] is True
+
+    def test_search_json_exposes_vector_degradation(
+        self,
+        runner,
+        cli_with_repo,
+        monkeypatch,
+    ) -> None:
+        """Search JSON reports configured vector backend degradation without failing retrieval."""
+        monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "invalid_backend")
+
+        result = runner.invoke(cli_with_repo, ["search", "--fast", "--json", "anything"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        diagnostics = payload["retrieval_diagnostics"]
+        vector = next(backend for backend in diagnostics["backends"] if backend["name"] == "vector")
+        assert payload["status"] == "degraded"
+        assert payload["partial_failure"] is True
+        assert vector["status"] == "unsupported"
+        assert vector["degraded"] is True
