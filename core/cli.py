@@ -1365,6 +1365,103 @@ def memory_metrics_cmd(layers: str | None, record: bool, as_json: bool) -> None:
         click.echo(f"  {'evidence':<40} {evidence_path}")
 
 
+@cli.command("memory-compress")
+@click.option(
+    "--apply",
+    "apply_changes",
+    is_flag=True,
+    default=False,
+    help="Write compressed continuity pages. Without this flag the command is a dry run.",
+)
+@click.option(
+    "--layer",
+    "layers",
+    default=None,
+    help="Comma-separated source layers to compress (default: all operational layers).",
+)
+@click.option("--target-layer", default="project", help="Layer that receives continuity page artifacts.")
+@click.option("--query", default="", help="Query used to prioritize compression candidates.")
+@click.option("--token-budget", default=1024, type=int, help="Total rough token budget for compressed pages.")
+@click.option("--page-size", default=4, type=int, help="Maximum memories represented per page.")
+@click.option("--max-item-chars", default=180, type=int, help="Maximum characters retained from each source memory.")
+@click.option("--limit", default=None, type=int, help="Maximum source memories to consider.")
+@click.option("--label", default=None, help="Label used in generated artifact IDs and evidence paths.")
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist the compression report under .agent/reports/memory-os.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
+def memory_compress_cmd(
+    apply_changes: bool,
+    layers: str | None,
+    target_layer: str,
+    query: str,
+    token_budget: int,
+    page_size: int,
+    max_item_chars: int,
+    limit: int | None,
+    label: str | None,
+    record: bool,
+    as_json: bool,
+) -> None:
+    """Build durable continuity pages from operational memory."""
+    from core.operations import MemoryOperationsEngine
+    from core.provider import provider_error_from_exception
+
+    gw = _get_gateway()
+    layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
+
+    try:
+        engine = MemoryOperationsEngine(gw)
+        report = engine.run_compression_job(
+            dry_run=not apply_changes,
+            layers=layer_list,
+            target_layer=target_layer,
+            query=query,
+            token_budget=token_budget,
+            page_size=page_size,
+            max_item_chars=max_item_chars,
+            limit=limit,
+            label=label,
+        )
+        evidence_path = str(engine.record_compression_report(report)) if record else None
+    except Exception as exc:
+        if as_json:
+            _echo_json(provider_error_from_exception(exc))
+            sys.exit(1)
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = report.to_dict()
+    if evidence_path:
+        payload["evidence_path"] = evidence_path
+    if as_json:
+        _echo_json(payload)
+        return
+
+    mode = "dry-run" if report.dry_run else "applied"
+    click.echo(
+        f"[mnemos compress] {mode}: "
+        f"input={report.input_count} "
+        f"pages={report.page_count} "
+        f"applied={report.applied_count} "
+        f"failed={report.failed_count}"
+    )
+    if evidence_path:
+        click.echo(f"  evidence: {evidence_path}")
+    for page in report.pages:
+        status = "applied" if page.applied else "planned"
+        if page.error:
+            status = "failed"
+        click.echo(
+            f"  {status}: {page.artifact_id} "
+            f"sources={len(page.source_item_ids)} tokens={page.estimated_tokens}"
+        )
+
+
 @cli.command("memory-validate")
 @click.option(
     "--layer",

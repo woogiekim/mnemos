@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 import frontmatter
 
+from core.compression import ContinuityCompressor
 from core.contracts import TRUST_RANK, TrustLevel, normalize_trust_level
 from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
 from core.lifecycle import LifecycleAction, LifecycleDecision, MemoryLifecycleManager
@@ -264,6 +265,78 @@ class MemoryRecoveryReport:
             "reindexed_count": self.reindexed_count,
             "generated_at": self.generated_at,
             "issues": [issue.to_dict() for issue in self.issues],
+        }
+
+
+@dataclass(frozen=True)
+class ManagedCompressionPage:
+    """One compressed continuity page planned or written by a compression job."""
+
+    page_id: str
+    artifact_id: str
+    target_layer: str
+    source_item_ids: tuple[str, ...]
+    relationships: tuple[str, ...]
+    summary: str
+    estimated_tokens: int
+    applied: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "page_id": self.page_id,
+            "artifact_id": self.artifact_id,
+            "target_layer": self.target_layer,
+            "source_item_ids": list(self.source_item_ids),
+            "relationships": list(self.relationships),
+            "summary": self.summary,
+            "estimated_tokens": self.estimated_tokens,
+            "applied": self.applied,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class ManagedCompressionReport:
+    """Summary of a managed continuity compression job."""
+
+    status: str
+    dry_run: bool
+    query: str
+    source_layers: tuple[str, ...]
+    target_layer: str
+    input_count: int
+    page_count: int
+    retained_count: int
+    dropped_count: int
+    applied_count: int
+    failed_count: int
+    token_budget: int
+    estimated_tokens: int
+    strategy: str
+    pages: tuple[ManagedCompressionPage, ...]
+    generated_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return {
+            "status": self.status,
+            "dry_run": self.dry_run,
+            "query": self.query,
+            "source_layers": list(self.source_layers),
+            "target_layer": self.target_layer,
+            "input_count": self.input_count,
+            "page_count": self.page_count,
+            "retained_count": self.retained_count,
+            "dropped_count": self.dropped_count,
+            "applied_count": self.applied_count,
+            "failed_count": self.failed_count,
+            "token_budget": self.token_budget,
+            "estimated_tokens": self.estimated_tokens,
+            "strategy": self.strategy,
+            "generated_at": self.generated_at,
+            "pages": [page.to_dict() for page in self.pages],
         }
 
 
@@ -529,6 +602,175 @@ class MemoryOperationsEngine:
         path = self._evidence_path("recovery", label or report.status)
         _write_json(path, payload)
         _write_json(self._evidence_dir / "latest-recovery.json", payload)
+        return path
+
+    def run_compression_job(
+        self,
+        *,
+        dry_run: bool = True,
+        layers: list[str] | None = None,
+        target_layer: str = "project",
+        query: str = "",
+        token_budget: int = 1024,
+        page_size: int = 4,
+        max_item_chars: int = 180,
+        limit: int | None = None,
+        label: str | None = None,
+    ) -> ManagedCompressionReport:
+        """Build durable continuity pages from operational memories."""
+        source_layers = _normalize_layers(layers)
+        source_items: list[dict[str, Any]] = []
+        for item in self._iter_items(list(source_layers)):
+            if limit is not None and len(source_items) >= limit:
+                break
+            if _is_compression_artifact(item):
+                continue
+            if not str(item.get("content") or "").strip():
+                continue
+            source_items.append(item)
+
+        result = ContinuityCompressor().compress(
+            source_items,
+            query=query,
+            token_budget=token_budget,
+            page_size=page_size,
+            max_item_chars=max_item_chars,
+        )
+        stamp = _now_iso().replace(":", "").replace("-", "")
+        safe_label = _safe_label(label or query or "continuity")
+        pages: list[ManagedCompressionPage] = []
+        applied_count = 0
+        failed_count = 0
+
+        for page in result.pages:
+            artifact_id = f"memory-os-continuity-{safe_label}-{stamp}-{page.page_id}"
+            planned = ManagedCompressionPage(
+                page_id=page.page_id,
+                artifact_id=artifact_id,
+                target_layer=target_layer,
+                source_item_ids=page.item_ids,
+                relationships=page.relationships,
+                summary=page.summary,
+                estimated_tokens=page.estimated_tokens,
+                applied=False,
+            )
+            if dry_run:
+                pages.append(planned)
+                continue
+
+            try:
+                content = _continuity_page_content(
+                    page_id=page.page_id,
+                    summary=page.summary,
+                    source_item_ids=page.item_ids,
+                    relationships=page.relationships,
+                )
+                metadata = {
+                    "id": artifact_id,
+                    "layer": target_layer,
+                    "stage": "compressed",
+                    "access_count": 0,
+                    "tags": ["memory-os", "continuity", "compressed-page"],
+                    "trust_level": "observed",
+                    "quality_score": 0.9,
+                    "created_at": _now_iso(),
+                    "content_hash": _content_hash(content),
+                    "summary": page.summary,
+                    "source_item_ids": list(page.item_ids),
+                    "relationships": list(page.relationships),
+                    "memory_os_artifact": "continuity_page",
+                    "compression_strategy": result.strategy,
+                    "compression_query": query,
+                    "token_budget": result.token_budget,
+                    "estimated_tokens": page.estimated_tokens,
+                    "compression_preserves_content": True,
+                }
+                self._store.write(
+                    target_layer,
+                    artifact_id,
+                    content,
+                    metadata,
+                )
+                self._fts.index_item(artifact_id, content, metadata)
+                if hasattr(self._gateway, "log"):
+                    self._gateway.log(
+                        "memory_compress",
+                        artifact_id,
+                        target_layer,
+                        {
+                            "source_item_ids": list(page.item_ids),
+                            "strategy": result.strategy,
+                            "estimated_tokens": page.estimated_tokens,
+                        },
+                    )
+            except Exception as exc:
+                failed_count += 1
+                pages.append(
+                    ManagedCompressionPage(
+                        page_id=planned.page_id,
+                        artifact_id=planned.artifact_id,
+                        target_layer=planned.target_layer,
+                        source_item_ids=planned.source_item_ids,
+                        relationships=planned.relationships,
+                        summary=planned.summary,
+                        estimated_tokens=planned.estimated_tokens,
+                        applied=False,
+                        error=str(exc),
+                    )
+                )
+                continue
+
+            applied_count += 1
+            pages.append(
+                ManagedCompressionPage(
+                    page_id=planned.page_id,
+                    artifact_id=planned.artifact_id,
+                    target_layer=planned.target_layer,
+                    source_item_ids=planned.source_item_ids,
+                    relationships=planned.relationships,
+                    summary=planned.summary,
+                    estimated_tokens=planned.estimated_tokens,
+                    applied=True,
+                )
+            )
+
+        status = "dry_run" if dry_run else "completed"
+        if failed_count:
+            status = "degraded"
+
+        return ManagedCompressionReport(
+            status=status,
+            dry_run=dry_run,
+            query=query,
+            source_layers=source_layers,
+            target_layer=target_layer,
+            input_count=len(source_items),
+            page_count=len(result.pages),
+            retained_count=len(result.retained_ids),
+            dropped_count=len(result.dropped_ids),
+            applied_count=applied_count,
+            failed_count=failed_count,
+            token_budget=result.token_budget,
+            estimated_tokens=result.estimated_tokens,
+            strategy=result.strategy,
+            pages=tuple(pages),
+        )
+
+    def record_compression_report(
+        self,
+        report: ManagedCompressionReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist a managed compression report as operational evidence."""
+        payload = {
+            "kind": "compression_report",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("compression", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-compression.json", payload)
         return path
 
     def recover_store(
@@ -902,6 +1144,10 @@ def _has_continuity_metadata(item: dict[str, Any]) -> bool:
     return bool(tags)
 
 
+def _is_compression_artifact(item: dict[str, Any]) -> bool:
+    return str(item.get("memory_os_artifact") or "") == "continuity_page"
+
+
 def _has_historical_context(item: dict[str, Any]) -> bool:
     layer = str(item.get("layer") or "")
     stage = str(item.get("stage") or "")
@@ -982,6 +1228,25 @@ def _content_hash(content: str) -> str:
     normalized = unicodedata.normalize("NFKC", content)
     normalized = re.sub(r"\s+", " ", normalized.strip()).lower()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _continuity_page_content(
+    *,
+    page_id: str,
+    summary: str,
+    source_item_ids: tuple[str, ...],
+    relationships: tuple[str, ...],
+) -> str:
+    source_lines = "\n".join(f"- {item_id}" for item_id in source_item_ids) or "- none"
+    relationship_lines = "\n".join(f"- {relationship}" for relationship in relationships) or "- none"
+    return (
+        f"# Memory OS Continuity Page: {page_id}\n\n"
+        f"{summary}\n\n"
+        "## Source Memories\n\n"
+        f"{source_lines}\n\n"
+        "## Relationships\n\n"
+        f"{relationship_lines}\n"
+    )
 
 
 def _safe_label(value: str) -> str:

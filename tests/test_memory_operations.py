@@ -224,6 +224,101 @@ def test_operational_evidence_records_reports_and_metric_history(
     assert history[0]["metrics"]["scores"]["context_continuity_score"] == 1.0
 
 
+def test_managed_compression_job_dry_run_preserves_source_memories(
+    operations_repo: Path,
+) -> None:
+    """Compression jobs can plan continuity pages without mutating source memory."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="compress-source-a",
+        content="Architecture decision: persistent memory contracts preserve continuity.",
+        tags=["architecture", "continuity"],
+        quality_score=0.96,
+        extra_metadata={"trust_level": "verified", "workflow_id": "compress-flow"},
+        no_classify=True,
+    )
+    gateway.capture(
+        layer="project",
+        item_id="compress-source-b",
+        content="Workflow result: health validation keeps operational memory measurable.",
+        tags=["workflow", "health"],
+        quality_score=0.93,
+        extra_metadata={"trust_level": "verified", "workflow_id": "compress-flow"},
+        no_classify=True,
+    )
+
+    report = MemoryOperationsEngine(gateway).run_compression_job(
+        dry_run=True,
+        layers=["project"],
+        query="persistent memory continuity",
+        token_budget=256,
+        label="dry-run",
+    )
+
+    assert report.status == "dry_run"
+    assert report.input_count == 2
+    assert report.page_count == 1
+    assert report.applied_count == 0
+    assert set(report.pages[0].source_item_ids) == {"compress-source-a", "compress-source-b"}
+    assert gateway._store.read("compress-source-a")["stage"] == "stored"
+    artifacts = [
+        item
+        for item in gateway._store.iter_layer_items("project")
+        if item.get("memory_os_artifact") == "continuity_page"
+    ]
+    assert artifacts == []
+
+
+def test_managed_compression_job_writes_searchable_continuity_artifacts(
+    operations_repo: Path,
+) -> None:
+    """Compression jobs write durable continuity pages without destroying sources."""
+    gateway = MemoryGateway(repo_root=str(operations_repo))
+    gateway.capture(
+        layer="project",
+        item_id="artifact-source-a",
+        content="Historical decision: compression pages preserve source memory identity.",
+        tags=["history", "compression"],
+        quality_score=0.97,
+        extra_metadata={"trust_level": "verified", "workflow_id": "artifact-flow"},
+        no_classify=True,
+    )
+    gateway.capture(
+        layer="project",
+        item_id="artifact-source-b",
+        content="Operational note: continuity pages remain searchable after compression.",
+        tags=["workflow", "search"],
+        quality_score=0.94,
+        extra_metadata={"trust_level": "verified", "workflow_id": "artifact-flow"},
+        no_classify=True,
+    )
+    engine = MemoryOperationsEngine(gateway)
+
+    report = engine.run_compression_job(
+        dry_run=False,
+        layers=["project"],
+        target_layer="project",
+        query="compression continuity searchable",
+        token_budget=256,
+        label="artifact",
+    )
+    evidence_path = engine.record_compression_report(report)
+
+    assert report.status == "completed"
+    assert report.applied_count == 1
+    artifact = gateway._store.read(report.pages[0].artifact_id)
+    assert artifact["stage"] == "compressed"
+    assert artifact["memory_os_artifact"] == "continuity_page"
+    assert set(artifact["source_item_ids"]) == {"artifact-source-a", "artifact-source-b"}
+    assert "artifact-source-a" in artifact["content"]
+    assert gateway._store.read("artifact-source-a")["content"].startswith("Historical decision")
+    assert evidence_path.exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-compression.json").exists()
+    results = gateway.search("continuity pages searchable", layers=["project"], limit=5)
+    assert report.pages[0].artifact_id in {result["item_id"] for result in results}
+
+
 def test_health_validation_tracks_trend_from_metric_history(
     operations_repo: Path,
 ) -> None:
@@ -360,6 +455,21 @@ def test_memory_operations_cli_and_capabilities(
     )
 
     metrics_result = runner.invoke(cli, ["memory-metrics", "--record", "--json"])
+    compress_result = runner.invoke(
+        cli,
+        [
+            "memory-compress",
+            "--apply",
+            "--layer",
+            "project",
+            "--query",
+            "workflow continuity",
+            "--token-budget",
+            "256",
+            "--record",
+            "--json",
+        ],
+    )
     validate_result = runner.invoke(cli, ["memory-validate", "--min-score", "0.7", "--record", "--json"])
     capabilities_result = runner.invoke(cli, ["capabilities", "--json"])
 
@@ -367,6 +477,11 @@ def test_memory_operations_cli_and_capabilities(
     metrics_payload = json.loads(metrics_result.output)
     assert metrics_payload["status"] == "ok"
     assert Path(metrics_payload["evidence_path"]).exists()
+    assert compress_result.exit_code == 0, compress_result.output
+    compress_payload = json.loads(compress_result.output)
+    assert compress_payload["status"] == "completed"
+    assert compress_payload["applied_count"] >= 1
+    assert Path(compress_payload["evidence_path"]).exists()
     assert validate_result.exit_code == 0, validate_result.output
     validate_payload = json.loads(validate_result.output)
     assert validate_payload["status"] == "passed"
@@ -380,3 +495,4 @@ def test_memory_operations_cli_and_capabilities(
     assert capabilities["capability_status"]["health_validation"] == "supported"
     assert capabilities["capability_status"]["autonomous_health_maintenance"] == "supported"
     assert capabilities["capability_status"]["autonomous_memory_recovery"] == "supported"
+    assert capabilities["capability_status"]["managed_compression_jobs"] == "supported"

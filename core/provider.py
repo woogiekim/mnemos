@@ -34,6 +34,7 @@ CAPABILITIES: dict[str, bool | str] = {
     "health_validation": "supported",
     "autonomous_health_maintenance": "supported",
     "autonomous_memory_recovery": "supported",
+    "managed_compression_jobs": "supported",
 }
 
 
@@ -79,6 +80,7 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "health_validation": "mnemos memory-validate evaluates Memory OS health against calibrated operational score gates.",
     "autonomous_health_maintenance": "mnemos bg-check --memory-os records lifecycle, metrics, and health evidence from the autonomous maintenance path.",
     "autonomous_memory_recovery": "mnemos bg-check --memory-os --memory-os-recover repairs metadata and reindexes before health scoring.",
+    "managed_compression_jobs": "mnemos memory-compress builds durable continuity page artifacts from operational memory.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {
