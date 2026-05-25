@@ -317,10 +317,12 @@ def test_recovery_apply_repairs_metadata_and_reindexes(
     )
 
     gateway = MemoryGateway(repo_root=str(operations_repo))
-    report = MemoryOperationsEngine(gateway).recover_store(
+    engine = MemoryOperationsEngine(gateway)
+    report = engine.recover_store(
         dry_run=False,
         layers=["project"],
     )
+    recovery_path = engine.record_recovery_report(report)
     item = gateway._store.read(str(recoverable))
     results = gateway.search("recoverable operational memory", layers=["project"])
 
@@ -332,6 +334,8 @@ def test_recovery_apply_repairs_metadata_and_reindexes(
     assert item["trust_level"] == "observed"
     assert len(item["content_hash"]) == 64
     assert results[0]["item_id"] == "recoverable-memory"
+    assert recovery_path.exists()
+    assert (operations_repo / ".agent" / "reports" / "memory-os" / "latest-recovery.json").exists()
 
 
 def test_memory_operations_cli_and_capabilities(
@@ -375,3 +379,4 @@ def test_memory_operations_cli_and_capabilities(
     assert capabilities["capability_status"]["operational_evidence"] == "supported"
     assert capabilities["capability_status"]["health_validation"] == "supported"
     assert capabilities["capability_status"]["autonomous_health_maintenance"] == "supported"
+    assert capabilities["capability_status"]["autonomous_memory_recovery"] == "supported"

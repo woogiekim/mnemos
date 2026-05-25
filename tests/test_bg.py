@@ -634,6 +634,41 @@ class TestBgCheckCliCommand:
         assert all(Path(path).exists() for path in result.memory_os_evidence_paths)
         assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-health.json").exists()
 
+    def test_bg_check_memory_os_recover_repairs_before_scoring(self, repo_root: Path, tmp_path):
+        """Opt-in recovery repairs metadata and records recovery evidence before scoring."""
+        from core.bg import run_background_check
+
+        recoverable = repo_root / "wiki" / "projects" / "recoverable-bg.md"
+        recoverable.write_text(
+            "---\nlayer: project\n---\nRecoverable background memory.\n",
+            encoding="utf-8",
+        )
+
+        ts_file = tmp_path / "ts.ts"
+        with patch("core.bg._timestamp_path", return_value=ts_file):
+            result = run_background_check(
+                str(repo_root),
+                force=True,
+                gc_enabled=False,
+                auto_promote_enabled=False,
+                dedup_enabled=False,
+                memory_os_enabled=True,
+                memory_os_recover=True,
+                memory_os_min_score=0.0,
+                memory_os_layers=["project"],
+            )
+
+        assert result.ran is True
+        assert result.memory_os_repaired > 0
+        assert result.memory_os_reindexed == 1
+        assert result.memory_os_validation_passed is True
+        assert len(result.memory_os_evidence_paths) == 4
+        assert (repo_root / ".agent" / "reports" / "memory-os" / "latest-recovery.json").exists()
+
+        repaired_text = recoverable.read_text(encoding="utf-8")
+        assert "id: recoverable-bg" in repaired_text
+        assert "content_hash:" in repaired_text
+
     def test_bg_check_memory_os_quiet_records_without_output(
         self,
         runner,

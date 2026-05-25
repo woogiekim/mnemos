@@ -1452,11 +1452,19 @@ def memory_validate_cmd(
     default=False,
     help="Skip FTS reindexing during apply mode.",
 )
+@click.option(
+    "--record",
+    "record",
+    is_flag=True,
+    default=False,
+    help="Persist the recovery report under .agent/reports/memory-os.",
+)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 def recover_cmd(
     apply_changes: bool,
     layers: str | None,
     no_reindex: bool,
+    record: bool,
     as_json: bool,
 ) -> None:
     """Detect and repair recoverable memory store issues."""
@@ -1467,11 +1475,13 @@ def recover_cmd(
     layer_list = [layer.strip() for layer in layers.split(",")] if layers else None
 
     try:
-        report = MemoryOperationsEngine(gw).recover_store(
+        engine = MemoryOperationsEngine(gw)
+        report = engine.recover_store(
             dry_run=not apply_changes,
             layers=layer_list,
             reindex=not no_reindex,
         )
+        evidence_path = str(engine.record_recovery_report(report)) if record else None
     except Exception as exc:
         if as_json:
             _echo_json(provider_error_from_exception(exc))
@@ -1480,7 +1490,10 @@ def recover_cmd(
         sys.exit(1)
 
     if as_json:
-        _echo_json(report.to_dict())
+        payload = report.to_dict()
+        if evidence_path:
+            payload["evidence_path"] = evidence_path
+        _echo_json(payload)
         return
 
     mode = "dry-run" if report.dry_run else "applied"
@@ -1492,6 +1505,8 @@ def recover_cmd(
         f"repaired={report.repaired_count} "
         f"reindexed={report.reindexed_count}"
     )
+    if evidence_path:
+        click.echo(f"  evidence: {evidence_path}")
     for issue in report.issues:
         state = "repaired" if issue.repaired else "found"
         click.echo(f"  {state}: {issue.code} {issue.path}")
@@ -1558,6 +1573,13 @@ def recover_cmd(
     help="Run opt-in Memory OS lifecycle evidence, metrics snapshot, and health validation.",
 )
 @click.option(
+    "--memory-os-recover",
+    "memory_os_recover",
+    is_flag=True,
+    default=False,
+    help="Repair recoverable metadata and reindex before Memory OS scoring.",
+)
+@click.option(
     "--memory-os-apply",
     "memory_os_apply",
     is_flag=True,
@@ -1593,6 +1615,7 @@ def bg_check_cmd(
     verbose: bool,
     quiet: bool,
     memory_os_enabled: bool,
+    memory_os_recover: bool,
     memory_os_apply: bool,
     memory_os_min_score: float | None,
     memory_os_layers: str | None,
@@ -1616,6 +1639,7 @@ def bg_check_cmd(
       mnemos bg-check --no-gc           # skip GC phase
       mnemos bg-check --quiet           # completely silent (daemon / update use)
       mnemos bg-check --memory-os       # record Memory OS health evidence
+      mnemos bg-check --memory-os --memory-os-recover
     """
     from core.bg import (
         run_background_check,
@@ -1635,6 +1659,7 @@ def bg_check_cmd(
         auto_promote_enabled=not promote_disabled,
         dedup_enabled=not dedup_disabled,
         memory_os_enabled=memory_os_enabled,
+        memory_os_recover=memory_os_recover,
         memory_os_apply=memory_os_apply,
         memory_os_min_score=memory_os_min_score,
         memory_os_layers=memory_os_layer_list,

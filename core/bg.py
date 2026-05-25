@@ -343,6 +343,9 @@ class BackgroundCheckResult:
     memory_os_lifecycle_applied: int = 0
     memory_os_health_status: str | None = None
     memory_os_validation_passed: bool | None = None
+    memory_os_repaired: int = 0
+    memory_os_reindexed: int = 0
+    memory_os_corrupt: int = 0
     memory_os_evidence_paths: list[str] = field(default_factory=list)
     memory_os_errors: list[str] = field(default_factory=list)
 
@@ -354,6 +357,7 @@ class BackgroundCheckResult:
             or self.promoted > 0
             or self.duplicate_groups
             or self.memory_os_lifecycle_applied > 0
+            or self.memory_os_repaired > 0
             or self.memory_os_validation_passed is False
             or self.memory_os_errors
         )
@@ -385,6 +389,10 @@ class BackgroundCheckResult:
             lines.append(
                 f"[mnemos bg] Memory OS applied {self.memory_os_lifecycle_applied} lifecycle transition(s)"
             )
+        if self.memory_os_repaired:
+            lines.append(
+                f"[mnemos bg] Memory OS repaired {self.memory_os_repaired} metadata/index issue(s)"
+            )
         if self.memory_os_validation_passed is False:
             lines.append("[mnemos bg] Memory OS health validation failed")
         for error in self.memory_os_errors[:2]:
@@ -409,6 +417,7 @@ def run_background_check(
     dedup_enabled: bool = True,
     dedup_layers: list[str] | None = None,
     memory_os_enabled: bool = False,
+    memory_os_recover: bool = False,
     memory_os_apply: bool = False,
     memory_os_min_score: float | None = None,
     memory_os_layers: list[str] | None = None,
@@ -446,6 +455,8 @@ def run_background_check(
         Layers to scan for duplicates. Defaults to session, project, global.
     memory_os_enabled:
         Run opt-in Memory OS lifecycle reporting, metrics snapshot, and health validation.
+    memory_os_recover:
+        Repair recoverable metadata and reindex before scoring.
     memory_os_apply:
         Apply lifecycle transitions during the Memory OS phase. Defaults to dry-run reporting.
     memory_os_min_score:
@@ -524,6 +535,24 @@ def run_background_check(
 
             gw = MemoryGateway(repo_root=repo_root)
             engine = MemoryOperationsEngine(gw)
+            if memory_os_recover:
+                recovery_report = engine.recover_store(
+                    dry_run=False,
+                    layers=memory_os_layers,
+                    reindex=True,
+                )
+                result.memory_os_repaired = recovery_report.repaired_count
+                result.memory_os_reindexed = recovery_report.reindexed_count
+                result.memory_os_corrupt = recovery_report.corrupt_count
+                if memory_os_record:
+                    result.memory_os_evidence_paths.append(
+                        str(engine.record_recovery_report(recovery_report, label="bg-check"))
+                    )
+                if recovery_report.repaired_count:
+                    messages.append(
+                        f"Memory OS: repaired {recovery_report.repaired_count} metadata/index issue(s)"
+                    )
+
             lifecycle_report = engine.run_lifecycle(
                 dry_run=not memory_os_apply,
                 layers=memory_os_layers,

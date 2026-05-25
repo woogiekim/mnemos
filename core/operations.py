@@ -514,6 +514,23 @@ class MemoryOperationsEngine:
         _write_json(self._evidence_dir / "latest-health.json", payload)
         return path
 
+    def record_recovery_report(
+        self,
+        report: MemoryRecoveryReport,
+        *,
+        label: str | None = None,
+    ) -> Path:
+        """Persist a recovery report as operational evidence."""
+        payload = {
+            "kind": "recovery_report",
+            "recorded_at": _now_iso(),
+            "report": report.to_dict(),
+        }
+        path = self._evidence_path("recovery", label or report.status)
+        _write_json(path, payload)
+        _write_json(self._evidence_dir / "latest-recovery.json", payload)
+        return path
+
     def recover_store(
         self,
         *,
