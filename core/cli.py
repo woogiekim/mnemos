@@ -474,7 +474,9 @@ def context_cmd(
     if as_json:
         _echo_json(payload)
         return
-    click.echo(render_context_block(payload))
+    rendered = render_context_block(payload)
+    if rendered:
+        click.echo(rendered)
 
 
 @cli.command("capture-transcript")

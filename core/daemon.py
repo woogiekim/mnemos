@@ -264,13 +264,19 @@ def manage_gc_daemon(*, install: bool, uninstall: bool) -> None:
 def run_autonomous_daemon(*, quiet: bool = False) -> dict[str, object]:
     """Run one deterministic autonomous maintenance cycle."""
     from core.bg import run_background_check
+    from core.gateway import MemoryGateway
 
-    result = run_background_check(interval_minutes=0)
+    gateway = MemoryGateway()
+    result = run_background_check(repo_root=str(gateway._root), interval_minutes=0)
+    message = "; ".join(result.messages)
+    if not message:
+        message = "background check completed" if result.ran else "background check skipped"
     payload = {
         "status": "completed" if result.ran else "skipped",
         "gc_archived": result.gc_archived,
         "promoted": result.promoted,
-        "message": result.message,
+        "messages": result.messages,
+        "message": message,
     }
     if not quiet:
         click.echo(f"[mnemos daemon] {payload['status']}: {payload['message']}")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ import yaml
 from click.testing import CliRunner
 
 from core.cli import cli
+from core.context import render_context_block, retrieve_context
+from core.gateway import MemoryGateway
 
 
 @pytest.fixture
@@ -70,6 +73,7 @@ def test_context_json_and_render_shapes(repo_root: Path, monkeypatch: pytest.Mon
     ])
     assert rendered.exit_code == 0, rendered.output
     assert rendered.output.startswith("<mnemos-context")
+    assert 'advisory="true"' in rendered.output
     assert '<memory id="ctx-001"' in rendered.output
 
 
@@ -94,8 +98,139 @@ def test_capture_transcript_filters_deduplicates_and_captures(repo_root: Path, m
     contents = [item["content"] for item in payload["captures"]]
     assert "Architecture decision: deterministic V1 retrieval only" in contents
     assert any("Root cause:" in content for content in contents)
+    assert not any(content.startswith("AI conversation insight: Root cause:") for content in contents)
     assert not any("TASK_ID:" in content for content in contents)
     assert len(contents) == len(set(contents))
+
+
+def test_context_respects_strict_budget(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Context selection keeps total injected content under the requested budget."""
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    gw = MemoryGateway(repo_root=str(repo_root))
+    for idx in range(3):
+        gw.capture(
+            layer="project",
+            item_id=f"budget-{idx}",
+            content=(f"memory budget injection item {idx} " + ("detail " * 40)).strip(),
+            quality_score=0.9,
+            no_classify=True,
+        )
+
+    payload = retrieve_context(
+        prompt="memory budget injection",
+        session_id="sess-budget",
+        host="test",
+        gateway=gw,
+        limit=3,
+        max_chars=120,
+    )
+
+    assert payload["used_chars"] <= 120
+    assert sum(len(item["content"]) for item in payload["results"]) <= 120
+    assert payload["selection"]["skipped_count"] >= 1
+
+
+def test_context_suppresses_stale_and_noisy_memories(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old low-confidence memories and protocol noise are skipped quietly."""
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    gw = MemoryGateway(repo_root=str(repo_root))
+    old = (datetime.now(timezone.utc) - timedelta(days=900)).isoformat() + "Z"
+    gw.capture(
+        layer="project",
+        item_id="ctx-stale",
+        content="deterministic retrieval context should always inject this old idea",
+        quality_score=0.1,
+        extra_metadata={"created_at": old, "confidence": 0.1},
+        no_classify=True,
+    )
+    gw.capture(
+        layer="project",
+        item_id="ctx-noisy",
+        content="STATUS: completed\nTASK_ID: abc\nPLAN:\n  actions: inject deterministic retrieval context",
+        quality_score=0.9,
+        no_classify=True,
+    )
+    gw.capture(
+        layer="project",
+        item_id="ctx-good",
+        content="Architecture decision: deterministic retrieval context stays advisory and bounded",
+        quality_score=0.95,
+        no_classify=True,
+    )
+
+    payload = retrieve_context(
+        prompt="deterministic retrieval context",
+        session_id="sess-filter",
+        host="test",
+        gateway=gw,
+        limit=5,
+    )
+
+    ids = [item["id"] for item in payload["results"]]
+    assert "ctx-good" in ids
+    assert "ctx-stale" not in ids
+    assert "ctx-noisy" not in ids
+    assert payload["selection"]["skipped_reasons"]["stale"] >= 1
+    assert payload["selection"]["skipped_reasons"]["noisy"] >= 1
+
+
+def test_context_prioritizes_high_signal_memory(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dense, fresh, confident memory outranks broader lower-signal matches."""
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    gw = MemoryGateway(repo_root=str(repo_root))
+    gw.capture(
+        layer="project",
+        item_id="ctx-broad",
+        content="retrieval scoring relevance freshness confidence signal density " + ("background note " * 80),
+        quality_score=0.4,
+        no_classify=True,
+    )
+    gw.capture(
+        layer="project",
+        item_id="ctx-dense",
+        content="retrieval scoring ranks relevance freshness confidence signal density",
+        quality_score=0.95,
+        extra_metadata={"confidence": 0.95},
+        no_classify=True,
+    )
+
+    payload = retrieve_context(
+        prompt="retrieval scoring relevance freshness confidence signal density",
+        session_id="sess-signal",
+        host="test",
+        gateway=gw,
+        limit=2,
+    )
+
+    assert payload["results"][0]["id"] == "ctx-dense"
+    assert payload["results"][0]["score_components"]["signal_density"] > payload["results"][1]["score_components"]["signal_density"]
+
+
+def test_context_quietly_degrades_for_empty_and_failed_retrieval(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty or failed recall produces no rendered injection block."""
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    runner = CliRunner()
+
+    empty = runner.invoke(cli, ["context", "--render", "--prompt", "missing memory xyz"])
+    assert empty.exit_code == 0, empty.output
+    assert empty.output == ""
+
+    class BrokenGateway:
+        _root = repo_root
+
+        def search(self, query: str, limit: int) -> list[dict[str, object]]:
+            raise RuntimeError("search unavailable")
+
+    payload = retrieve_context(
+        prompt="anything",
+        session_id="sess-broken",
+        host="test",
+        gateway=BrokenGateway(),  # type: ignore[arg-type]
+    )
+
+    assert payload["status"] == "degraded"
+    assert payload["results"] == []
+    assert render_context_block(payload) == ""
 
 
 def test_capabilities_include_autonomous_flags() -> None:
@@ -120,3 +255,28 @@ def test_daemon_status_json_shape() -> None:
     assert payload["label"] == "com.mnemos.daemon"
     assert "installed" in payload
     assert "supported" in payload
+
+
+def test_daemon_run_json_passes_repo_root(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """daemon run resolves the configured repo root for background checks."""
+    from core.bg import BackgroundCheckResult
+
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    calls: dict[str, object] = {}
+
+    def fake_run_background_check(repo_root: str, **kwargs: object) -> BackgroundCheckResult:
+        calls["repo_root"] = repo_root
+        calls["kwargs"] = kwargs
+        return BackgroundCheckResult(ran=True, gc_archived=1, promoted=2)
+
+    monkeypatch.setattr("core.bg.run_background_check", fake_run_background_check)
+
+    result = CliRunner().invoke(cli, ["daemon", "run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert calls["repo_root"] == str(repo_root)
+    assert calls["kwargs"] == {"interval_minutes": 0}
+    assert payload["status"] == "completed"
+    assert payload["gc_archived"] == 1
+    assert payload["promoted"] == 2

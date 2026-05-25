@@ -12,6 +12,14 @@ from typing import Any
 from core.gateway import MemoryGateway
 from core.provider import PROVIDER_CONTRACT_VERSION, SCORE_SCALE
 
+_DEFAULT_LIMIT = 5
+_MAX_LIMIT = 8
+_MAX_CONTEXT_CHARS = 2400
+_MAX_MEMORY_CHARS = 700
+_MIN_SELECTION_SCORE = 0.22
+_STALE_DAYS = 365
+_FRESH_DAYS = 30
+
 _STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "have",
     "has", "had", "do", "does", "did", "will", "would", "could", "should",
@@ -21,6 +29,13 @@ _STOPWORDS = {
     "they", "my", "your", "our", "their", "what", "how", "why", "when",
     "where", "which", "please", "implement", "fix", "add", "update",
 }
+
+_NOISE_PATTERNS = [
+    re.compile(r"^\s*(?:status|plan|blocker|review|task_id|task_dir|branch|requirements)\s*:", re.I | re.M),
+    re.compile(r"\[agent-crew\]\s+(?:stop|route)\b", re.I),
+    re.compile(r"</?mnemos-[^>]+>|</?mnemos-context[^>]*>", re.I),
+    re.compile(r"\b(?:traceback \(most recent call last\)|stack trace)\b", re.I),
+]
 
 
 def extract_keywords(prompt: str, *, limit: int = 5) -> list[str]:
@@ -54,6 +69,147 @@ def _score(index: int, count: int) -> float:
     return round(1.0 - (index / (count - 1)), 6)
 
 
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _clamp_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, parsed))
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1]
+            if "+" not in text and "-" not in text[10:]:
+                text += "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _age_days(value: Any) -> float | None:
+    parsed = _parse_dt(value)
+    if parsed is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0)
+
+
+def _freshness_score(value: Any) -> float:
+    age = _age_days(value)
+    if age is None:
+        return 0.45
+    if age <= _FRESH_DAYS:
+        return 1.0
+    if age >= _STALE_DAYS:
+        return 0.15
+    return round(1.0 - ((age - _FRESH_DAYS) / (_STALE_DAYS - _FRESH_DAYS)) * 0.85, 6)
+
+
+def _tokenize(text: str) -> list[str]:
+    return [token.lower() for token in re.findall(r"[A-Za-z0-9가-힣_./-]{2,}", text)]
+
+
+def _signal_density(content: str, keywords: list[str]) -> float:
+    tokens = _tokenize(content)
+    if not tokens:
+        return 0.0
+
+    unique_keywords = {keyword.lower() for keyword in keywords if len(keyword) >= 2}
+    hits = sum(1 for token in tokens if token in unique_keywords)
+    hit_score = min(1.0, hits / max(1, min(len(unique_keywords), 5)))
+    length_score = 1.0 if len(tokens) <= 90 else max(0.25, 90 / len(tokens))
+    return round((hit_score * 0.7) + (length_score * 0.3), 6)
+
+
+def _relevance_score(item: dict[str, Any], keywords: list[str], fallback: float) -> float:
+    content = str(item.get("content") or "")
+    haystack = " ".join([
+        content,
+        str(item.get("id") or ""),
+        " ".join(str(tag) for tag in item.get("tags") or []),
+    ]).lower()
+    if not keywords:
+        return fallback
+
+    keyword_set = {keyword.lower() for keyword in keywords}
+    matches = sum(1 for keyword in keyword_set if keyword in haystack)
+    lexical = matches / max(1, len(keyword_set))
+    return round(max(fallback * 0.65, lexical), 6)
+
+
+def _noise_score(content: str) -> float:
+    if not content.strip():
+        return 1.0
+
+    pattern_hits = sum(1 for pattern in _NOISE_PATTERNS if pattern.search(content))
+    lines = [line for line in content.splitlines() if line.strip()]
+    control_lines = sum(1 for line in lines if re.match(r"^\s*(?:STATUS|PLAN|TASK|BRANCH|REQUIREMENTS)\s*:", line, re.I))
+    control_ratio = control_lines / max(1, len(lines))
+    return min(1.0, (pattern_hits * 0.35) + control_ratio)
+
+
+def _selection_score(
+    item: dict[str, Any],
+    *,
+    keywords: list[str],
+    rank_score: float,
+) -> tuple[float, dict[str, float]]:
+    quality = _clamp_float(item.get("quality_score"), 0.8)
+    confidence = _clamp_float(item.get("confidence"), quality)
+    freshness = _freshness_score(item.get("updated_at") or item.get("created_at") or item.get("recency"))
+    relevance = _relevance_score(item, keywords, rank_score)
+    signal = _signal_density(str(item.get("content") or ""), keywords)
+    noise = _noise_score(str(item.get("content") or ""))
+
+    score = (
+        relevance * 0.34
+        + freshness * 0.18
+        + confidence * 0.18
+        + quality * 0.12
+        + signal * 0.18
+    ) * (1.0 - (noise * 0.75))
+    components = {
+        "relevance": round(relevance, 6),
+        "freshness": round(freshness, 6),
+        "confidence": round(confidence, 6),
+        "signal_density": round(signal, 6),
+        "noise": round(noise, 6),
+    }
+    return round(max(0.0, min(1.0, score)), 6), components
+
+
+def _skip_reason(score: float, item: dict[str, Any], content: str, components: dict[str, float]) -> str | None:
+    if not content:
+        return "empty"
+    if components["noise"] >= 0.5:
+        return "noisy"
+    age = _age_days(item.get("updated_at") or item.get("created_at") or item.get("recency"))
+    if (
+        age is not None
+        and age >= _STALE_DAYS
+        and components["freshness"] < 0.2
+        and (score < 0.45 or components["confidence"] < 0.5)
+    ):
+        return "stale"
+    if score < _MIN_SELECTION_SCORE:
+        return "low_signal"
+    return None
+
+
 def _enrich(gw: MemoryGateway, result: dict[str, Any], score: float) -> dict[str, Any]:
     item_id = result.get("item_id") or result.get("id") or ""
     metadata = result.get("metadata") or {}
@@ -67,7 +223,12 @@ def _enrich(gw: MemoryGateway, result: dict[str, Any], score: float) -> dict[str
         "id": item.get("id") or item_id,
         "layer": item.get("layer") or metadata.get("layer") or result.get("layer"),
         "score": score,
-        "recency": item.get("created_at") or item.get("updated_at") or metadata.get("created_at"),
+        "recency": _first_present(item.get("updated_at"), item.get("created_at"), metadata.get("updated_at"), metadata.get("created_at")),
+        "created_at": _first_present(item.get("created_at"), metadata.get("created_at")),
+        "updated_at": _first_present(item.get("updated_at"), metadata.get("updated_at")),
+        "quality_score": _first_present(item.get("quality_score"), metadata.get("quality_score")),
+        "confidence": _first_present(item.get("confidence"), metadata.get("confidence")),
+        "tags": item.get("tags") or metadata.get("tags") or [],
         "content": item.get("content") or result.get("content", ""),
     }
 
@@ -82,6 +243,8 @@ def retrieve_context(
     max_chars: int = 1800,
 ) -> dict[str, Any]:
     """Return bounded deterministic context for host adapters."""
+    limit = max(0, min(limit, _MAX_LIMIT))
+    max_chars = max(0, min(max_chars, _MAX_CONTEXT_CHARS))
     repo_root = os.environ.get("MNEMOS_REPO_ROOT") or "."
     try:
         gw = gateway or MemoryGateway()
@@ -97,40 +260,74 @@ def retrieve_context(
         raw_results = []
     else:
         try:
-            raw_results = gw.search(query=query, limit=max(limit, 1)) if query else []
+            search_limit = max(limit * 3, _DEFAULT_LIMIT, 1)
+            raw_results = gw.search(query=query, limit=search_limit) if query else []
             if not raw_results:
                 seen_ids: set[str] = set()
                 fallback_results: list[dict[str, Any]] = []
                 for keyword in keywords:
-                    for result in gw.search(query=keyword, limit=max(limit, 1)):
+                    for result in gw.search(query=keyword, limit=search_limit):
                         result_id = str(result.get("item_id") or result.get("id") or "")
                         if result_id in seen_ids:
                             continue
                         seen_ids.add(result_id)
                         fallback_results.append(result)
-                        if len(fallback_results) >= limit:
+                        if len(fallback_results) >= search_limit:
                             break
-                    if len(fallback_results) >= limit:
+                    if len(fallback_results) >= search_limit:
                         break
                 raw_results = fallback_results
         except Exception:
             raw_results = []
             partial_failure = True
 
+    skipped: dict[str, int] = {}
+    candidates: list[dict[str, Any]] = []
+    total_candidates = len(raw_results)
+    if gw is not None:
+        for index, result in enumerate(raw_results):
+            rank_score = _score(index, total_candidates)
+            item = _enrich(gw, result, rank_score)
+            content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+            selection_score, components = _selection_score(
+                item,
+                keywords=keywords,
+                rank_score=rank_score,
+            )
+            reason = _skip_reason(selection_score, item, content, components)
+            if reason is not None:
+                skipped[reason] = skipped.get(reason, 0) + 1
+                continue
+
+            item["content"] = content
+            item["score"] = selection_score
+            item["score_components"] = components
+            candidates.append(item)
+
+    candidates.sort(
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            str(item.get("updated_at") or item.get("created_at") or item.get("recency") or ""),
+        ),
+        reverse=True,
+    )
+
     used_chars = 0
     results: list[dict[str, Any]] = []
-    for index, result in enumerate(raw_results[:limit]):
-        if gw is None:
-            break
-        item = _enrich(gw, result, _score(index, len(raw_results)))
-        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
-        if not content:
+    for item in candidates:
+        if len(results) >= limit:
+            skipped["limit"] = skipped.get("limit", 0) + 1
             continue
+
+        content = str(item.get("content") or "")
         remaining = max_chars - used_chars
         if remaining <= 0:
+            skipped["budget"] = skipped.get("budget", 0) + 1
             break
-        if len(content) > remaining:
-            content = content[: max(0, remaining - 3)].rstrip() + "..."
+
+        memory_budget = min(remaining, _MAX_MEMORY_CHARS)
+        if len(content) > memory_budget:
+            content = content[: max(0, memory_budget - 3)].rstrip() + "..."
         used_chars += len(content)
         item["content"] = content
         results.append(item)
@@ -148,19 +345,36 @@ def retrieve_context(
         "keywords": keywords,
         "count": len(results),
         "max_chars": max_chars,
+        "used_chars": used_chars,
         "score_scale": SCORE_SCALE,
+        "selection": {
+            "candidate_count": total_candidates,
+            "selected_count": len(results),
+            "skipped_count": sum(skipped.values()),
+            "skipped_reasons": skipped,
+            "max_memory_chars": _MAX_MEMORY_CHARS,
+            "min_score": _MIN_SELECTION_SCORE,
+        },
         "results": results,
     }
 
 
 def render_context_block(payload: dict[str, Any]) -> str:
     """Render a bounded ``<mnemos-context>`` block."""
+    promotion_block = render_promotion_block(repo_root=payload.get("repo_root"))
+    if not payload.get("results"):
+        return promotion_block
+
+    selection = payload.get("selection") or {}
     attrs = {
         "mode": payload.get("mode", "deterministic-v1"),
         "host": payload.get("host") or "",
         "session-id": payload.get("session_id") or "",
         "query": payload.get("query") or "",
         "count": str(payload.get("count", 0)),
+        "selected": str(selection.get("selected_count", payload.get("count", 0))),
+        "skipped": str(selection.get("skipped_count", 0)),
+        "advisory": "true",
     }
     attr_text = " ".join(f'{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items() if value != "")
     lines = [f"<mnemos-context {attr_text}>".rstrip()]
@@ -175,7 +389,6 @@ def render_context_block(payload: dict[str, Any]) -> str:
         lines.append(f"  <memory {memory_attr_text}>{html.escape(str(item.get('content') or ''))}</memory>".rstrip())
     lines.append("</mnemos-context>")
 
-    promotion_block = render_promotion_block(repo_root=payload.get("repo_root"))
     if promotion_block:
         lines.extend(["", promotion_block])
 

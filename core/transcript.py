@@ -146,6 +146,7 @@ def extract_insights(messages: list[dict[str, Any]]) -> list[TranscriptInsight]:
         if role not in {"assistant", "summary", "event", "stop"}:
             continue
         text = _message_text(message)
+        durable_contents: list[str] = []
         for marker in _MARKER_LINE_RE.finditer(_mask_code(text)):
             content = marker.group(2).strip()
             if content and len(content.strip()) >= 12:
@@ -158,9 +159,14 @@ def extract_insights(messages: list[dict[str, Any]]) -> list[TranscriptInsight]:
             if match:
                 content = f"{match.group(1).capitalize()}: {match.group(2).strip()}"
                 if not _is_trivial(content):
+                    durable_contents.append(content)
                     insights.append(TranscriptInsight(content, _layer_for_content(content), "durable-line", index))
         summary = _summarize(lines)
-        if summary and not _is_trivial(summary) and _SIGNAL_RE.search(summary):
+        summary_repeats_durable = any(
+            _normalise_content(summary) == _normalise_content(content)
+            for content in durable_contents
+        )
+        if summary and not summary_repeats_durable and not _is_trivial(summary) and _SIGNAL_RE.search(summary):
             insights.append(TranscriptInsight(f"AI conversation insight: {summary}", _layer_for_content(summary), "assistant-summary", index))
     deduped: list[TranscriptInsight] = []
     seen: set[tuple[str, str]] = set()
