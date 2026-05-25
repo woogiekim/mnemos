@@ -1,48 +1,14 @@
 #!/usr/bin/env bash
-# hooks/UserPromptSubmit.sh
-#
-# Claude Code UserPromptSubmit hook for mnemos active memory retrieval.
-#
-# Receives the user prompt as JSON on stdin:
-#   { "session_id": "...", "transcript_path": "...", "hook_event_name": "...", "prompt": "..." }
-#
-# Outputs context injected before Claude processes the prompt.
-#
-# Behaviour:
-#   1. Session-start load: on the first prompt of a session, load all project
-#      and global layer memories and inject them as standing context.
-#   2. /compact shortcut: emit a reminder to capture session insights before compacting.
-#   3. Per-prompt promotion block: inject a <mnemos-promotion> context block listing
-#      any memory promotions that occurred since the last hook fire. The block is
-#      omitted when there are no new promotions (empty block omitted). Cursor tracking
-#      is stored in ~/.mnemos/.cache/promotion-cursor.txt (or MNEMOS_PROMO_CURSOR).
-#   4. Per-prompt active search: extract key terms from the prompt and run
-#      `mnemos search` to surface relevant memories (top 5 results).
-#   5. Per-prompt capture reminder: inject a <mnemos-capture-protocol> block that
-#      instructs Claude to call `mnemos capture --session-id <id>` after each
-#      response turn so captures share the same session_id as hook_search
-#      events (observability correlation). The SESSION_ID from the hook input
-#      is also exported as MNEMOS_SESSION_ID for the CLI's env-var fallback.
-#   6. Observability: log every hook invocation, search call, and session-start
-#      event to wiki/observability.jsonl (async background write, zero latency impact).
-#
-# Environment variables:
-#   MNEMOS_REPO_ROOT    — path to the mnemos repository (required)
-#   MNEMOS_HOOK_TIMEOUT — seconds before search is aborted (default: 8)
-#   MNEMOS_PROMO_CURSOR — override path for the promotion cursor file
-#                         (default: ~/.mnemos/.cache/promotion-cursor.txt)
+# Claude Code UserPromptSubmit hook for mnemos deterministic V1 context injection.
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 REPO_ROOT="${MNEMOS_REPO_ROOT:-}"
 TIMEOUT="${MNEMOS_HOOK_TIMEOUT:-8}"
-SEARCH_LIMIT=5
-SESSION_START_LIMIT=30
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHONPATH_VALUE="${SOURCE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-# macOS does not ship `timeout`; use gtimeout (coreutils) or perl fallback.
 _timeout() {
   local secs="$1"; shift
   if command -v gtimeout >/dev/null 2>&1; then
@@ -50,88 +16,15 @@ _timeout() {
   elif command -v timeout >/dev/null 2>&1; then
     timeout "$secs" "$@"
   else
-    # No timeout binary — run without a hard limit (hook itself has a short budget).
     "$@"
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Guard: mnemos must be available and REPO_ROOT must be set
-# ---------------------------------------------------------------------------
-if [ -z "${REPO_ROOT}" ]; then
-  exit 0
-fi
+[ -n "${REPO_ROOT}" ] || exit 0
+command -v mnemos >/dev/null 2>&1 || exit 0
 
-if ! command -v mnemos >/dev/null 2>&1; then
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Observability helper — async background write to observability.jsonl
-# Use python3 inline so the write never blocks the hook response.
-# ---------------------------------------------------------------------------
-_obs_append() {
-  # $1 = JSON object string (already valid JSON, caller's responsibility)
-  local json_line="$1"
-  local obs_path="${REPO_ROOT}/wiki/observability.jsonl"
-  python3 - "${obs_path}" "${json_line}" <<'PYEOF' &
-import json, os, sys, datetime
-obs_path, json_line = sys.argv[1], sys.argv[2]
-try:
-    os.makedirs(os.path.dirname(obs_path), exist_ok=True)
-    with open(obs_path, "a", encoding="utf-8") as f:
-        f.write(json_line + "\n")
-except Exception:
-    pass
-PYEOF
-}
-
-_obs_event() {
-  # Build and append an observability JSON line.
-  # Args: event session_id [extra_json_pairs...]
-  # extra_json_pairs: key=value pairs appended as JSON fields (string values only).
-  local event="$1"
-  local session="$2"
-  shift 2
-  local ts
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-  # Build extra fields from remaining key=value args via python3
-  local extras_json="{}"
-  if [ $# -gt 0 ]; then
-    extras_json="$(python3 -c "
-import json, sys
-pairs = sys.argv[1:]
-d = {}
-for p in pairs:
-    if '=' in p:
-        k, _, v = p.partition('=')
-        try:
-            d[k] = json.loads(v)
-        except Exception:
-            d[k] = v
-print(json.dumps(d))
-" "$@" 2>/dev/null || echo '{}')"
-  fi
-
-  local entry
-  entry="$(python3 -c "
-import json, sys
-base = {'ts': sys.argv[1], 'event': sys.argv[2], 'agent': 'claude', 'session_id': sys.argv[3]}
-extra = json.loads(sys.argv[4])
-base.update(extra)
-print(json.dumps(base, ensure_ascii=False))
-" "${ts}" "${event}" "${session}" "${extras_json}" 2>/dev/null || true)"
-
-  [ -n "${entry}" ] && _obs_append "${entry}"
-}
-
-# ---------------------------------------------------------------------------
-# Read JSON input from stdin
-# ---------------------------------------------------------------------------
 INPUT="$(cat)"
 
-# Extract fields using python3 (always available alongside mnemos)
 read_field() {
   local field="$1"
   python3 -c "
@@ -148,446 +41,30 @@ SESSION_ID="$(read_field session_id)"
 export MNEMOS_SESSION_ID="${SESSION_ID}"
 PROMPT="$(read_field prompt)"
 
-if [ -z "${PROMPT}" ]; then
-  exit 0
-fi
+[ -n "${PROMPT}" ] || exit 0
 
-# ---------------------------------------------------------------------------
-# /compact special case
-# ---------------------------------------------------------------------------
-if [ "${PROMPT}" = "/compact" ]; then
-  echo "[mnemos] /compact detected — before compacting, capture the key insights, decisions, and context from this session using mnemos capture. Run mnemos capture for each significant item now."
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Session-start context load (project + global layers)
-# ---------------------------------------------------------------------------
-# Use a per-session flag file to inject standing context only once per session.
 SESSION_FLAG_DIR="${TMPDIR:-/tmp}/mnemos-session-flags"
 mkdir -p "${SESSION_FLAG_DIR}" 2>/dev/null || true
-
 SESSION_KEY="$(echo "${SESSION_ID}" | tr -cd 'a-zA-Z0-9_-' | cut -c1-64)"
-SESSION_FLAG="${SESSION_FLAG_DIR}/mnemos-session-loaded-${SESSION_KEY}"
-
-SESSION_MEMORY_COUNT=0
-
-if [ -n "${SESSION_KEY}" ] && [ ! -f "${SESSION_FLAG}" ]; then
-  # Mark session as loaded immediately to prevent duplicate loads
-  touch "${SESSION_FLAG}" 2>/dev/null || true
-
-  STANDING_CONTEXT="$(
-    _timeout "${TIMEOUT}" \
-      env MNEMOS_REPO_ROOT="${REPO_ROOT}" \
-      mnemos list --layer project,global --limit "${SESSION_START_LIMIT}" \
-      2>/dev/null || true
-  )"
-
-  if [ -n "${STANDING_CONTEXT}" ]; then
-    # Count loaded memories (lines that start with whitespace then [layer])
-    SESSION_MEMORY_COUNT="$(echo "${STANDING_CONTEXT}" | grep -c '^\s*\[' 2>/dev/null || echo 0)"
-
-    echo "<mnemos-context type=\"session-start\" layers=\"project,global\">"
-    echo "${STANDING_CONTEXT}"
-    echo "</mnemos-context>"
-    echo ""
-  fi
-
-  # Brief stats summary at session-start (3-4 lines max)
-  STATS_SUMMARY="$(
-    python3 -c "
-import json, os, datetime, collections
-obs_path = os.path.join(os.environ.get('MNEMOS_REPO_ROOT', ''), 'wiki', 'observability.jsonl')
-try:
-    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    captures = collections.defaultdict(int)
-    hook_calls = 0
-    last_gc_ts = None
-    last_gc_count = 0
-    with open(obs_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                e = json.loads(line)
-            except Exception:
-                continue
-            ts = e.get('ts', '')
-            ev = e.get('event', '')
-            if ts >= cutoff:
-                if ev == 'capture':
-                    captures[e.get('layer', 'unknown')] += 1
-                if ev in ('hook_search', 'hook_session_start'):
-                    hook_calls += 1
-            if ev == 'gc' and (last_gc_ts is None or ts > last_gc_ts):
-                last_gc_ts = ts
-                last_gc_count = e.get('archived_count', 0)
-    total_cap = sum(captures.values())
-    proj = captures.get('project', 0)
-    gl = captures.get('global', 0)
-    parts = [f'captures this week: {total_cap} (project={proj}, global={gl})',
-             f'hook calls this week: {hook_calls}']
-    if last_gc_ts:
-        parts.append(f'last GC: {last_gc_ts[:10]} (archived {last_gc_count})')
-    print(' | '.join(parts))
-except FileNotFoundError:
-    pass
-except Exception:
-    pass
-" 2>/dev/null || true
-  )"
-
-  if [ -n "${STATS_SUMMARY}" ]; then
-    echo "<mnemos-context type=\"stats\">"
-    echo "${STATS_SUMMARY}"
-    echo "</mnemos-context>"
-    echo ""
-  fi
-
-  # Observability: log session-start event (async)
-  _obs_event "hook_session_start" "${SESSION_ID}" \
-    "memory_count=${SESSION_MEMORY_COUNT}"
+if [ -n "${SESSION_KEY}" ]; then
+  touch "${SESSION_FLAG_DIR}/mnemos-session-loaded-${SESSION_KEY}" 2>/dev/null || true
 fi
 
-# ---------------------------------------------------------------------------
-# Per-prompt promotion block — inject <mnemos-promotion> when promotions exist
-# ---------------------------------------------------------------------------
-# Read wiki/observability.jsonl and collect promotion events that occurred
-# after the last cursor timestamp.  The cursor is stored in a small file under
-# ~/.mnemos/.cache/ so it persists across prompts within a session.
-#
-# Cursor path resolution (first match wins):
-#   1. MNEMOS_PROMO_CURSOR env var (testability / override)
-#   2. Default: ${HOME}/.mnemos/.cache/promotion-cursor.txt
+if [ "${PROMPT}" = "/compact" ]; then
+  echo "[mnemos] /compact detected — manual fallback: capture key insights with mnemos capture before compacting."
+  exit 0
+fi
 
-_promo_cursor_path() {
-  if [ -n "${MNEMOS_PROMO_CURSOR:-}" ]; then
-    echo "${MNEMOS_PROMO_CURSOR}"
-  else
-    echo "${HOME}/.mnemos/.cache/promotion-cursor.txt"
-  fi
-}
-
-_inject_promotion_block() {
-  local obs_log="${REPO_ROOT}/wiki/observability.jsonl"
-  local cursor_path
-  cursor_path="$(_promo_cursor_path)"
-  local cursor_dir
-  cursor_dir="$(dirname "${cursor_path}")"
-
-  # No observability log → nothing to do
-  [ -f "${obs_log}" ] || return 0
-
-  # Read cursor; if absent treat epoch as cursor (inject nothing for old data)
-  local cursor_ts="2020-01-01T00:00:00Z"
-  if [ -f "${cursor_path}" ]; then
-    cursor_ts="$(cat "${cursor_path}" 2>/dev/null | tr -d '[:space:]' || echo '2020-01-01T00:00:00Z')"
-    [ -z "${cursor_ts}" ] && cursor_ts="2020-01-01T00:00:00Z"
-  fi
-
-  # Extract promotion events newer than cursor (pure python3, no subprocess)
-  local promo_lines
-  promo_lines="$(python3 - "${obs_log}" "${cursor_ts}" <<'PYEOF' 2>/dev/null || true
-import json, sys
-
-obs_path = sys.argv[1]
-cursor_ts = sys.argv[2]
-
-lines = []
-try:
-    with open(obs_path, "r", encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                entry = json.loads(raw)
-            except Exception:
-                continue
-            if entry.get("event") != "promotion":
-                continue
-            ts = entry.get("ts", "")
-            if ts <= cursor_ts:
-                continue
-            memory_id = entry.get("memory_id") or entry.get("item_id") or ""
-            layer = entry.get("layer") or entry.get("to_layer") or ""
-            if memory_id and layer:
-                lines.append(f"{memory_id} → {layer}")
-except Exception:
-    pass
-
-print("\n".join(lines))
-PYEOF
+CONTEXT_BLOCK="$(
+  _timeout "${TIMEOUT}" \
+    env MNEMOS_REPO_ROOT="${REPO_ROOT}" \
+    PYTHONPATH="${PYTHONPATH_VALUE}" \
+    mnemos context --render \
+      --prompt "${PROMPT}" \
+      --session-id "${SESSION_ID}" \
+      --host "claude-code" \
+    2>/dev/null || true
 )"
 
-  if [ -n "${promo_lines}" ]; then
-    echo "<mnemos-promotion>"
-    while IFS= read -r entry_line; do
-      [ -z "${entry_line}" ] && continue
-      echo "<promotion>${entry_line}</promotion>"
-    done <<< "${promo_lines}"
-    echo "</mnemos-promotion>"
-    echo ""
-  fi
-
-  # Update cursor to now so these promotions are not re-injected next prompt
-  local new_ts
-  new_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
-  mkdir -p "${cursor_dir}" 2>/dev/null || true
-  printf '%s\n' "${new_ts}" > "${cursor_path}" 2>/dev/null || true
-}
-
-_inject_promotion_block
-
-# ---------------------------------------------------------------------------
-# Per-prompt active search — keyword extraction + per-keyword search + dedup
-# ---------------------------------------------------------------------------
-# Extract keywords from the prompt using an inline python3 snippet, then
-# search each keyword individually and merge the results (dedup by ID).
-
-KEYWORDS="$(python3 -c "
-import re, sys, os
-
-ENGLISH_STOPWORDS = {
-    'the','a','an','is','are','was','were','be','been','have','has','had',
-    'do','does','did','will','would','could','should','may','might','shall',
-    'must','can','to','of','in','on','at','by','for','from','with','and',
-    'or','but','not','so','if','as','it','its','this','that','these','those',
-    'i','you','we','they','my','your','our','their','what','how','why',
-    'when','where','which',
-}
-KOREAN_STOPWORDS = {
-    '이','가','은','는','을','를','의','에','에서','으로','로','와','과',
-    '하고','도','만','이다','있다','없다','했다','합니다','해요','거','것',
-    '수','좀','그','저','제','네','아',
-}
-
-prompt = sys.argv[1][:500]
-
-# Load Korean preprocessing from mnemos core if available.
-_preprocess = None
-try:
-    repo_root = os.environ.get('MNEMOS_REPO_ROOT', '')
-    if repo_root:
-        sys.path.insert(0, repo_root)
-    from core.korean import preprocess_query, strip_particles, expand_aliases
-    _preprocess = preprocess_query
-except Exception:
-    pass
-
-# Split camelCase/PascalCase before further tokenisation
-def split_camel(token):
-    parts = re.sub(r'([a-z])([A-Z])', r'\1 \2', token)
-    parts = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', parts)
-    return parts.split()
-
-# Tokenise on whitespace and punctuation
-raw_tokens = re.split(r'[\s\W]+', prompt)
-
-words = []
-for tok in raw_tokens:
-    words.extend(split_camel(tok))
-
-# Normalise, filter stopwords and short tokens
-seen = set()
-keywords = []
-for w in words:
-    lw = w.lower()
-    if len(w) < 2:
-        continue
-    if lw in ENGLISH_STOPWORDS or w in KOREAN_STOPWORDS:
-        continue
-
-    # Apply Korean preprocessing when available: alias expansion + particle strip.
-    # This ensures 에이전트크루 -> agent-crew and 니모스를 -> mnemos before dedup.
-    if _preprocess is not None:
-        w = _preprocess(w)
-        # preprocess_query returns space-joined tokens for multi-word expansions;
-        # split again in case an alias produced a multi-word result.
-        sub_words = w.split()
-        for sw in sub_words:
-            slw = sw.lower()
-            if len(sw) < 2:
-                continue
-            if slw in ENGLISH_STOPWORDS:
-                continue
-            if slw in seen:
-                continue
-            seen.add(slw)
-            keywords.append(sw)
-    else:
-        if lw in seen:
-            continue
-        seen.add(lw)
-        keywords.append(w)
-
-# Pick up to 5 longest/most unique keywords
-keywords.sort(key=lambda x: -len(x))
-print('\n'.join(keywords[:5]))
-" "${PROMPT}" 2>/dev/null || true)"
-
-# Collect unique result lines across all keyword searches (dedup by first token).
-# Use a temp file for seen-keys tracking to stay compatible with bash 3.x.
-SEEN_KEYS_FILE="$(mktemp)" || SEEN_KEYS_FILE=""
-MERGED_LINES=""
-FIRST_KEYWORD=""
-ALL_KEYWORDS_LIST=""
-SEARCH_RESULT_IDS=""
-
-while IFS= read -r KW; do
-  [ -z "${KW}" ] && continue
-  [ -z "${FIRST_KEYWORD}" ] && FIRST_KEYWORD="${KW}"
-
-  # Track all keywords used (for observability log)
-  if [ -z "${ALL_KEYWORDS_LIST}" ]; then
-    ALL_KEYWORDS_LIST="${KW}"
-  else
-    ALL_KEYWORDS_LIST="${ALL_KEYWORDS_LIST},${KW}"
-  fi
-
-  KW_RESULTS="$(
-    _timeout "${TIMEOUT}" \
-      env MNEMOS_REPO_ROOT="${REPO_ROOT}" \
-      mnemos search "${KW}" --limit 3 \
-      2>/dev/null || true
-  )"
-
-  [ -z "${KW_RESULTS}" ] && continue
-  echo "${KW_RESULTS}" | grep -q "^no results found" && continue
-
-  # Filter summary/empty lines, then dedup by first whitespace-delimited token.
-  while IFS= read -r LINE; do
-    [ -z "${LINE}" ] && continue
-    echo "${LINE}" | grep -q '^\[mnemos\]' && continue
-
-    # Extract memory ID for observability from [fts] header lines only.
-    # Format: "  [fts] <memory-id>: <preview>"
-    # Content lines (title:, applies_to:, etc.) must NOT be used as IDs.
-    if echo "${LINE}" | grep -qE '^\s+\[fts\] '; then
-      RESULT_ID="$(echo "${LINE}" | sed 's/^[[:space:]]*\[fts\] \([0-9a-f-]*\):.*/\1/')"
-      [ -n "${RESULT_ID}" ] && SEARCH_RESULT_IDS="${SEARCH_RESULT_IDS:+${SEARCH_RESULT_IDS},}${RESULT_ID}"
-    fi
-
-    KEY="${LINE%% *}"
-    # Skip if this key has already been seen.
-    if [ -n "${SEEN_KEYS_FILE}" ] && grep -qxF "${KEY}" "${SEEN_KEYS_FILE}" 2>/dev/null; then
-      continue
-    fi
-    [ -n "${SEEN_KEYS_FILE}" ] && printf '%s\n' "${KEY}" >> "${SEEN_KEYS_FILE}"
-
-    if [ -z "${MERGED_LINES}" ]; then
-      MERGED_LINES="${LINE}"
-    else
-      MERGED_LINES="${MERGED_LINES}"$'\n'"${LINE}"
-    fi
-    # Stop once we have reached the result limit.
-    if [ "$(printf '%s\n' "${MERGED_LINES}" | wc -l)" -ge "${SEARCH_LIMIT}" ]; then
-      break 2
-    fi
-  done <<< "${KW_RESULTS}"
-done <<< "${KEYWORDS}"
-
-# Clean up temp file.
-[ -n "${SEEN_KEYS_FILE}" ] && rm -f "${SEEN_KEYS_FILE}" 2>/dev/null || true
-
-# Only emit if real results were found.
-if [ -n "${MERGED_LINES}" ]; then
-  echo "<mnemos-context type=\"search\" query=\"${FIRST_KEYWORD:0:60}\">"
-  echo "${MERGED_LINES}"
-  echo "</mnemos-context>"
-fi
-
-# ---------------------------------------------------------------------------
-# Observability: log the search event (async, fires even if no results)
-# ---------------------------------------------------------------------------
-if [ -n "${ALL_KEYWORDS_LIST}" ]; then
-  RESULT_COUNT="$(echo "${MERGED_LINES}" | grep -c . 2>/dev/null || echo 0)"
-  [ -z "${MERGED_LINES}" ] && RESULT_COUNT=0
-
-  # Build a compact JSON result list from the collected IDs
-  RESULTS_JSON="$(python3 -c "
-import json, sys
-ids_str = sys.argv[1]
-ids = [i.strip() for i in ids_str.split(',') if i.strip()] if ids_str else []
-print(json.dumps([{'id': i, 'score': 0.0} for i in ids]))
-" "${SEARCH_RESULT_IDS:-}" 2>/dev/null || echo '[]')"
-
-  KW_JSON="$(python3 -c "
-import json, sys
-kws = [k.strip() for k in sys.argv[1].split(',') if k.strip()]
-print(json.dumps(kws))
-" "${ALL_KEYWORDS_LIST}" 2>/dev/null || echo '[]')"
-
-  OBS_ENTRY="$(python3 -c "
-import json, sys, datetime
-ts = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-entry = {
-    'ts': ts,
-    'event': 'hook_search',
-    'agent': 'claude',
-    'session_id': sys.argv[1],
-    'keywords': json.loads(sys.argv[2]),
-    'results': json.loads(sys.argv[3]),
-    'result_count': int(sys.argv[4]),
-}
-print(json.dumps(entry, ensure_ascii=False))
-" "${SESSION_ID}" "${KW_JSON}" "${RESULTS_JSON}" "${RESULT_COUNT}" 2>/dev/null || true)"
-
-  [ -n "${OBS_ENTRY}" ] && _obs_append "${OBS_ENTRY}"
-fi
-
-# ---------------------------------------------------------------------------
-# Capture protocol reminder — injected on every prompt turn.
-#
-# This block tells the AI to proactively call `mnemos capture` after
-# each response AND to call `mnemos search` when handling bug analysis,
-# decision review, or root-cause lookup mid-session.
-# Emitted unconditionally (even when no search results were found) because
-# the reminder should fire regardless of whether past memories were surfaced.
-#
-# Method E (closes #22): the mnemos capture CLI output IS the notification.
-# When mnemos capture runs, it prints the colorized ✻ <emoji> <brief> [id: <uuid>]
-# line directly to stdout. This appears in the AI's tool result and is visible
-# to the user. The AI must NOT write any ✻ ... notification text in its own
-# response text — the CLI already produced the canonical notice. Duplicating it
-# is forbidden.
-# ---------------------------------------------------------------------------
-echo ""
-echo "<mnemos-capture-protocol>"
-echo "Search first when relevant:"
-echo "  - Analyzing a bug or error: run \`mnemos search <error-keyword>\` before debugging."
-echo "  - Answering 'why was X decided': run \`mnemos search <topic> decision\` first."
-echo "  - Before refactoring: run \`mnemos search <module> constraint\`."
-echo "  - Architecture/design question: run \`mnemos search <component>\`."
-echo ""
-echo "After responding, proactively capture new insights using:"
-echo "  mnemos capture --content \"<insight>\" --layer session --session-id \"${SESSION_ID}\""
-echo "Capture liberally — when in doubt, capture. Aim for at least 1 capture per"
-echo "substantive response. Capture anything from:"
-echo "  - decisions, user preferences, architecture choices, workflow patterns"
-echo "  - facts about the project, tools, or environment the user revealed"
-echo "  - surprising findings, root causes discovered, constraints identified"
-echo "  - anything a future session would benefit from knowing"
-echo "Do NOT capture: trivial yes/no answers, simple file lookups, or steps already"
-echo "visible in the code or git history."
-echo ""
-echo "Layer selection guide:"
-echo "  --layer session    (default) — substantive insights worth keeping across sessions"
-echo "  --layer transient  — protocol verification, test captures, throwaway scratch"
-echo "                       (auto-expires in ~1 hour; GC removes without manual action)"
-echo "                       After testing, clean up immediately with: mnemos delete <id>"
-echo "  --layer project    — stable project decisions and architecture constraints"
-echo "  --layer global     — universal preferences and cross-project patterns"
-echo ""
-echo "Use --layer transient for captures like 'test capture for protocol verification',"
-echo "'테스트 캡처', or any throwaway check that would pollute the session layer."
-echo ""
-echo "IMPORTANT — notification rule (Method E, closes #22):"
-echo "The mnemos capture CLI prints a colorized ✻ <emoji> <brief> notification line"
-echo "directly to stdout — visible in your tool result. That CLI output IS the"
-echo "canonical notification. DO NOT write any ✻ ... notification text in your own"
-echo "response text. Duplicating the CLI output as AI-authored text is forbidden."
-echo "</mnemos-capture-protocol>"
-
+[ -n "${CONTEXT_BLOCK}" ] && echo "${CONTEXT_BLOCK}"
 exit 0

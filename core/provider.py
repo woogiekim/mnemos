@@ -12,11 +12,17 @@ CAPABILITIES: dict[str, bool | str] = {
     "capture_json": True,
     "search_json": True,
     "fast_search": True,
+    "context_json": True,
+    "context_render": True,
+    "transcript_capture_json": True,
     "search_scores": True,
     "read_json": True,
     "gc_json": True,
     "host_install": True,
     "safe_filenames": True,
+    "autonomous_capture": "supported",
+    "context_injection": "supported",
+    "daemon_runtime": "supported",
 }
 
 
@@ -40,11 +46,40 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "capture_json": "mnemos capture --json emits a stable provider-contract JSON payload.",
     "search_json": "mnemos search --json emits stable JSON with query metadata and results.",
     "fast_search": "mnemos search --fast --json is the stable low-latency search entry point.",
+    "context_json": "mnemos context --json emits bounded deterministic host-injectable context.",
+    "context_render": "mnemos context --render emits bounded <mnemos-context> blocks.",
+    "transcript_capture_json": "mnemos capture-transcript --json extracts and captures deterministic transcript insights.",
     "search_scores": "Search JSON results include normalized 0.0-1.0 relevance scores.",
     "read_json": "mnemos read --json emits a stable item payload or structured not_found error.",
     "gc_json": "mnemos gc --json emits structured dry-run and execution summaries.",
     "host_install": "mnemos install manages supported host integration files.",
     "safe_filenames": "Storage percent-encodes unsafe IDs while preserving logical item IDs.",
+    "autonomous_capture": "Transcript capture can run from host lifecycle hooks without AI-authored capture prompts.",
+    "context_injection": "Host adapters can inject deterministic context before prompt handling.",
+    "daemon_runtime": "mnemos daemon run/status/install/uninstall manages autonomous background maintenance.",
+}
+
+HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {
+    "claude": {
+        "autonomous_capture": "supported",
+        "context_injection": "supported",
+        "daemon_runtime": "supported",
+    },
+    "claude-code": {
+        "autonomous_capture": "supported",
+        "context_injection": "supported",
+        "daemon_runtime": "supported",
+    },
+    "cursor": {
+        "autonomous_capture": "unsupported",
+        "context_injection": "unknown",
+        "daemon_runtime": "supported",
+    },
+    "codex": {
+        "autonomous_capture": "unsupported",
+        "context_injection": "unknown",
+        "daemon_runtime": "supported",
+    },
 }
 
 SCORE_SCALE = {
@@ -73,6 +108,7 @@ def capabilities_payload() -> dict[str, Any]:
         "capabilities": dict(CAPABILITIES),
         "capability_status": dict(CAPABILITY_STATUS),
         "capability_descriptions": dict(CAPABILITY_DESCRIPTIONS),
+        "host_capability_status": dict(HOST_CAPABILITY_STATUS),
     }
 
 

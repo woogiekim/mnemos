@@ -106,6 +106,96 @@ def _run_stop_hook(
     return result.returncode, result.stdout + result.stderr, calls
 
 
+def _run_stop_hook_json(
+    transcript: list[dict],
+    tmp_path: Path,
+    session_id: str = "test-session-123",
+) -> tuple[int, str, list[list[str]]]:
+    """Run Stop hook with a fake mnemos binary and capture argv."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    calls_path = tmp_path / "mnemos_calls.jsonl"
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(calls_path)!r}).open('a', encoding='utf-8').write("
+        "json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')\n"
+        "print('{}')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
+
+    payload = json.dumps({
+        "session_id": session_id,
+        "transcript_path": str(transcript_path),
+        "hook_event_name": "Stop",
+    })
+    env = os.environ.copy()
+    env["MNEMOS_REPO_ROOT"] = str(tmp_path)
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        ["bash", str(STOP_HOOK_SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    calls = []
+    if calls_path.exists():
+        calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    return result.returncode, result.stdout + result.stderr, calls
+
+
+def test_user_prompt_submit_calls_context_command(tmp_path):
+    """UserPromptSubmit uses deterministic context injection, not capture protocol text."""
+    fake_bin = tmp_path / "mnemos"
+    log_file = tmp_path / "mnemos_calls.log"
+    fake_bin.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"echo \"$@\" >> {log_file}\n"
+        "if [ \"$1\" = \"context\" ]; then echo '<mnemos-context mode=\"deterministic-v1\"></mnemos-context>'; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
+    flag_dir = tmp_path / "mnemos-session-flags"
+    flag_dir.mkdir(parents=True)
+    (flag_dir / "mnemos-session-loaded-test-session-123").touch()
+
+    rc, output = _run_hook(
+        "Explain deterministic retrieval",
+        mnemos_repo_root=str(tmp_path),
+        env_extras={"PATH": f"{tmp_path}:{os.environ.get('PATH', '')}", "TMPDIR": str(tmp_path)},
+    )
+
+    assert rc == 0, output
+    assert "<mnemos-context" in output
+    assert "<mnemos-capture-protocol>" not in output
+    assert "context --render" in log_file.read_text(encoding="utf-8")
+
+
+def test_stop_hook_calls_capture_transcript(tmp_path):
+    """Stop delegates extraction/capture to mnemos capture-transcript."""
+    rc, output, calls = _run_stop_hook_json(
+        [{"role": "assistant", "content": "✻ 💾 Durable decision"}],
+        tmp_path,
+        session_id="sess-stop",
+    )
+
+    assert rc == 0, output
+    assert len(calls) == 1
+    call = calls[0]
+    assert call[:2] == ["capture-transcript", "--json"]
+    assert "--transcript-path" in call
+    assert "--session-id" in call
+    assert "sess-stop" in call
+
+
 # ---------------------------------------------------------------------------
 # Existence and permissions
 # ---------------------------------------------------------------------------
@@ -132,7 +222,9 @@ class TestHookScriptFile:
 
 class TestStopHookInsightFallback:
     def test_fallback_captures_meaningful_assistant_summary(self, tmp_path):
-        """When no explicit marker exists, Stop captures the latest useful outcome."""
+        """Transcript extraction preserves the latest useful outcome."""
+        from core.transcript import extract_insights
+
         transcript = [
             {
                 "role": "assistant",
@@ -145,19 +237,17 @@ class TestStopHookInsightFallback:
             }
         ]
 
-        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+        insights = extract_insights(transcript)
 
-        assert rc == 0, output
-        assert len(calls) == 1
-        call = calls[0]
-        assert call[:2] == ["capture", "--content"]
-        assert call[3:5] == ["--quiet", "--layer"]
-        assert call[5] == "session"
-        assert "AI conversation insight:" in call[2]
-        assert "transcript fallback" in call[2]
+        assert len(insights) == 1
+        assert insights[0].layer == "session"
+        assert "AI conversation insight:" in insights[0].content
+        assert "transcript fallback" in insights[0].content
 
     def test_fallback_excludes_internal_pipeline_control_signals(self, tmp_path):
         """Agent-crew control/status handoffs must not become memories."""
+        from core.transcript import extract_insights
+
         transcript = [
             {
                 "role": "assistant",
@@ -173,22 +263,20 @@ class TestStopHookInsightFallback:
             }
         ]
 
-        rc, output, calls = _run_stop_hook(transcript, tmp_path)
-
-        assert rc == 0, output
-        assert calls == []
+        assert extract_insights(transcript) == []
 
     def test_fallback_excludes_trivial_acknowledgements(self, tmp_path):
         """One-word or low-information assistant replies are ignored."""
+        from core.transcript import extract_insights
+
         transcript = [{"role": "assistant", "content": "Done."}]
 
-        rc, output, calls = _run_stop_hook(transcript, tmp_path)
-
-        assert rc == 0, output
-        assert calls == []
+        assert extract_insights(transcript) == []
 
     def test_fallback_sanitizes_status_lines_from_completion_summary(self, tmp_path):
         """Useful summaries are retained without persisting STATUS tokens."""
+        from core.transcript import extract_insights
+
         transcript = [
             {
                 "role": "assistant",
@@ -201,17 +289,18 @@ class TestStopHookInsightFallback:
             }
         ]
 
-        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+        insights = extract_insights(transcript)
 
-        assert rc == 0, output
-        assert len(calls) == 1
-        content = calls[0][2]
+        assert len(insights) == 1
+        content = insights[0].content
         assert "STATUS:" not in content
         assert "Changed files" in content
         assert "fallback captures meaningful summaries" in content
 
     def test_explicit_marker_still_takes_precedence_over_fallback(self, tmp_path):
         """Marker protocol remains canonical when the assistant emits it."""
+        from core.transcript import extract_insights
+
         transcript = [
             {
                 "role": "assistant",
@@ -222,12 +311,12 @@ class TestStopHookInsightFallback:
             }
         ]
 
-        rc, output, calls = _run_stop_hook(transcript, tmp_path)
+        insights = extract_insights(transcript)
+        marker_insights = [insight for insight in insights if insight.kind == "marker"]
 
-        assert rc == 0, output
-        assert len(calls) == 1
-        assert calls[0][2] == "Stop hook fallback uses conservative filtering"
-        assert calls[0][5] == "project"
+        assert len(marker_insights) == 1
+        assert marker_insights[0].content == "Stop hook fallback uses conservative filtering"
+        assert marker_insights[0].layer == "project"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +457,13 @@ class TestSearchOutput:
 # ---------------------------------------------------------------------------
 
 class TestCaptureProtocol:
+    pytestmark = pytest.mark.skip(
+        reason=(
+            "V1 autonomous memory delegates capture to mnemos capture-transcript; "
+            "UserPromptSubmit no longer injects AI-authored capture protocol text."
+        )
+    )
+
     def test_capture_protocol_emitted_on_normal_prompt(self, tmp_path):
         """The hook must emit a <mnemos-capture-protocol> block on every normal prompt."""
         rc, output = _run_hook("how does caching work?",
@@ -774,12 +870,11 @@ class TestKeywordExtraction:
         assert "the" not in all_kw_lower
         assert "in" not in all_kw_lower
 
-    def test_hook_searches_per_keyword_not_full_prompt(self, tmp_path):
-        """Hook must issue per-keyword searches rather than passing the raw prompt.
+    def test_hook_delegates_full_prompt_to_context_command(self, tmp_path):
+        """Hook delegates prompt handling to `mnemos context`.
 
-        Strategy: install a fake 'mnemos' wrapper that records every argument it
-        receives, then inspect those logs to confirm no single call received the
-        full prompt verbatim.
+        Keyword extraction no longer lives in the shell hook. The context
+        command owns prompt parsing and per-keyword search internally.
         """
         # Create fake mnemos that logs argv to a file and exits 0 with no output.
         fake_bin = tmp_path / "mnemos"
@@ -814,15 +909,8 @@ class TestKeywordExtraction:
             pytest.skip("fake mnemos was not invoked (PATH not resolved)")
 
         calls = log_file.read_text().splitlines()
-        # No single mnemos call should include the entire long prompt verbatim.
-        for call in calls:
-            assert long_prompt not in call, (
-                f"Full prompt passed verbatim to mnemos: {call!r}"
-            )
-        # At least one 'search' call must have happened.
-        assert any("search" in call for call in calls), (
-            f"No 'mnemos search' call found in: {calls}"
-        )
+        assert any(call.startswith("context --render") for call in calls), calls
+        assert any(long_prompt in call for call in calls), calls
 
     def test_hook_deduplicates_results(self, tmp_path):
         """Results appearing in multiple keyword searches appear only once in output."""
@@ -860,6 +948,13 @@ class TestKeywordExtraction:
 # ---------------------------------------------------------------------------
 
 class TestSearchTriggerHints:
+    pytestmark = pytest.mark.skip(
+        reason=(
+            "Search trigger guidance moved out of per-prompt capture protocol; "
+            "autonomous prompts use mnemos context and managed behavior block guidance."
+        )
+    )
+
     """The capture-protocol block must also guide AI toward explicit mid-session search.
 
     Stats from observability.jsonl show hook_search (118) and explicit search (120)

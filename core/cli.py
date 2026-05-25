@@ -439,6 +439,82 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
     click.echo(f"[mnemos] Retrieved {len(results)} memories")
 
 
+@cli.command("context")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-style JSON.")
+@click.option("--render", "render", is_flag=True, default=False, help="Render a <mnemos-context> block.")
+@click.option("--prompt", required=True, help="Prompt text used for deterministic keyword retrieval.")
+@click.option("--session-id", default=None, help="Host session identifier.")
+@click.option("--host", default="unknown", help="Host adapter name.")
+@click.option("--limit", default=5, type=int, help="Maximum memories to inject.")
+@click.option("--max-chars", default=1800, type=int, help="Maximum total injected content characters.")
+def context_cmd(
+    as_json: bool,
+    render: bool,
+    prompt: str,
+    session_id: str | None,
+    host: str,
+    limit: int,
+    max_chars: int,
+) -> None:
+    """Retrieve deterministic V1 context for host injection."""
+    if as_json and render:
+        raise click.UsageError("--json and --render are mutually exclusive.")
+    if not as_json and not render:
+        raise click.UsageError("Pass --json or --render.")
+
+    from core.context import render_context_block, retrieve_context
+
+    payload = retrieve_context(
+        prompt=prompt,
+        session_id=session_id,
+        host=host,
+        limit=limit,
+        max_chars=max_chars,
+    )
+    if as_json:
+        _echo_json(payload)
+        return
+    click.echo(render_context_block(payload))
+
+
+@cli.command("capture-transcript")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-style JSON.")
+@click.option("--transcript-path", required=True, type=click.Path(exists=True, dir_okay=False), help="Transcript JSON/JSONL path.")
+@click.option("--session-id", default=None, help="Host session identifier.")
+@click.option("--host", default="unknown", help="Host adapter name.")
+def capture_transcript_cmd(
+    as_json: bool,
+    transcript_path: str,
+    session_id: str | None,
+    host: str,
+) -> None:
+    """Extract deterministic durable insights from a host transcript."""
+    from core.transcript import capture_transcript
+
+    try:
+        payload = capture_transcript(
+            transcript_path=transcript_path,
+            session_id=session_id,
+            host=host,
+        )
+    except Exception as exc:
+        from core.provider import provider_error_from_exception
+
+        _echo_json(provider_error_from_exception(exc))
+        sys.exit(1)
+
+    if as_json:
+        _echo_json(payload)
+        return
+
+    click.echo(
+        "[mnemos capture-transcript] "
+        f"captured={payload['captured_count']} "
+        f"duplicates={payload['duplicate_count']} "
+        f"skipped={payload['skipped_count']}"
+    )
+
+
 @cli.command("read")
 @click.argument("item_id")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
@@ -716,6 +792,47 @@ def capabilities_cmd(as_json: bool) -> None:
         return
     for name, value in payload["capabilities"].items():
         click.echo(f"{name}: {value}")
+
+
+@cli.group("daemon")
+def daemon_cmd() -> None:
+    """Manage the autonomous mnemos daemon runtime."""
+
+
+@daemon_cmd.command("run")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output machine-readable JSON.")
+def daemon_run_cmd(as_json: bool) -> None:
+    """Run one autonomous daemon maintenance cycle."""
+    from core.daemon import manage_autonomous_daemon
+
+    manage_autonomous_daemon("run", as_json=as_json)
+
+
+@daemon_cmd.command("status")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output machine-readable JSON.")
+def daemon_status_cmd(as_json: bool) -> None:
+    """Show autonomous daemon status."""
+    from core.daemon import manage_autonomous_daemon
+
+    manage_autonomous_daemon("status", as_json=as_json)
+
+
+@daemon_cmd.command("install")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output machine-readable JSON.")
+def daemon_install_cmd(as_json: bool) -> None:
+    """Install the autonomous daemon launchd job."""
+    from core.daemon import manage_autonomous_daemon
+
+    manage_autonomous_daemon("install", as_json=as_json)
+
+
+@daemon_cmd.command("uninstall")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output machine-readable JSON.")
+def daemon_uninstall_cmd(as_json: bool) -> None:
+    """Uninstall the autonomous daemon launchd job."""
+    from core.daemon import manage_autonomous_daemon
+
+    manage_autonomous_daemon("uninstall", as_json=as_json)
 
 
 @cli.command("version")
