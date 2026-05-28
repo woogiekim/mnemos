@@ -366,6 +366,36 @@ class TestGarbageCollector:
         content = path.read_text()
         assert "stage: archived" in content
 
+    def test_archive_reason_includes_stage_component(self, repo_root: Path):
+        """When the stage sub-score is significant the reason names it.
+
+        An item already in the ``archived`` stage scores 1.0 on the stage
+        component (``_stage_score`` * ``_WEIGHT_STAGE`` = 0.1 > 0.05), so
+        ``GarbageCollector._build_reason`` must append a ``stage=<stage>``
+        clause. This deterministically exercises that branch without relying
+        on any ambient store (previously only covered incidentally by a live
+        ``mnemos update`` run against the developer's real store).
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        old_ts = (now - datetime.timedelta(hours=500)).isoformat()
+        scratch = repo_root / ".agent" / "runs" / "r1" / "scratch"
+        _write_memory(
+            scratch / "stage-target.md",
+            item_id="stage-target",
+            layer="ephemeral",
+            stage="archived",
+            quality_score=0.1,
+            access_count=0,
+            created_at=old_ts,
+        )
+
+        gc = self._gc(repo_root, threshold=0.0)
+        report = gc.run(dry_run=False)
+
+        assert report.archived >= 1
+        reasons = [item["reason"] for item in report.archived_items]
+        assert any("stage=archived" in reason for reason in reasons)
+
     def test_threshold_filters_low_score_items(self, repo_root: Path):
         """Items with score below threshold should not be archived."""
         now = datetime.datetime.now(datetime.timezone.utc)
