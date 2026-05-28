@@ -8,7 +8,18 @@ from urllib.parse import quote
 import frontmatter
 
 import core.git as git
+from core.config import SyncConfig
 from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
+from core.sync import GitSyncEngine, SyncConflictError
+
+# Re-exported so callers can ``from core.store import SyncConflictError`` and so
+# the symbol is available alongside the default backend that now raises it.
+__all__ = [
+    "StorageBackend",
+    "SyncableBackend",
+    "MemoryStore",
+    "SyncConflictError",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -88,15 +99,123 @@ class StorageBackend(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Optional sync capability marker (issue #69)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class SyncableBackend(Protocol):
+    """Marker Protocol for backends that support optional remote git-sync.
+
+    Backends that implement the ``sync_*`` surface (``MemoryStore`` and
+    ``ObsidianBackend``) satisfy this Protocol.  The CLI uses an
+    ``isinstance(backend, SyncableBackend)`` check (plus the per-backend
+    ``sync.enabled`` flag) to decide whether ``mnemos sync …`` may operate on
+    the active backend — rather than hard-coding a class name.
+    """
+
+    def sync_pull(self) -> None: ...
+    def sync_push(self) -> None: ...
+    def sync_commit(self, message: str | None = None) -> bool: ...
+    def sync_status(self) -> dict[str, Any]: ...
+    def sync_continue(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
 # Filesystem implementation
 # ---------------------------------------------------------------------------
 
 
 class MemoryStore:
-    """Manages filesystem storage for memory items."""
+    """Manages filesystem storage for memory items.
 
-    def __init__(self, repo_root: str) -> None:
+    By default the store performs no remote sync (``sync_config=None`` →
+    behaviour identical to every release before issue #69).  When a
+    :class:`~core.config.SyncConfig` with ``enabled=True`` is passed, the store
+    drives a :class:`~core.sync.GitSyncEngine` around every :meth:`write` so the
+    persistent ``wiki/`` memory layers are pulled / committed / pushed to a
+    remote.
+
+    Commit scope (issue #69 — Decision 2): the default backend stages **only**
+    changed paths under ``wiki/``.  It never runs ``git add .`` at the repo
+    root, so repository source code is never accidentally committed.  Ephemeral
+    / working / session / transient writes live under ``.agent/`` (gitignored)
+    and therefore produce a commit no-op.
+    """
+
+    def __init__(self, repo_root: str, sync_config: SyncConfig | None = None) -> None:
         self._root = Path(repo_root)
+        self._sync: SyncConfig = sync_config or SyncConfig()
+        # Build the shared engine.  The ``wiki/``-scoped stage filter is the
+        # seam that enforces Decision 2.  The conflict artefact lives under
+        # ``wiki/`` and the conflict scan covers the persistent wiki layers.
+        self._sync_engine = GitSyncEngine(
+            self._root,
+            self._sync,
+            stage_filter=self._wiki_stage_filter,
+            conflict_filename=str(Path("wiki") / "_sync_conflict.md"),
+            conflict_scan_dirs=self._wiki_scan_dirs,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Sync helpers (issue #69)                                             #
+    # ------------------------------------------------------------------ #
+
+    def _wiki_dir(self) -> Path:
+        """Return the repo's ``wiki/`` directory (the committable sub-tree)."""
+        return self._root / "wiki"
+
+    def _wiki_stage_filter(self, paths: Any) -> list[Path]:
+        """Keep only paths under ``wiki/`` — never stage repo-root source.
+
+        Accepts either real changed file paths (from :meth:`write`) or the
+        engine root sentinel (from :meth:`sync_commit`).  In the sentinel case
+        the whole ``wiki/`` directory is returned so a manual commit stages all
+        pending wiki changes without ever touching the repository root.
+        """
+        wiki = self._wiki_dir()
+        out: list[Path] = []
+        for p in paths:
+            p = Path(p)
+            if p == self._root:
+                # sync_commit sentinel — stage the wiki sub-tree only.
+                if wiki.exists():
+                    out.append(wiki)
+                continue
+            try:
+                p.resolve().relative_to(wiki.resolve())
+            except (ValueError, OSError):
+                continue  # outside wiki/ — excluded (Decision 2)
+            out.append(p)
+        return out
+
+    def _wiki_scan_dirs(self) -> list[Path]:
+        """Directories scanned for unresolved conflict markers (wiki layers)."""
+        return [self._root / rel for rel in LAYER_STATIC_PATHS.values()]
+
+    # ------------------------------------------------------------------ #
+    # Public sync API (delegates to the shared engine)                     #
+    # ------------------------------------------------------------------ #
+
+    def sync_pull(self) -> None:
+        """Manual pull (silent in local-only mode; raises on conflict)."""
+        self._sync_engine.sync_pull()
+
+    def sync_push(self) -> None:
+        """Manual push (silent in local-only mode)."""
+        self._sync_engine.sync_push()
+
+    def sync_commit(self, message: str | None = None) -> bool:
+        """Stage the changed ``wiki/`` paths and create a commit."""
+        return self._sync_engine.sync_commit(message)
+
+    def sync_status(self) -> dict[str, Any]:
+        """Return a dict describing the current sync state."""
+        return self._sync_engine.sync_status()
+
+    def sync_continue(self) -> None:
+        """Continue after a manually-resolved rebase conflict."""
+        self._sync_engine.sync_continue()
 
     @staticmethod
     def canonical_filename(item_id: str) -> str:
@@ -141,7 +260,17 @@ class MemoryStore:
         run_id: str | None = None,
         session_id: str | None = None,
     ) -> Path:
-        """Write a memory item as a Markdown file with YAML front-matter."""
+        """Write a memory item as a Markdown file with YAML front-matter.
+
+        When sync is enabled (issue #69) this method also runs the three sync
+        hooks around the disk write: a rate-limited pull before writing, a
+        ``wiki/``-scoped commit after writing, and a push after the commit.
+        Writes outside ``wiki/`` (ephemeral / working / session / transient)
+        are staged out by the wiki filter and therefore commit to nothing.
+        """
+        # Hook 1 — pull before write (may raise SyncConflictError).
+        self._sync_engine.hook_before_write()
+
         layer_dir = self._layer_path(layer, run_id=run_id, session_id=session_id)
         layer_dir.mkdir(parents=True, exist_ok=True)
 
@@ -153,6 +282,10 @@ class MemoryStore:
         post = frontmatter.Post(content, **post_metadata)
         with file_path.open("w", encoding="utf-8") as f:
             f.write(frontmatter.dumps(post))
+
+        # Hook 2 — commit (wiki-scoped), Hook 3 — push.
+        committed = self._sync_engine.hook_after_write_item(layer, item_id, [file_path])
+        self._sync_engine.hook_after_commit(committed)
 
         return file_path
 

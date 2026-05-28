@@ -60,7 +60,6 @@ import datetime
 import hashlib
 import os
 import re
-import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterator
@@ -68,23 +67,12 @@ from typing import Any, Iterator
 import frontmatter
 
 from core.fts import FTSIndex
+from core.sync import GitSyncEngine, SyncConflictError
 
-
-# ---------------------------------------------------------------------------
-# Sync-specific exceptions
-# ---------------------------------------------------------------------------
-
-
-class SyncConflictError(RuntimeError):
-    """Raised when ``git pull --rebase`` encounters an unresolvable conflict.
-
-    The caller should surface this as ``STATUS: blocked`` and instruct the
-    user to run ``mnemos sync continue`` after manually resolving.
-    """
-
-    def __init__(self, message: str, conflicting_ids: list[str] | None = None) -> None:
-        self.conflicting_ids = conflicting_ids or []
-        super().__init__(message)
+# ``SyncConflictError`` moved to :mod:`core.sync` (issue #69) so the default
+# backend can raise the same type.  It is re-exported here so existing callers
+# (``from core.obsidian import SyncConflictError``) keep working unchanged.
+__all__ = ["ObsidianBackend", "SyncConflictError", "OBSIDIAN_LAYERS"]
 
 
 # ---------------------------------------------------------------------------
@@ -211,176 +199,84 @@ class ObsidianBackend:
         # mtime cache: maps str(path) → float (mtime at last sync)
         self._mtime_cache: dict[str, float] = {}
 
-        # ── Sync wiring (issue #24) ────────────────────────────────────────
-        # Import lazily so the module loads even when core/git.py is absent
-        # (defensive import — the file is always present after #24 but belt-
-        # and-suspenders is cheap).
-        from core.config import SyncConfig as _SyncConfig  # noqa: F401
+        # ── Sync wiring (issue #24, refactored onto core.sync for #69) ──────
+        from core.config import SyncConfig as _SyncConfig
+        from core.sync import GitSyncEngine as _GitSyncEngine, hash_path as _hash_path
         self._sync: "_SyncConfig" = sync_config or _SyncConfig()
-        # Monotonic timestamp (epoch float) of the last successful pull.
-        # Persisted to / loaded from a per-vault cache file on disk so the
-        # rate-limit survives process restarts.
-        self._last_pull_ts: float = self._load_last_pull_ts()
-        # Monotonic timestamp of the last successful push.
-        self._last_push_ts: float = 0.0
+        # The Obsidian backend stages *all* changed paths (its vault contains
+        # only memory files), and uses ``git add .`` for whole-vault commits —
+        # preserved exactly via the stage filters below.  The pull-timestamp
+        # cache filename keeps the pre-#69 per-vault-hash naming.
+        self._sync_engine = _GitSyncEngine(
+            self._vault,
+            self._sync,
+            cache_key=_hash_path(self._vault),
+            stage_filter=lambda paths: list(paths),
+            conflict_filename="_sync_conflict.md",
+            conflict_scan_dirs=lambda: [self._vault / layer for layer in OBSIDIAN_LAYERS],
+        )
 
     # ------------------------------------------------------------------ #
-    # Sync helpers (issue #24)                                              #
+    # Sync helpers (issue #24 — delegate to core.sync.GitSyncEngine)        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _vault_hash(vault_path: Path) -> str:
-        """Return a short hash of the vault path for per-vault cache files."""
-        return hashlib.sha256(str(vault_path).encode("utf-8")).hexdigest()[:16]
+    # ``_last_pull_ts`` is exposed as a read/write property proxying the
+    # engine's internal timestamp, preserving the pre-#69 surface where callers
+    # (and tests) both read *and* assign it (e.g.
+    # ``backend._last_pull_ts = time.monotonic()`` to force the rate limit).
+    @property
+    def _last_pull_ts(self) -> float:
+        return self._sync_engine.last_pull_ts
+
+    @_last_pull_ts.setter
+    def _last_pull_ts(self, value: float) -> None:
+        self._sync_engine._last_pull_ts = value
 
     def _pull_cache_path(self) -> Path:
         """Return the path to the per-vault last-pull timestamp cache file."""
-        cache_dir = Path.home() / ".mnemos" / ".cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        return cache_dir / f"sync-last-pull-{self._vault_hash(self._vault)}.ts"
+        return self._sync_engine._pull_cache_path()
 
     def _load_last_pull_ts(self) -> float:
         """Load the last-pull timestamp from disk.  Returns 0.0 if absent."""
-        try:
-            return float(self._pull_cache_path().read_text(encoding="utf-8").strip())
-        except Exception:
-            return 0.0
+        return self._sync_engine._load_last_pull_ts()
 
     def _save_last_pull_ts(self, ts: float) -> None:
-        """Persist the last-pull timestamp to disk."""
-        try:
-            self._pull_cache_path().write_text(str(ts), encoding="utf-8")
-        except Exception:
-            pass  # non-fatal — the in-memory value is still correct
+        """Persist the last-pull timestamp to disk (best-effort)."""
+        self._sync_engine._save_last_pull_ts(ts)
 
     def _has_remote(self) -> bool:
-        """Return ``True`` when the configured remote exists in the vault repo.
-
-        Uses :func:`core.git.remote_exists` (which runs ``git remote get-url``).
-        Returns ``False`` on any error (git not found, not a repo, etc.) so
-        callers can treat the absence of a remote as local-only mode.
-        """
-        try:
-            import core.git as _git
-            return _git.remote_exists(self._vault, self._sync.remote)
-        except Exception:
-            return False
+        """Return ``True`` when the configured remote exists in the vault repo."""
+        return self._sync_engine.has_remote()
 
     def _should_pull(self) -> bool:
-        """Return ``True`` when a pull should be attempted now.
-
-        A pull is skipped when:
-        - ``pull_rate_limit_seconds`` has NOT yet elapsed since the last pull, OR
-        - the configured remote does not exist in the vault repo (local-only mode), OR
-        - the remote branch does not yet exist (empty / uninitialized remote repo).
-        """
-        if not self._sync.enabled or not self._sync.auto_pull_on_capture:
-            return False
-        if not self._has_remote():
-            return False
-        # Skip pull when the remote branch doesn't exist yet (e.g. empty GitHub
-        # repo before the first push).  Treat the same as local-only mode.
-        try:
-            import core.git as _git
-            if not _git.remote_has_branch(
-                self._vault, self._sync.remote, self._sync.branch
-            ):
-                return False
-        except Exception:
-            return False
-        elapsed = time.monotonic() - self._last_pull_ts
-        # _last_pull_ts is 0.0 on the first-ever call, so elapsed will be huge
-        # and a pull is always attempted.
-        return elapsed >= self._sync.pull_rate_limit_seconds
+        """Return ``True`` when a pull should be attempted now."""
+        return self._sync_engine.should_pull()
 
     def _hook_before_write(self) -> None:
-        """Hook 1 — attempt a pull-rebase before the disk write.
+        """Hook 1 — attempt a rate-limited pull-rebase before the disk write.
 
-        Runs only when ``sync.enabled`` is ``True`` AND the rate-limit window
-        has expired.  On pull failure (conflict), writes conflict artefacts and
-        raises :exc:`SyncConflictError`.
+        The rate-limit decision goes through this backend's own
+        :meth:`_should_pull` (an overridable seam) before delegating the actual
+        git work to the engine, preserving the pre-#69 call path.
         """
         if not self._sync.enabled:
             return
         if not self._should_pull():
             return
-        import core.git as _git
-        try:
-            _git.pull_rebase(
-                self._vault,
-                remote=self._sync.remote,
-                branch=self._sync.branch,
-                autostash=True,
-            )
-            now = time.monotonic()
-            self._last_pull_ts = now
-            self._save_last_pull_ts(now)
-        except _git.GitCommandError as exc:
-            # pull_rebase (fetch+rebase) failed — surface a conflict
-            self._write_conflict_artefacts(str(exc))
-            raise SyncConflictError(
-                f"git pull (fetch+rebase) failed: {exc}",
-            ) from exc
-
-    def _write_conflict_artefacts(self, error_detail: str) -> None:
-        """Write ``_sync_conflict.md`` at the vault root.
-
-        We cannot reliably determine which item ids are conflicting without
-        parsing git's conflict output, so we write a general notice.
-        """
-        conflict_path = self._vault / "_sync_conflict.md"
-        lines = [
-            "# mnemos Sync Conflict",
-            "",
-            "_A ``git fetch`` + ``git rebase`` conflict was detected._",
-            "",
-            "## What Happened",
-            "",
-            "mnemos attempted to pull the latest changes from the remote but",
-            "encountered a conflict that could not be resolved automatically.",
-            "",
-            "## Error Detail",
-            "",
-            "```",
-            error_detail,
-            "```",
-            "",
-            "## How to Resolve",
-            "",
-            "1. Open this vault in your terminal.",
-            "2. Resolve the conflict markers in the affected ``.md`` files.",
-            "3. Run ``git add <resolved-files>``.",
-            "4. Run ``mnemos sync continue`` (or ``git rebase --continue``).",
-            "5. Delete this file after the conflict is resolved.",
-            "",
-        ]
-        conflict_path.write_text("\n".join(lines), encoding="utf-8")
+        self._sync_engine._do_pull_rebase()
 
     def _hook_after_write(self, changed_paths: list[Path]) -> bool:
-        """Hook 2 — stage and commit changed paths after a successful disk write.
+        """Hook 2 (multi-file) — stage and commit changed paths.
 
-        Returns ``True`` if a commit was actually created, ``False`` otherwise
-        (nothing to commit / sync disabled).
+        Uses a generic ``vault`` layer + comma-joined stems in the commit
+        message (single-file writes use :meth:`_hook_after_write_item`).
         """
         if not self._sync.enabled:
             return False
         if not changed_paths:
             return False
-        import core.git as _git
-        _git.add(self._vault, [str(p) for p in changed_paths])
-        # Build commit message
-        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        # Use generic layer/id for multi-file operations; single-file writes
-        # fill in the actual values via the overloaded _hook_after_write_item.
-        message = self._sync.commit_message_template.format(
-            layer="vault",
-            id=",".join(p.stem for p in changed_paths[:3]),
-            timestamp=timestamp,
-        )
-        committed = _git.commit(self._vault, message)
-        return committed
+        item_id = ",".join(p.stem for p in changed_paths[:3])
+        return self._sync_engine.hook_after_write_item("vault", item_id, changed_paths)
 
     def _hook_after_write_item(
         self,
@@ -388,35 +284,14 @@ class ObsidianBackend:
         item_id: str,
         changed_paths: list[Path],
     ) -> bool:
-        """Hook 2 (item-level) — commit with a message that names the item.
-
-        Returns ``True`` if a commit was created.
-        """
-        if not self._sync.enabled:
-            return False
-        if not changed_paths:
-            return False
-        import core.git as _git
-        _git.add(self._vault, [str(p) for p in changed_paths])
-        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        message = self._sync.commit_message_template.format(
-            layer=layer,
-            id=item_id,
-            timestamp=timestamp,
-        )
-        committed = _git.commit(self._vault, message)
-        return committed
+        """Hook 2 (item-level) — commit with a message that names the item."""
+        return self._sync_engine.hook_after_write_item(layer, item_id, changed_paths)
 
     def _hook_after_commit(self, committed: bool) -> None:
         """Hook 3 — push after a successful commit.
 
-        Only runs when ``committed`` is ``True`` AND ``auto_push_after_commit``
-        is set AND a remote is configured with the target branch already
-        existing on the remote.  When no remote is configured or the remote
-        branch does not yet exist (uninitialized repo), the push is skipped
-        silently.
+        Routes the local-only/remote-branch decision through this backend's own
+        :meth:`_has_remote` seam (overridable) before delegating to the engine.
         """
         if not self._sync.enabled:
             return
@@ -425,169 +300,36 @@ class ObsidianBackend:
         if not self._sync.auto_push_after_commit:
             return
         if not self._has_remote():
-            # Local-only mode — no remote configured, skip push silently
             return
-        import core.git as _git
-        # Skip push when the remote branch hasn't been created yet (empty repo)
-        if not _git.remote_has_branch(self._vault, self._sync.remote, self._sync.branch):
-            return
-        _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
-        self._last_push_ts = time.monotonic()
+        self._sync_engine.hook_after_commit(committed)
 
     # ------------------------------------------------------------------ #
-    # Public sync API                                                       #
+    # Public sync API (delegates to the shared engine)                      #
     # ------------------------------------------------------------------ #
 
     def sync_pull(self) -> None:
         """Manual pull — works regardless of ``mode`` or rate limit.
 
-        When no remote is configured, or the remote branch does not yet exist
-        (uninitialized remote repo), this method returns silently without
-        raising an error.
-
-        Raises :exc:`SyncConflictError` when the pull detects a conflict.
+        Silent in local-only mode / empty remote.  Raises
+        :exc:`SyncConflictError` on a pull conflict.
         """
-        if not self._has_remote():
-            # Local-only mode — no remote to pull from
-            return
-        import core.git as _git
-        if not _git.remote_has_branch(self._vault, self._sync.remote, self._sync.branch):
-            # Remote exists but the branch hasn't been pushed yet — skip silently
-            return
-        try:
-            _git.pull_rebase(
-                self._vault,
-                remote=self._sync.remote,
-                branch=self._sync.branch,
-                autostash=True,
-            )
-            now = time.monotonic()
-            self._last_pull_ts = now
-            self._save_last_pull_ts(now)
-        except _git.GitCommandError as exc:
-            self._write_conflict_artefacts(str(exc))
-            raise SyncConflictError(f"git pull (fetch+rebase) failed: {exc}") from exc
+        self._sync_engine.sync_pull()
 
     def sync_push(self) -> None:
-        """Manual push to the configured remote/branch.
-
-        When no remote is configured (local-only mode), this method returns
-        silently without raising an error.
-
-        Raises :exc:`~core.git.GitCommandError` on push failure.
-        """
-        if not self._has_remote():
-            # Local-only mode — no remote to push to
-            return
-        import core.git as _git
-        _git.push(self._vault, remote=self._sync.remote, branch=self._sync.branch)
-        self._last_push_ts = time.monotonic()
+        """Manual push to the configured remote/branch (silent local-only)."""
+        self._sync_engine.sync_push()
 
     def sync_commit(self, message: str | None = None) -> bool:
-        """Stage all tracked changes and create a commit.
-
-        Parameters
-        ----------
-        message:
-            Optional commit message override.  When ``None``, a generic
-            timestamp-based message is used.
-
-        Returns ``True`` if a commit was created, ``False`` if the tree was clean.
-        """
-        import core.git as _git
-        _git.add(self._vault, ["."])
-        if message is None:
-            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
-            message = f"mnemos: manual sync commit ({timestamp})"
-        return _git.commit(self._vault, message)
+        """Stage all vault changes (``git add .``) and create a commit."""
+        return self._sync_engine.sync_commit(message)
 
     def sync_status(self) -> dict[str, object]:
-        """Return a dict describing the current sync state.
-
-        Keys
-        ----
-        branch : str
-        ahead : int
-        behind : int
-        dirty : bool
-        remote : str | None
-        upstream : str | None
-        untracked : int
-        last_pull_ts : float
-            Epoch time of the last successful pull (0.0 if never pulled).
-        last_push_ts : float
-            Epoch time of the last successful push in this process (0.0 if
-            never pushed; not persisted across restarts).
-        sync_enabled : bool
-        sync_remote : str
-        sync_branch : str
-        """
-        import core.git as _git
-        stat = _git.status(self._vault)
-        stat["last_pull_ts"] = self._last_pull_ts
-        stat["last_push_ts"] = self._last_push_ts
-        stat["sync_enabled"] = self._sync.enabled
-        stat["sync_remote"] = self._sync.remote
-        stat["sync_branch"] = self._sync.branch
-        return stat
+        """Return a dict describing the current sync state."""
+        return self._sync_engine.sync_status()
 
     def sync_continue(self) -> None:
-        """Continue after a manually-resolved rebase conflict.
-
-        Steps:
-        1. Verify no conflict markers remain in any tracked ``.md`` file.
-        2. ``git rebase --continue``.
-        3. Delete ``_sync_conflict.md`` and ``transient/conflict-*.md``.
-
-        Raises
-        ------
-        SyncConflictError
-            When conflict markers (``<<<<<<<``) are still found in vault files.
-        """
-        # 1. Check for unresolved conflict markers
-        conflicted: list[str] = []
-        for layer in OBSIDIAN_LAYERS:
-            layer_dir = self._vault / layer
-            if not layer_dir.exists():
-                continue
-            for md_file in layer_dir.glob("*.md"):
-                try:
-                    text = md_file.read_text(encoding="utf-8")
-                except Exception:
-                    continue
-                if "<<<<<<<" in text:
-                    conflicted.append(str(md_file))
-
-        if conflicted:
-            raise SyncConflictError(
-                "Conflict markers still present in vault files. "
-                "Resolve all conflicts before running 'mnemos sync continue'.\n"
-                + "\n".join(conflicted)
-            )
-
-        # 2. git rebase --continue — via core.git to satisfy the DIP rule.
-        import core.git as _git
-        try:
-            _git.rebase_continue(self._vault)
-        except _git.GitCommandError:
-            raise
-
-        # 3. Clean up conflict artefacts
-        conflict_index = self._vault / "_sync_conflict.md"
-        if conflict_index.exists():
-            conflict_index.unlink()
-
-        transient_dir = self._vault / "transient"
-        if transient_dir.exists():
-            for f in transient_dir.glob("conflict-*.md"):
-                f.unlink()
-
-        # Update the last-pull timestamp so the rate limit resets
-        now = time.monotonic()
-        self._last_pull_ts = now
-        self._save_last_pull_ts(now)
+        """Continue after a manually-resolved rebase conflict."""
+        self._sync_engine.sync_continue()
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                      #

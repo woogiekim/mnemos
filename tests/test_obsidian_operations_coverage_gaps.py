@@ -401,3 +401,33 @@ def test_operations_engine_reports_recovery_and_helper_edges(tmp_path: Path) -> 
     assert _retrieval_lifecycle_score("forgotten") == 0.0
     assert _retrieval_lifecycle_score("archived") == 0.7
     assert OperationalHealthThresholds.uniform(0.5).context_continuity_score == 0.5
+
+
+def test_obsidian_iter_layer_items_skips_unparseable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """iter_layer_items() skips a file whose _parse_path raises (corrupt md)."""
+    from core.obsidian import ObsidianBackend
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    vault = tmp_path / "vault"
+    backend = ObsidianBackend(str(vault))
+
+    good = vault / "project" / "good.md"
+    _write_md(good, "body", id="good", layer="project")
+    bad = vault / "project" / "bad.md"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("body\n", encoding="utf-8")
+
+    real_parse = backend._parse_path
+
+    def maybe_raise(path: Path) -> Any:
+        if Path(path).name == "bad.md":
+            raise ValueError("corrupt front-matter")
+        return real_parse(path)
+
+    monkeypatch.setattr(backend, "_parse_path", maybe_raise)
+    items = list(backend.iter_layer_items("project"))
+    ids = {it.get("id") for it in items}
+    assert "good" in ids
+    assert "bad" not in ids

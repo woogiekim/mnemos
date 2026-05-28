@@ -25,9 +25,14 @@ Example ``mnemos.yml``::
 
 Auto-sync: when ``storage.backend: obsidian`` and ``vault_path`` is set,
 sync is **enabled automatically** without requiring ``sync.enabled: true``.
-To opt out, set ``sync.enabled: false`` explicitly.  The default backend
-(MemoryStore) never grows sync wiring — see :class:`SyncConfig` for the
-full field catalogue.
+To opt out, set ``sync.enabled: false`` explicitly.
+
+The default backend (MemoryStore) also supports optional remote git-sync as of
+issue #69, but it is **opt-in only**: sync activates for the default backend
+exclusively when ``storage.sync.enabled: true`` is set explicitly.  The
+auto-enable rule below never fires for the default backend, so a default-backend
+project never commits/pushes unless the user asks for it.  See
+:class:`SyncConfig` for the full field catalogue.
 
 When no git remote is configured in the vault, git push/pull operations are
 skipped silently so the backend works in local-only mode.
@@ -66,7 +71,9 @@ class SyncConfig:
         :func:`get_backend_config` function overrides it to ``True``
         automatically when ``backend == "obsidian"`` and a ``vault_path``
         is configured — unless the user explicitly set ``sync.enabled:
-        false`` in ``mnemos.yml``.
+        false`` in ``mnemos.yml``.  For the **default** backend (issue #69)
+        the auto-enable rule never fires: sync is enabled only when the user
+        explicitly sets ``sync.enabled: true``.
     """
 
     #: Master switch.  When ``False`` (the default) no sync hooks run and

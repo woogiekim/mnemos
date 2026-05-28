@@ -2394,24 +2394,50 @@ def sync_group() -> None:
     """
 
 
-def _get_obsidian_backend():
-    """Return the active ObsidianBackend or raise SystemExit with an error."""
+def _get_sync_backend():
+    """Return the active sync-capable backend or raise SystemExit with an error.
+
+    Issue #69: ``mnemos sync …`` now works for the **default** backend too, not
+    just Obsidian.  Resolution:
+
+    - ``storage.backend: obsidian`` (+ ``vault_path``) → ObsidianBackend.
+    - default backend with ``storage.sync.enabled: true`` → MemoryStore wired
+      with the sync config.
+    - any other case (default backend, sync not enabled) → reject, since the
+      backend has no remote sync to operate on.
+    """
     from core.config import get_backend_config
-    from core.obsidian import ObsidianBackend
     from core.fts import FTSIndex
+    from core.store import MemoryStore, SyncableBackend
 
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
     cfg = get_backend_config(repo_root)
-    if cfg.backend != "obsidian" or not cfg.vault_path:
-        click.echo(
-            "error: mnemos sync requires storage.backend: obsidian in mnemos.yml",
-            err=True,
-        )
-        raise SystemExit(1)
     state_dir = Path(repo_root) / ".agent" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     fts = FTSIndex(db_path=str(state_dir / "fts.db"))
-    return ObsidianBackend(vault_path=cfg.vault_path, fts=fts, sync_config=cfg.sync)
+
+    if cfg.backend == "obsidian" and cfg.vault_path:
+        from core.obsidian import ObsidianBackend
+        backend = ObsidianBackend(vault_path=cfg.vault_path, fts=fts, sync_config=cfg.sync)
+    elif cfg.backend != "obsidian" and cfg.sync.enabled:
+        # Default backend with opt-in sync enabled.
+        backend = MemoryStore(repo_root=repo_root, sync_config=cfg.sync)
+    else:
+        click.echo(
+            "error: mnemos sync requires storage.backend: obsidian in mnemos.yml, "
+            "or storage.sync.enabled: true for the default backend",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if not isinstance(backend, SyncableBackend):  # pragma: no cover - defensive
+        click.echo("error: active backend does not support sync", err=True)
+        raise SystemExit(1)
+    return backend
+
+
+# Backward-compatible alias — older call sites and tests may import this name.
+_get_obsidian_backend = _get_sync_backend
 
 
 @sync_group.command("pull")
@@ -2486,14 +2512,21 @@ def sync_init_cmd(remote_url: str, branch_name: str) -> None:
 
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
     cfg = get_backend_config(repo_root)
-    if cfg.backend != "obsidian" or not cfg.vault_path:
+    # Issue #69: `sync init` operates on the Obsidian vault when that backend is
+    # active, otherwise on the repo root when the default backend has opt-in
+    # sync enabled.
+    if cfg.backend == "obsidian" and cfg.vault_path:
+        vault_path = cfg.vault_path
+    elif cfg.backend != "obsidian" and cfg.sync.enabled:
+        vault_path = repo_root
+    else:
         click.echo(
-            "error: mnemos sync init requires storage.backend: obsidian in mnemos.yml",
+            "error: mnemos sync init requires storage.backend: obsidian in mnemos.yml, "
+            "or storage.sync.enabled: true for the default backend",
             err=True,
         )
         sys.exit(1)
 
-    vault_path = cfg.vault_path
     remote_name = cfg.sync.remote if cfg.sync.remote else "origin"
 
     try:
