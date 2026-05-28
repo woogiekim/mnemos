@@ -138,8 +138,16 @@ class MemoryGateway:
                 sync_config=backend_cfg.sync,
             )
         else:
-            # Default: existing MemoryStore — behaviour is unchanged
-            self._store = MemoryStore(repo_root=self._root)
+            # Default backend (issue #69): optional remote git-sync, opt-in
+            # only.  ``backend_cfg.sync.enabled`` is True only when the user
+            # explicitly set ``storage.sync.enabled: true`` — the default
+            # backend is never auto-enabled (see core/config.py).  When sync is
+            # disabled the engine is inert and behaviour matches every release
+            # before #69.
+            self._store = MemoryStore(
+                repo_root=self._root,
+                sync_config=backend_cfg.sync,
+            )
 
         self._search = SearchMiddleware(
             repo_root=self._root,

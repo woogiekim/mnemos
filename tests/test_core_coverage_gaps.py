@@ -280,3 +280,50 @@ def test_hook_dispatcher_filters_scripts_and_handles_start_failures(
 
     monkeypatch.setattr("subprocess.Popen", fail_unexpected)
     HookDispatcher(str(tmp_path)).fire("post-capture", {"item_id": "abc"})
+
+
+def test_gc_build_reason_includes_all_score_components() -> None:
+    """``_build_reason`` lists every score component above its threshold,
+    including the ``stage`` contribution."""
+    from core.gc import GarbageCollector, MemoryRecord
+
+    record = MemoryRecord(
+        item_id="x",
+        layer="session",
+        path="/tmp/x.md",
+        created_at=None,
+        last_access_at=None,
+        access_count=0,
+        quality_score=0.1,
+        stage="archived",
+        content_preview="",
+        score_breakdown={
+            "staleness": 0.3,
+            "access": 0.2,
+            "quality": 0.2,
+            "stage": 0.1,
+        },
+    )
+    reason = GarbageCollector._build_reason(record)
+    assert "stale" in reason
+    assert "low access_count" in reason
+    assert "low quality_score" in reason
+    assert "stage=archived" in reason
+
+
+def test_gc_build_reason_default_when_no_component_dominates() -> None:
+    from core.gc import GarbageCollector, MemoryRecord
+
+    record = MemoryRecord(
+        item_id="y",
+        layer="session",
+        path="/tmp/y.md",
+        created_at=None,
+        last_access_at=None,
+        access_count=0,
+        quality_score=0.9,
+        stage="stored",
+        content_preview="",
+        score_breakdown={},
+    )
+    assert GarbageCollector._build_reason(record) == "composite score threshold exceeded"
