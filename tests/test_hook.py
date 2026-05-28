@@ -428,20 +428,66 @@ class TestSessionStartLoad:
 
 class TestSearchOutput:
     def test_search_output_wrapped_in_xml_tags(self, tmp_path, monkeypatch):
-        """When search returns results, they must be wrapped in <mnemos-context> tags."""
-        # We need a real mnemos search that returns results, so use the actual CLI
-        # with the user's mnemos repo root if available, otherwise skip.
-        repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
-        if not repo_root:
-            pytest.skip("MNEMOS_REPO_ROOT not set — skipping live search test")
+        """When search returns results, they must be wrapped in <mnemos-context> tags.
 
-        rc, output = _run_hook("memory hook search", mnemos_repo_root=repo_root)
+        Seeds its OWN temp mnemos store (no dependency on the developer's real
+        store) with a single memory matching the hook search query, then runs
+        the hook and asserts the search output is wrapped. The memory is
+        captured directly into the top ``global`` layer (``promotes_to: None``),
+        so no auto-promotion event is recorded and the ``<mnemos-promotion>``
+        branch cannot trigger — making the assertion deterministic.
+        """
+        import yaml
+        from core.gateway import MemoryGateway
+
+        repo_root = tmp_path / "store"
+        wiki = repo_root / "wiki"
+        for d in ["global", "projects", "entities", "claims", "topics"]:
+            (wiki / d).mkdir(parents=True)
+        agent = repo_root / ".agent"
+        for d in ["runs", "sessions", "state"]:
+            (agent / d).mkdir(parents=True)
+
+        policy = {
+            "layers": {
+                "ephemeral": {"path_template": ".agent/runs/{run_id}/scratch/", "promotes_to": "working",
+                              "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0}},
+                "working": {"path_template": ".agent/runs/{run_id}/working/", "promotes_to": "session",
+                            "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0}},
+                "session": {"path_template": ".agent/sessions/{session_id}/", "promotes_to": "project",
+                            "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0}},
+                "project": {"path_template": "wiki/projects/", "promotes_to": "global",
+                            "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0}},
+                "global": {"path_template": "wiki/global/", "promotes_to": None,
+                           "promotion": {"age_hours": 0.0, "access_count": 0, "quality_score": 0.0}},
+            },
+            "forget": {"requires_archived": True},
+            "archive": {"allowed_stages": ["stored", "retrieved", "used", "validated"]},
+        }
+        (wiki / "policy.yaml").write_text(yaml.dump(policy), encoding="utf-8")
+        (wiki / "log.md").write_text("# Log\n", encoding="utf-8")
+        (wiki / "log.jsonl").write_text("", encoding="utf-8")
+
+        # Seed one memory matching the search query, directly into the top layer
+        # (global -> promotes_to None) so no promotion event is generated.
+        gw = MemoryGateway(repo_root=str(repo_root))
+        gw.capture(
+            content="memory hook search returns a deterministic context block",
+            layer="global",
+            session_id="test-session-123",
+        )
+
+        # Pin the promotion cursor to this temp store so the global default
+        # cursor file can never make a stray promotion render.
+        monkeypatch.setenv("MNEMOS_PROMO_CURSOR", str(repo_root / "promotion-cursor.txt"))
+
+        rc, output = _run_hook("memory hook search", mnemos_repo_root=str(repo_root))
         assert rc == 0
-        # If output is non-empty it must be properly wrapped
-        if output.strip():
-            if "no results found" not in output:
-                assert "<mnemos-context" in output
-                assert "</mnemos-context>" in output
+        assert "no results found" not in output
+        assert "<mnemos-context" in output
+        assert "</mnemos-context>" in output
+        # No pending promotions exist, so the promotion branch must stay silent.
+        assert "<mnemos-promotion" not in output
 
     def test_no_output_when_search_empty(self, tmp_path):
         """When mnemos returns no results, hook must produce no output for search section."""

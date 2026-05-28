@@ -289,6 +289,34 @@ class TestListAndIter:
         items = list(backend.iter_layer_items("nonexistent_layer"))
         assert items == []
 
+    def test_iter_layer_items_skips_unparseable_file(self, tmp_path):
+        """A file with malformed front-matter is skipped, not raised.
+
+        ``iter_layer_items`` must keep yielding the valid items in a layer
+        even when a sibling ``.md`` file has unparseable YAML front-matter
+        (``except Exception: continue``). This deterministically covers that
+        skip branch, which was previously only hit incidentally by a live
+        ``mnemos`` run against the developer's real store.
+        """
+        backend = _make_backend(tmp_path)
+        backend.write(
+            layer="project",
+            item_id="valid-001",
+            content="valid content",
+            metadata={"id": "valid-001", "layer": "project"},
+        )
+        # Drop a sibling file with malformed YAML front-matter into the same
+        # layer folder so frontmatter.load() raises a ParserError on it.
+        broken = tmp_path / "vault" / "project" / "broken.md"
+        broken.write_text(
+            "---\nkey: [unclosed\n:::bad yaml\n---\nbody\n", encoding="utf-8"
+        )
+
+        items = list(backend.iter_layer_items("project"))
+
+        assert len(items) == 1
+        assert items[0]["id"] == "valid-001"
+
 
 # ---------------------------------------------------------------------------
 # parse_file
