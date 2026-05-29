@@ -3,6 +3,11 @@
 > Public design doc for issue #68 — the graph-view UI built on top of the
 > issue-#67 domain-relationship model in `core/cohesion.py`.
 
+> See also: [Memory Inspection UI](./memory-inspection.md) — the sibling
+> `mnemos inspect` surface (issue #80) that follows the same static-HTML
+> packaging pattern but surfaces per-memory inventory (trust, provenance,
+> lifecycle) rather than cross-memory cohesion.
+
 ## Background
 
 Issue #67 introduced `core/cohesion.py`, a read-only derivation layer that
