@@ -16,9 +16,30 @@ restore` of an older archive is always a breaking change.
 
 ## [Unreleased]
 
-Nothing yet. Add entries here under `Added` / `Changed` / `Deprecated` /
-`Removed` / `Fixed` / `Security` as work merges to `main`, then promote them
-into a dated version section when the release is cut.
+### Added
+
+- `mnemos compact` CLI group for similar-memory detection + semantic
+  compression with lineage audit
+  ([#81](https://github.com/woogiekim/mnemos/issues/81)):
+  - `core/similarity.py` — deterministic Jaccard + union-find grouping
+    over NFKC-normalised tokens (optional n-gram).
+  - `core/compaction.py` — frozen `MergePlan` / `MergeResult`
+    dataclasses, lossless deterministic summariser with `## Sources`
+    audit header, policy-driven `derive_merged_layer`, pure
+    `compute_merge_plan`, and lineage-preserving `apply_merge_plan`.
+  - `mnemos compact review` (dry-run), `apply`, `restore-source`,
+    `merge-candidates` subcommands.
+  - Opt-in `--summarizer=llm` summariser reuses the already-pinned
+    `anthropic` client; on any failure it falls back to the
+    deterministic path with a logged warning.
+  - Three additive YAML front-matter keys on memories: `sources`,
+    `compaction_method`, `superseded_by`. No new dependency, no
+    `core/backup.py:SCHEMA_VERSION` bump, no public API change in
+    `core/gateway.py` / `core/store.py` / `core/policy.py`.
+  - Round-trip verified through git-sync (#69/#79) and
+    `mnemos backup` / `mnemos restore` (#75).
+  - Operator guide:
+    [docs/memory-compaction.md](docs/memory-compaction.md).
 
 ## [0.1.0] - 2026-05-29
 

@@ -9,6 +9,7 @@ import webbrowser
 from pathlib import Path
 
 import click
+import yaml
 
 from core.gateway import MemoryGateway
 from core.output import capture_notice
@@ -3132,4 +3133,253 @@ def memory_restore(input_path: str, overwrite: bool) -> None:
         f"restored: {report.restored_count}  "
         f"skipped: {report.skipped_count}  "
         f"overwritten: {report.overwritten_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# compact — similar-memory detection + semantic compression (issue #81)
+# ---------------------------------------------------------------------------
+@cli.group("compact")
+def memory_compact() -> None:
+    """Detect similar memories and merge them with lineage-preserving audit.
+
+    See ``docs/memory-compaction.md`` for the operator guide (similarity
+    threshold tuning, deterministic vs LLM summariser, supersede vs
+    forget semantics, audit-trail reconstruction).
+    """
+
+
+def _collect_compact_items(
+    gw: MemoryGateway,
+    layers_filter: tuple[str, ...] | None,
+) -> list[dict]:
+    """Walk every layer (or *layers_filter*) and return live memory items.
+
+    Helper for the ``review`` / ``apply`` / ``merge-candidates`` subcommands.
+    We deliberately skip already-merged sources (stage=archived AND
+    superseded_by set) here so the CLI's view matches what
+    :func:`core.similarity.find_similar_pairs` will detect.
+    """
+    from core.layers import LAYER_STATIC_PATHS
+
+    static_layers = list(LAYER_STATIC_PATHS.keys())
+    dynamic_layers = ["ephemeral", "working", "session"]
+    all_layers = static_layers + dynamic_layers
+    if layers_filter:
+        all_layers = [l for l in all_layers if l in layers_filter]
+
+    items: list[dict] = []
+    for layer in all_layers:
+        try:
+            for item in gw._store.iter_layer_items(layer):
+                items.append(item)
+        except Exception:
+            # iter_layer_items is best-effort — silently skip layers that error
+            continue
+    return items
+
+
+@memory_compact.command("review")
+@click.option(
+    "--threshold",
+    "threshold",
+    default=0.7,
+    type=float,
+    help="Jaccard similarity threshold for grouping (default: 0.7).",
+)
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text).",
+)
+def memory_compact_review(
+    threshold: float,
+    layers_filter: tuple[str, ...],
+    fmt: str,
+) -> None:
+    """Show similar-memory groups and proposed merged content WITHOUT writing.
+
+    This is the dry-run gate before ``mnemos compact apply``.  Nothing
+    is written to the store; the output is informational only.
+    """
+    from core.compaction import compute_merge_plan
+    from core.similarity import group_similar
+
+    gw = _get_gateway()
+    items = _collect_compact_items(gw, layers_filter or None)
+    groups = group_similar(items, threshold=threshold)
+
+    if fmt == "json":
+        out_groups = []
+        for idx, group in enumerate(groups, 1):
+            plan = compute_merge_plan(gw, group)
+            out_groups.append({
+                "group_id": idx,
+                "sources": list(plan.sources),
+                "target_layer": plan.target_layer,
+                "method": plan.method,
+                "content": plan.content,
+            })
+        _echo_json({"threshold": threshold, "groups": out_groups})
+        return
+
+    if not groups:
+        click.echo(f"[mnemos] no similar-memory groups at threshold={threshold}")
+        return
+
+    click.echo(f"[mnemos] {len(groups)} group(s) at threshold={threshold}")
+    for idx, group in enumerate(groups, 1):
+        plan = compute_merge_plan(gw, group)
+        click.echo("")
+        click.echo(f"## Group {idx} — target_layer={plan.target_layer}")
+        click.echo(f"   sources: {', '.join(plan.sources)}")
+        click.echo("   --- proposed merged content ---")
+        for line in plan.content.splitlines():
+            click.echo(f"   {line}")
+
+
+@memory_compact.command("apply")
+@click.option(
+    "--threshold",
+    "threshold",
+    default=0.7,
+    type=float,
+    help="Jaccard similarity threshold (default: 0.7).",
+)
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--summarizer",
+    "summarizer",
+    type=click.Choice(["deterministic", "llm"]),
+    default="deterministic",
+    help="Merge summariser (default: deterministic, lossless).",
+)
+@click.option(
+    "--forget-sources",
+    "forget_sources",
+    is_flag=True,
+    default=False,
+    help="Hard-delete sources after merge (default: archive + supersede).",
+)
+def memory_compact_apply(
+    threshold: float,
+    layers_filter: tuple[str, ...],
+    summarizer: str,
+    forget_sources: bool,
+) -> None:
+    """Merge similar memories, archive sources, write lineage back-pointers.
+
+    Sources are soft-deleted (archived + ``superseded_by`` set) by
+    default.  Pass ``--forget-sources`` to opt into hard deletion — only
+    do this once you have confirmed the audit trail is intact via
+    ``mnemos compact restore-source``.
+    """
+    from core.compaction import apply_merge_plan, compute_merge_plan
+    from core.similarity import group_similar
+
+    gw = _get_gateway()
+    items = _collect_compact_items(gw, layers_filter or None)
+    groups = group_similar(items, threshold=threshold)
+
+    if not groups:
+        click.echo(f"[mnemos] nothing to merge (threshold={threshold})")
+        return
+
+    applied = 0
+    for group in groups:
+        plan = compute_merge_plan(gw, group, summarizer=summarizer)
+        try:
+            result = apply_merge_plan(gw, plan)
+        except RuntimeError as exc:
+            click.echo(f"error: {exc}", err=True)
+            continue
+        applied += 1
+        click.echo(
+            f"merged: {result.merged_id} ← {', '.join(result.sources)} "
+            f"(layer={result.target_layer})"
+        )
+        if forget_sources:
+            for source_id in result.sources:
+                try:
+                    gw.delete(source_id)
+                except Exception as exc:
+                    click.echo(
+                        f"  warning: could not forget source {source_id}: {exc}",
+                        err=True,
+                    )
+
+    click.echo(f"[mnemos] applied {applied} merge(s)")
+
+
+@memory_compact.command("restore-source")
+@click.argument("source_id")
+def memory_compact_restore_source(source_id: str) -> None:
+    """Print the archived source content for SOURCE_ID (audit-trail walk).
+
+    The source's full front-matter is emitted as a YAML block followed
+    by the original markdown body.  Use this to verify that a merge's
+    lineage is reconstructable before opting into ``--forget-sources``.
+    """
+    from core.compaction import restore_source
+
+    gw = _get_gateway()
+    try:
+        snap = restore_source(gw, source_id)
+    except FileNotFoundError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    # Emit front-matter as YAML so the operator can grep stage /
+    # superseded_by directly.  ``yaml`` is already imported at module
+    # scope by other CLI helpers; reuse it instead of a local import.
+    meta = {k: v for k, v in snap.items() if k not in ("content", "_path")}
+    click.echo("---")
+    click.echo(yaml.safe_dump(meta, sort_keys=True).rstrip())
+    click.echo("---")
+    click.echo(snap.get("content", ""))
+
+
+@memory_compact.command("merge-candidates")
+@click.option(
+    "--threshold",
+    "threshold",
+    default=0.7,
+    type=float,
+    help="Jaccard similarity threshold (default: 0.7).",
+)
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.pass_context
+def memory_compact_merge_candidates(
+    ctx: click.Context,
+    threshold: float,
+    layers_filter: tuple[str, ...],
+) -> None:
+    """Alias for ``mnemos compact review --format=json`` (machine-readable).
+
+    Convenience entry point for tooling that wants to consume merge
+    candidates programmatically without parsing the text review output.
+    """
+    ctx.invoke(
+        memory_compact_review,
+        threshold=threshold,
+        layers_filter=layers_filter,
+        fmt="json",
     )
