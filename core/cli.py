@@ -3383,3 +3383,42 @@ def memory_compact_merge_candidates(
         layers_filter=layers_filter,
         fmt="json",
     )
+
+
+@cli.command("beta-run")
+@click.option("--days", default=14, type=int, help="Number of simulated days to run.")
+@click.option("--seed", default=42, type=int, help="RNG seed for a fully reproducible run.")
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    help="Write the report (markdown, or JSON with --json) to this path.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit the report as JSON.")
+def beta_run_cmd(days: int, seed: int, output_path: str | None, as_json: bool) -> None:
+    """Run the deterministic long-running beta validation harness (issue #82).
+
+    The harness simulates *days* of real-usage-like workflows over a virtual
+    clock against an isolated, real mnemos store and reports five deterministic
+    acceptance-criteria metrics: contextual continuity, retrieval relevance
+    stability, lifecycle-invariant consistency, and degradation + recovery.
+    """
+    import tempfile
+
+    from core.beta_harness import run_beta_validation
+
+    home = Path(tempfile.mkdtemp(prefix="mnemos-beta-"))
+
+    try:
+        report = run_beta_validation(days=days, seed=seed, home=home)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    rendered = report.to_json() if as_json else report.to_markdown()
+
+    if output_path:
+        Path(output_path).write_text(rendered, encoding="utf-8")
+        click.echo(f"[mnemos beta-run] report written: {output_path}")
+    else:
+        click.echo(rendered)
