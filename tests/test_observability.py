@@ -41,13 +41,22 @@ class TestObservabilityLoggerInit:
     def test_creates_log_file_on_init(self, obs_root):
         from core.observability import ObservabilityLogger
         logger = ObservabilityLogger(repo_root=str(obs_root))
-        assert (obs_root / "wiki" / "observability.jsonl").exists()
+        assert (obs_root / ".agent" / "observability.jsonl").exists()
+
+    def test_log_path_is_under_agent_not_wiki(self, obs_root):
+        """F1 (#77): the log must live under the gitignored .agent/ tree, never
+        under the git-synced wiki/ tree where it would be staged and pushed."""
+        from core.observability import ObservabilityLogger
+        logger = ObservabilityLogger(repo_root=str(obs_root))
+        assert logger._log_path == obs_root / ".agent" / "observability.jsonl"
+        assert "wiki" not in logger._log_path.parts
+        assert not (obs_root / "wiki" / "observability.jsonl").exists()
 
     def test_creates_parent_dirs_if_missing(self, tmp_path):
         from core.observability import ObservabilityLogger
-        # wiki dir does NOT exist yet
+        # .agent dir does NOT exist yet
         logger = ObservabilityLogger(repo_root=str(tmp_path))
-        assert (tmp_path / "wiki" / "observability.jsonl").exists()
+        assert (tmp_path / ".agent" / "observability.jsonl").exists()
 
 
 class TestLogCapture:
@@ -60,7 +69,7 @@ class TestLogCapture:
             agent="claude",
         )
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         assert len(lines) >= 1
         entry = json.loads(lines[-1])
         assert entry["event"] == "capture"
@@ -74,7 +83,7 @@ class TestLogCapture:
     def test_capture_defaults(self, obs, obs_root):
         obs.log_capture(memory_id="xyz", layer="global")
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["tags"] == []
         assert entry["session_id"] == ""
@@ -90,7 +99,7 @@ class TestLogSearch:
             session_id="sess-2",
         )
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["event"] == "search"
         assert entry["keywords"] == ["mnemos", "memory"]
@@ -105,7 +114,7 @@ class TestLogSearch:
             session_id="sess-3",
         )
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["event"] == "hook_search"
         assert entry["result_count"] == 0
@@ -115,7 +124,7 @@ class TestLogGC:
     def test_gc_event_is_written(self, obs, obs_root):
         obs.log_gc(archived_count=5, dry_run=False, layers=["ephemeral"])
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["event"] == "gc"
         assert entry["archived_count"] == 5
@@ -125,7 +134,7 @@ class TestLogGC:
     def test_gc_dry_run_event(self, obs, obs_root):
         obs.log_gc(archived_count=0, dry_run=True)
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["dry_run"] is True
 
@@ -138,7 +147,7 @@ class TestLogPromotion:
             to_layer="project",
         )
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["event"] == "promotion"
         assert entry["memory_id"] == "mem-promo"
@@ -154,7 +163,7 @@ class TestLogSessionStart:
             memory_count=12,
         )
         _wait_for_writes(obs)
-        lines = (obs_root / "wiki" / "observability.jsonl").read_text().splitlines()
+        lines = (obs_root / ".agent" / "observability.jsonl").read_text().splitlines()
         entry = json.loads(lines[-1])
         assert entry["event"] == "hook_session_start"
         assert entry["memory_count"] == 12
@@ -164,7 +173,7 @@ class TestLogSessionStart:
 class TestReadEntries:
     def _seed(self, obs, obs_root, n_entries: int = 5) -> None:
         """Write n_entries to the log synchronously (not async)."""
-        log_path = obs_root / "wiki" / "observability.jsonl"
+        log_path = obs_root / ".agent" / "observability.jsonl"
         for i in range(n_entries):
             entry = {
                 "ts": f"2026-05-{16 + (i % 3):02d}T10:00:00Z",
@@ -209,7 +218,7 @@ class TestReadEntries:
 class TestAggregateStats:
     def _seed_stats(self, obs_root) -> None:
         """Write known entries for stats aggregation testing."""
-        log_path = obs_root / "wiki" / "observability.jsonl"
+        log_path = obs_root / ".agent" / "observability.jsonl"
         entries = [
             {"ts": "2026-05-14T10:00:00Z", "event": "capture", "agent": "claude",
              "session_id": "s1", "layer": "project", "memory_id": "m1", "tags": []},
@@ -282,7 +291,7 @@ class TestBriefStats:
 
     def test_brief_stats_non_empty_with_data(self, obs, obs_root):
         # Seed one capture
-        log_path = obs_root / "wiki" / "observability.jsonl"
+        log_path = obs_root / ".agent" / "observability.jsonl"
         entry = {"ts": "2026-05-15T10:00:00Z", "event": "capture", "agent": "claude",
                  "session_id": "s1", "layer": "project", "memory_id": "m1", "tags": []}
         with log_path.open("a") as f:
@@ -345,7 +354,7 @@ class TestGatewayIntegration:
         gw = MemoryGateway(repo_root=str(repo_root))
         gw.capture(layer="global", content="observability test", run_id="run-obs")
         _wait_for_writes(gw.observability)
-        obs_path = repo_root / "wiki" / "observability.jsonl"
+        obs_path = repo_root / ".agent" / "observability.jsonl"
         assert obs_path.exists()
         lines = [l for l in obs_path.read_text().splitlines() if l.strip()]
         assert len(lines) >= 1
@@ -358,7 +367,7 @@ class TestGatewayIntegration:
         gw.capture(layer="global", content="searchable unique token xyz", run_id="run-obs")
         gw.search("searchable unique token xyz")
         _wait_for_writes(gw.observability)
-        obs_path = repo_root / "wiki" / "observability.jsonl"
+        obs_path = repo_root / ".agent" / "observability.jsonl"
         lines = [l for l in obs_path.read_text().splitlines() if l.strip()]
         events = [json.loads(l)["event"] for l in lines]
         assert "search" in events
@@ -369,7 +378,7 @@ class TestGatewayIntegration:
         item_id = gw.capture(layer="project", content="to be promoted obs test", run_id="run-obs")
         gw.promote(item_id=item_id, run_id="run-obs")
         _wait_for_writes(gw.observability)
-        obs_path = repo_root / "wiki" / "observability.jsonl"
+        obs_path = repo_root / ".agent" / "observability.jsonl"
         lines = [l for l in obs_path.read_text().splitlines() if l.strip()]
         events = [json.loads(l)["event"] for l in lines]
         assert "promotion" in events

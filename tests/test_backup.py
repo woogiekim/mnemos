@@ -372,6 +372,30 @@ class TestExclusionsAndHardening:
         assert all(not n.startswith(".agent/") for n in names), names
         assert all(".agent/" not in n for n in names), names
 
+    def test_observability_log_excluded(self, tmp_path):
+        """F1 (#77): the observability log now lives under ``.agent/`` and is
+        not a memory item, so it must never appear in a backup archive (the
+        backup only snapshots ``wiki/<layer>/*.md`` entries)."""
+        from core.backup import make_backup
+
+        src = _bootstrap_repo(tmp_path / "src")
+        # A real memory item so the archive is non-empty.
+        _write_item(src, layer="topics", item_id="topic-1", content="body",
+                    metadata={"tag": [], "layer": "topics", "trust_level": "verified",
+                              "quality_score": 0.5, "lifecycle_action": "stored",
+                              "created_at": "2026-05-29T07:35:00Z"})
+        # The relocated observability log under .agent/.
+        obs_log = src / ".agent" / "observability.jsonl"
+        obs_log.parent.mkdir(parents=True, exist_ok=True)
+        obs_log.write_text('{"event": "search", "keywords": ["sensitive"]}\n', encoding="utf-8")
+
+        archive = tmp_path / "obs-exclude.tar.gz"
+        make_backup(src, archive)
+
+        with tarfile.open(archive, "r:gz") as tar:
+            names = tar.getnames()
+        assert all("observability.jsonl" not in n for n in names), names
+
     def test_path_traversal_rejection(self, tmp_path):
         """A malicious tarball entry whose resolved path escapes the
         destination repo root must be rejected by ``restore_backup``."""

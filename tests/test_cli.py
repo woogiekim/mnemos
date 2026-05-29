@@ -1106,8 +1106,8 @@ class TestAuditLimitAlias:
         import json as _json
         from datetime import datetime, timezone
 
-        # Observability log lives at wiki/observability.jsonl (MemoryGateway path).
-        obs_path = repo_root / "wiki" / "observability.jsonl"
+        # Observability log lives at .agent/observability.jsonl (MemoryGateway path).
+        obs_path = repo_root / ".agent" / "observability.jsonl"
         obs_path.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for i in range(count):
@@ -1183,7 +1183,7 @@ class TestLogDualMode:
         """Write synthetic observability.jsonl entries to the test repo."""
         import json as _json
 
-        obs_path = repo_root / "wiki" / "observability.jsonl"
+        obs_path = repo_root / ".agent" / "observability.jsonl"
         obs_path.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for i in range(count):

@@ -46,7 +46,7 @@ class FakePolicy:
 
 class FakeObservability:
     def __init__(self, root: Path) -> None:
-        self._log_path = root / "wiki" / "observability.jsonl"
+        self._log_path = root / ".agent" / "observability.jsonl"
         self.entries: list[dict[str, Any]] = []
         self.stats_payload: dict[str, Any] = {
             "captures_by_layer": {},

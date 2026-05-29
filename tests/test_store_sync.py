@@ -333,6 +333,34 @@ def test_sync_commit_clean_tree_returns_false(repo_local_only: Path) -> None:
     assert store.sync_commit() is False  # nothing pending under wiki/
 
 
+def test_sync_commit_never_stages_observability_log(repo_local_only: Path) -> None:
+    """F1 (#77): the observability log lives under .agent/ and must never be
+    staged or committed by sync_commit, which only stages the wiki/ sub-tree."""
+    from core.observability import ObservabilityLogger
+
+    store = MemoryStore(repo_root=str(repo_local_only), sync_config=_sync_config())
+    # The logger writes to .agent/observability.jsonl (outside wiki/).
+    obs = ObservabilityLogger(repo_root=str(repo_local_only))
+    obs_path = repo_local_only / ".agent" / "observability.jsonl"
+    obs_path.write_text('{"event": "search", "keywords": ["secret query"]}\n', encoding="utf-8")
+    assert obs_path.exists()  # precondition: the live log target
+
+    # A real wiki write so sync_commit actually produces a commit.
+    wiki_proj = repo_local_only / "wiki" / "projects"
+    wiki_proj.mkdir(parents=True, exist_ok=True)
+    (wiki_proj / "note.md").write_text("note\n", encoding="utf-8")
+
+    assert store.sync_commit(message="wiki note") is True
+
+    # The committed tree contains the wiki note but never the observability log.
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=str(repo_local_only), capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert "wiki/projects/note.md" in tracked
+    assert not any("observability.jsonl" in t for t in tracked)
+    assert ".agent/observability.jsonl" not in tracked
+
+
 def test_sync_push_with_remote(repo_with_remote: Path) -> None:
     store = MemoryStore(repo_root=str(repo_with_remote), sync_config=_sync_config())
     # Create a local wiki commit, then push.

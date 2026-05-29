@@ -106,7 +106,7 @@ def test_context_helpers_and_retrieval_edge_paths(
     assert context.render_promotion_block(repo_root=None) == ""
     assert context.render_promotion_block(repo_root=str(tmp_path / "missing-root")) == ""
 
-    promo_log = tmp_path / "wiki" / "observability.jsonl"
+    promo_log = tmp_path / ".agent" / "observability.jsonl"
     promo_log.parent.mkdir(parents=True)
     promo_log.write_text(
         "\n".join(
