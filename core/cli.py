@@ -3063,6 +3063,136 @@ def memory_inspect(
 
 
 # ---------------------------------------------------------------------------
+# ui — unified inspection UI desktop app (issue #83)
+# ---------------------------------------------------------------------------
+@cli.command("ui")
+@click.option(
+    "--output",
+    "output",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Write the unified HTML to PATH instead of launching the desktop "
+    "window (headless/CI; never imports pywebview).",
+)
+@click.option(
+    "--layer",
+    "layers",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--limit",
+    "limit",
+    default=None,
+    type=int,
+    help="Cap the number of source memory items.",
+)
+@click.option(
+    "--preview-width",
+    "preview_width",
+    default=240,
+    type=int,
+    help="Character cap for the drill-down content preview (default: 240).",
+)
+@click.option(
+    "--full",
+    "full",
+    is_flag=True,
+    default=False,
+    help="Embed full memory content in drill-down (overrides --preview-width).",
+)
+@click.option(
+    "--max-edges-per-node",
+    "max_edges_per_node",
+    default=8,
+    type=int,
+    help="Keep at most this many incident graph edges per node (default: 8). "
+    "Tames the 49-node/~33k-edge hairball; <=0 disables the cap.",
+)
+@click.option(
+    "--edge-weight-threshold",
+    "edge_weight_threshold",
+    default=0.0,
+    type=float,
+    help="Drop graph edges with weight below this value before capping "
+    "(default: 0.0 — keep all).",
+)
+def memory_ui(
+    output: str | None,
+    layers: tuple[str, ...],
+    limit: int | None,
+    preview_width: int,
+    full: bool,
+    max_edges_per_node: int,
+    edge_weight_threshold: float,
+) -> None:
+    """Launch the unified inspection UI as a native desktop app (issue #83).
+
+    Combines the domain-relationship graph (#68), the raw-memory inspect surface
+    (#80), and a policy-cohesion panel into one self-contained static-HTML
+    surface hosted in a native pywebview window. The window requires the
+    optional ``[ui]`` extra (``pip install 'mnemos[ui]'``).
+
+    With ``--output PATH`` the same HTML is written to a file without opening a
+    window (headless/CI) — that path never imports pywebview. Source items are
+    walked exactly like ``mnemos inspect`` (raw single-store walk).
+    """
+    from core.layers import LAYER_STATIC_PATHS
+    from core.unifiedview import (
+        PywebviewNotInstalled,
+        build_unified_payload,
+        launch_app,
+        render_html,
+        write_unified_html,
+    )
+
+    gw = _get_gateway()
+
+    static_layers = list(LAYER_STATIC_PATHS.keys())
+    dynamic_layers = ["ephemeral", "working", "session"]
+    all_layers = static_layers + dynamic_layers
+    if layers:
+        all_layers = [l for l in all_layers if l in layers]
+
+    items: list[dict] = []
+    for layer in all_layers:
+        if limit is not None and len(items) >= limit:
+            break
+        for item in gw._store.iter_layer_items(layer):
+            if limit is not None and len(items) >= limit:
+                break
+            items.append(item)
+
+    if output is not None:
+        written = write_unified_html(
+            items,
+            Path(output),
+            gw._policy,
+            preview_width=preview_width,
+            full=full,
+            max_edges_per_node=max_edges_per_node,
+            edge_weight_threshold=edge_weight_threshold,
+        )
+        click.echo(f"[mnemos] wrote {written}")
+        return
+
+    payload = build_unified_payload(
+        items,
+        gw._policy,
+        preview_width=preview_width,
+        full=full,
+        max_edges_per_node=max_edges_per_node,
+        edge_weight_threshold=edge_weight_threshold,
+    )
+    html = render_html(payload)
+    try:
+        launch_app(html, title="mnemos UI")
+    except PywebviewNotInstalled as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # backup / restore — explicit archive snapshots (issue #75)
 # ---------------------------------------------------------------------------
 @cli.command("backup")
