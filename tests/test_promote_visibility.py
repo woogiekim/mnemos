@@ -371,16 +371,16 @@ def _run_hook(
 class TestHookPromotionBlockInjection:
     """Tests for <mnemos-promotion> block injection in UserPromptSubmit.sh.
 
-    The hook reads from the observability log (wiki/observability.jsonl) and
+    The hook reads from the observability log (.agent/observability.jsonl) and
     filters entries with event == "promotion" that are newer than the cursor.
     The cursor path is ~/.mnemos/.cache/promotion-cursor.txt (or MNEMOS_PROMO_CURSOR).
     """
 
     def _make_repo_with_promotions(self, tmp_path, entries):
-        """Write a minimal repo with wiki/observability.jsonl containing given entries."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir(parents=True, exist_ok=True)
-        obs_log = wiki / "observability.jsonl"
+        """Write a minimal repo with .agent/observability.jsonl containing given entries."""
+        agent_dir = tmp_path / ".agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        obs_log = agent_dir / "observability.jsonl"
         obs_log.write_text("\n".join(json.dumps(e) for e in entries) + "\n" if entries else "")
         return obs_log
 
@@ -408,9 +408,9 @@ class TestHookPromotionBlockInjection:
 
     def test_hook_omits_promotion_block_when_no_promotions(self, tmp_path):
         """When there are no new promotions, the hook must NOT emit <mnemos-promotion>."""
-        wiki = tmp_path / "wiki"
-        wiki.mkdir(parents=True)
-        (wiki / "observability.jsonl").write_text("")
+        agent_dir = tmp_path / ".agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "observability.jsonl").write_text("")
 
         cache_dir = tmp_path / ".mnemos" / ".cache"
         cache_dir.mkdir(parents=True)
