@@ -275,6 +275,15 @@ Install with vector extras:
 pip install -e ".[vector]"
 ```
 
+## Remote sync
+
+mnemos ships a git-backed remote sync layer that keeps the wiki tree in lockstep
+with a single remote git repository (`mnemos sync init --remote <url>`, pull on
+capture, commit on write, push after commit, manual `mnemos sync continue` on
+conflict).  See the [remote sync operator guide](docs/remote-sync.md) for
+setup, the normal pull → commit → push flow, the conflict resolution path,
+backup hand-off (tracked in #75), and known limits.
+
 ## Wiki Repo Structure
 
 After running `./install.sh` (or `mnemos install .`):
