@@ -78,6 +78,15 @@ restore` of an older archive is always a breaking change.
   - Operator guide:
     [docs/memory-compaction.md](docs/memory-compaction.md).
 
+### Fixed
+
+- `mnemos ui` desktop window now renders the actual UI instead of raw JSON for
+  real stores ([#83](https://github.com/woogiekim/mnemos/issues/83)):
+  `core/unifiedview.py:launch_app` writes the rendered HTML to a temporary
+  `.html` file and loads it via a `file://` URL rather than passing the
+  ~1.7MB string inline as `html=` (WKWebView/pywebview cannot reliably render
+  inline HTML that large). The headless `--output` path is unaffected.
+
 ## [0.1.0] - 2026-05-29
 
 Baseline release summarizing the surface shipped to date. mnemos distributes
