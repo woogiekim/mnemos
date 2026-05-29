@@ -17,6 +17,10 @@ persistent intelligence:
 
 ## Quick Start
 
+> **Requirements.** Requires Python 3.11+ (developed and tested on 3.12). See
+> [Supported Python versions & enforcement](docs/release-workflow.md#supported-python-versions--enforcement)
+> for the full version policy.
+
 ### Option A — One-line remote install (recommended)
 
 ```bash

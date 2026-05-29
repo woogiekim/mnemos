@@ -96,6 +96,34 @@ mnemos is currently `0.1.0`. Two regimes apply:
   provider contract, the archive format, and the host-adapter contracts are
   stable enough to defend with MAJOR bumps.
 
+### Supported Python versions & enforcement
+
+Consistent with the **Runtime floor** row in the matrix above
+(`requires-python = ">=3.11"`):
+
+- **Floor:** Python **3.11** — the minimum supported version.
+- **Verified:** Python **3.12** — the version mnemos is developed and tested on
+  (the local `.venv` is 3.12). 3.11 is the declared floor but is not exercised
+  by an automated matrix.
+- **Not advertised:** 3.9, 3.10, and 3.13 are **not** claimed as supported.
+  3.9/3.10 fall below the floor; 3.13 is untested, so it is deliberately omitted
+  from the trove classifiers rather than advertised speculatively.
+
+**Enforcement is local, not CI.** There is no CI workflow: the dev-CI sub-issue
+(#71) was intentionally cancelled in favor of the memory-sync track. The version
+policy is therefore enforced locally by two mechanisms:
+
+1. `requires-python = ">=3.11"` in [`pyproject.toml`](../pyproject.toml) — install
+   floor, refusing environments below 3.11.
+2. The **test gate** (`source .venv/bin/activate && python -m pytest`) — runs at
+   100% coverage (`--cov-fail-under=100`) with warnings-as-errors
+   (`filterwarnings = ["error"]`) on the 3.12 `.venv`.
+
+The `Programming Language :: Python :: 3.11` / `:: 3.12` trove classifiers in
+`pyproject.toml` mirror this policy. **If a CI matrix is added later, it MUST be
+`[3.11, 3.12]`** to match the declared floor and the verified version — never
+broaden it to claim an untested version.
+
 ---
 
 ## 2. Release workflow (AC2)
