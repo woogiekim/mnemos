@@ -96,14 +96,14 @@ def _cap_edges_by_node(
     1. **Threshold filter** — drop every edge whose ``weight`` is strictly below
        *edge_weight_threshold*. ``total_edges`` counts the survivors of this
        stage (post-threshold, pre-cap).
-    2. **Per-node top-N cap** — keep, for each node, its top *max_edges_per_node*
-       incident edges by DESCENDING weight. An edge survives if it is in the
-       top-N of EITHER endpoint, so the resulting per-endpoint degree never
-       exceeds *max_edges_per_node* by construction. ``shown_edges`` counts the
-       union of survivors.
+    2. **Per-node top-N cap** — greedily keep edges in DESCENDING weight order,
+       admitting an edge only while NEITHER endpoint has already reached its
+       *max_edges_per_node* incident-edge budget. This guarantees every node's
+       degree in the result is ``<= max_edges_per_node`` while preferring the
+       heaviest edges. ``shown_edges`` counts the admitted edges.
 
     A non-positive *max_edges_per_node* disables the cap (all post-threshold
-    edges are shown).
+    edges are shown). Original input order is preserved in the returned list.
     """
     # Work on a shallow copy of the list; each edge dict is read-only here.
     pool = [dict(edge) for edge in relationships]
@@ -118,24 +118,26 @@ def _cap_edges_by_node(
     if max_edges_per_node is None or max_edges_per_node <= 0:
         return survivors, total_edges, total_edges
 
-    # Rank each node's incident edges by descending weight, then keep the
-    # top-N indices per node. An edge is shown if it ranks in the top-N of
-    # either endpoint.
-    incident: dict[str, list[tuple[float, int]]] = {}
-    for idx, edge in enumerate(survivors):
-        weight = float(edge.get("weight", 0.0))
-        for node in (edge.get("source_id"), edge.get("target_id")):
-            if node is None:
-                continue
-            incident.setdefault(node, []).append((weight, idx))
+    # Greedy admission by descending weight. Sort indices (not the edges) by
+    # weight so the original list order can be restored at the end; ties keep
+    # their original relative order for deterministic output.
+    order = sorted(
+        range(len(survivors)),
+        key=lambda i: float(survivors[i].get("weight", 0.0)),
+        reverse=True,
+    )
 
+    degree: dict[str, int] = {}
     keep_indices: set[int] = set()
-    for ranked in incident.values():
-        # Stable sort: highest weight first; ties preserve original order so the
-        # cap is deterministic across runs.
-        ranked_sorted = sorted(ranked, key=lambda wi: wi[0], reverse=True)
-        for _weight, idx in ranked_sorted[:max_edges_per_node]:
-            keep_indices.add(idx)
+    for i in order:
+        edge = survivors[i]
+        endpoints = [n for n in (edge.get("source_id"), edge.get("target_id")) if n is not None]
+        # Admit only if every endpoint still has budget; a self-loop (single
+        # distinct endpoint) is admitted while that node has budget.
+        if all(degree.get(n, 0) < max_edges_per_node for n in endpoints):
+            keep_indices.add(i)
+            for n in endpoints:
+                degree[n] = degree.get(n, 0) + 1
 
     shown = [survivors[idx] for idx in sorted(keep_indices)]
     return shown, total_edges, len(shown)
