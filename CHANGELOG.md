@@ -18,6 +18,31 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Final-memory distillation — persist derived domains + aggregated policies as
+  managed, durable artifacts ([#84](https://github.com/woogiekim/mnemos/issues/84)):
+  - `core/distill.py` — the persistence/management layer that #67's read-only
+    cohesion derivation lacks. Pure planners `compute_domain_plan` /
+    `compute_policy_plan` build would-be artifacts; `apply_domain_plan` /
+    `apply_policy_plan` persist them via `gateway.capture` with additive
+    `artifact_kind` / `sources` / `distillation_method` / `cohesion_schema_version`
+    front-matter, deterministic `uuid5` ids, and skip-if-exists idempotency.
+    Lineage is non-destructive and bidirectional: the artifact carries `sources`
+    and each source gains an append-only `distilled_into` back-link — sources are
+    never archived or superseded (the deliberate difference from #81
+    `superseded_by`). The artifact layer is derived via `derive_merged_layer`
+    (PolicyEngine), never hard-coded; a feedback-loop guard excludes prior
+    artifacts from the source pool so re-runs converge. No LLM dependency in the
+    default path. Reuses `derive_merged_layer` + the `_GatewayLike`/`_PolicyLike`
+    protocols from `core/compaction.py` — no public API change to
+    cohesion/gateway/store/policy/backup, and `backup.SCHEMA_VERSION` stays `1`.
+  - `mnemos distill` CLI group — `domains review|apply`, `policies review|apply`,
+    `cohesion` (text + `--format json`, the first standalone exposure of
+    `aggregate_policy_cohesion`), and `restore-source`. `review` is a dry-run
+    (writes nothing); `apply` echoes `distilled: <id> ← <n> sources (layer=...)`
+    and is idempotent. New fields round-trip through git-sync (#69/#79) and
+    backup/restore (#75) — round-trip tests included.
+  - Operator guide [docs/final-memory-distillation.md](docs/final-memory-distillation.md);
+    cross-linked from the #81, #83, and #68 docs (not duplicated).
 - Unified inspection UI as a native desktop app via `mnemos ui`
   ([#83](https://github.com/woogiekim/mnemos/issues/83)):
   - `core/unifiedview.py` — one self-contained static-HTML surface combining

@@ -3515,6 +3515,264 @@ def memory_compact_merge_candidates(
     )
 
 
+# --------------------------------------------------------------------------- #
+# distill — persist derived domains + aggregated policies as final memory (#84)
+# --------------------------------------------------------------------------- #
+@cli.group("distill")
+def memory_distill() -> None:
+    """Persist derived domains / aggregated policies as durable final memory.
+
+    See ``docs/final-memory-distillation.md`` for the operator guide
+    (distill vs derive #67 vs compact #81, the non-destructive
+    ``distilled_into`` lineage model, idempotency/determinism, and
+    sync/backup safety).
+    """
+
+
+@memory_distill.group("domains")
+def memory_distill_domains() -> None:
+    """Distill cohesion-derived domains into managed final-memory artifacts."""
+
+
+@memory_distill.group("policies")
+def memory_distill_policies() -> None:
+    """Distill aggregated policy themes into managed final-memory artifacts."""
+
+
+def _distill_layer_filter(layers_filter: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Normalize the repeatable ``--layer`` option into a planner argument."""
+    return layers_filter or None
+
+
+def _echo_distill_plan(plan) -> None:
+    """Print one would-be artifact in review (dry-run) text form."""
+    flag = " (exists — apply would skip)" if plan.existing else ""
+    click.echo("")
+    click.echo(f"## {plan.kind}: {plan.label} → {plan.artifact_id}{flag}")
+    click.echo(f"   layer:   {plan.layer}")
+    click.echo(f"   sources: {', '.join(plan.sources)}")
+    click.echo("   --- proposed artifact content ---")
+    for line in plan.content.splitlines():
+        click.echo(f"   {line}")
+
+
+def _distill_plan_json(plan) -> dict:
+    """Return the machine-readable form of a would-be artifact."""
+    return {
+        "kind": plan.kind,
+        "artifact_id": plan.artifact_id,
+        "label": plan.label,
+        "layer": plan.layer,
+        "sources": list(plan.sources),
+        "method": plan.method,
+        "exists": plan.existing,
+        "content": plan.content,
+    }
+
+
+@memory_distill_domains.command("review")
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text).",
+)
+def memory_distill_domains_review(layers_filter: tuple[str, ...], fmt: str) -> None:
+    """Show would-be domain artifacts WITHOUT writing (dry-run gate)."""
+    from core.distill import compute_domain_plan
+
+    gw = _get_gateway()
+    plans = compute_domain_plan(gw, layers=_distill_layer_filter(layers_filter))
+
+    if fmt == "json":
+        _echo_json({"plans": [_distill_plan_json(p) for p in plans]})
+        return
+
+    if not plans:
+        click.echo("[mnemos] no domains to distill")
+        return
+
+    click.echo(f"[mnemos] {len(plans)} domain artifact(s) would be created")
+    for plan in plans:
+        _echo_distill_plan(plan)
+
+
+@memory_distill_domains.command("apply")
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+def memory_distill_domains_apply(layers_filter: tuple[str, ...]) -> None:
+    """Persist domain artifacts + append non-destructive ``distilled_into`` links."""
+    from core.distill import apply_domain_plan, compute_domain_plan
+
+    gw = _get_gateway()
+    plans = compute_domain_plan(gw, layers=_distill_layer_filter(layers_filter))
+
+    if not plans:
+        click.echo("[mnemos] nothing to distill")
+        return
+
+    applied = 0
+    for plan in plans:
+        result = apply_domain_plan(gw, plan)
+        if not result.applied:
+            click.echo(f"distilled: {result.artifact_id} (exists — skipped)")
+            continue
+        applied += 1
+        click.echo(
+            f"distilled: {result.artifact_id} ← {len(result.sources)} sources "
+            f"(layer={result.layer})"
+        )
+
+    click.echo(f"[mnemos] applied {applied} domain distillation(s)")
+
+
+@memory_distill_policies.command("review")
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text).",
+)
+def memory_distill_policies_review(layers_filter: tuple[str, ...], fmt: str) -> None:
+    """Show would-be policy artifacts WITHOUT writing (dry-run gate)."""
+    from core.distill import compute_policy_plan
+
+    gw = _get_gateway()
+    plans = compute_policy_plan(gw, layers=_distill_layer_filter(layers_filter))
+
+    if fmt == "json":
+        _echo_json({"plans": [_distill_plan_json(p) for p in plans]})
+        return
+
+    if not plans:
+        click.echo("[mnemos] no policies to distill")
+        return
+
+    click.echo(f"[mnemos] {len(plans)} policy artifact(s) would be created")
+    for plan in plans:
+        _echo_distill_plan(plan)
+
+
+@memory_distill_policies.command("apply")
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+def memory_distill_policies_apply(layers_filter: tuple[str, ...]) -> None:
+    """Persist policy artifacts + append non-destructive ``distilled_into`` links."""
+    from core.distill import apply_policy_plan, compute_policy_plan
+
+    gw = _get_gateway()
+    plans = compute_policy_plan(gw, layers=_distill_layer_filter(layers_filter))
+
+    if not plans:
+        click.echo("[mnemos] nothing to distill")
+        return
+
+    applied = 0
+    for plan in plans:
+        result = apply_policy_plan(gw, plan)
+        if not result.applied:
+            click.echo(f"distilled: {result.artifact_id} (exists — skipped)")
+            continue
+        applied += 1
+        click.echo(
+            f"distilled: {result.artifact_id} ← {len(result.sources)} sources "
+            f"(layer={result.layer})"
+        )
+
+    click.echo(f"[mnemos] applied {applied} policy distillation(s)")
+
+
+@memory_distill.command("cohesion")
+@click.option(
+    "--layer",
+    "layers_filter",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text).",
+)
+def memory_distill_cohesion(layers_filter: tuple[str, ...], fmt: str) -> None:
+    """Print aggregated policy cohesion (read-only; writes nothing).
+
+    Standalone CLI exposure of :func:`core.cohesion.aggregate_policy_cohesion`,
+    which previously had no direct command surface.
+    """
+    from core.cohesion import aggregate_policy_cohesion
+    from core.distill import collect_source_items
+
+    gw = _get_gateway()
+    items = collect_source_items(gw, _distill_layer_filter(layers_filter))
+    clusters = aggregate_policy_cohesion(items, gw._policy)
+
+    if fmt == "json":
+        _echo_json({"cohesion": [c.to_dict() for c in clusters]})
+        return
+
+    if not clusters:
+        click.echo("[mnemos] no policy cohesion themes")
+        return
+
+    click.echo(f"[mnemos] {len(clusters)} policy cohesion theme(s)")
+    for cluster in clusters:
+        click.echo("")
+        click.echo(f"## {cluster.theme} (recurrence={cluster.recurrence})")
+        click.echo(f"   layers:          {', '.join(cluster.layers) or '(none)'}")
+        click.echo(f"   suggested_layer: {cluster.suggested_layer or '(none)'}")
+        click.echo(f"   members:         {', '.join(cluster.member_ids)}")
+
+
+@memory_distill.command("restore-source")
+@click.argument("source_id")
+def memory_distill_restore_source(source_id: str) -> None:
+    """Print SOURCE_ID's content + its ``distilled_into`` back-pointers.
+
+    The source's full front-matter is emitted as a YAML block followed by the
+    original markdown body — the audit-trail walk from a source to the
+    artifacts it contributed to.
+    """
+    from core.distill import restore_distilled_source
+
+    gw = _get_gateway()
+    try:
+        snap = restore_distilled_source(gw, source_id)
+    except FileNotFoundError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    meta = {k: v for k, v in snap.items() if k not in ("content", "_path")}
+    click.echo("---")
+    click.echo(yaml.safe_dump(meta, sort_keys=True).rstrip())
+    click.echo("---")
+    click.echo(snap.get("content", ""))
+
+
 @cli.command("beta-run")
 @click.option("--days", default=14, type=int, help="Number of simulated days to run.")
 @click.option("--seed", default=42, type=int, help="RNG seed for a fully reproducible run.")
