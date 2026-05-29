@@ -3,7 +3,11 @@
 Records every hook invocation, capture, search, GC, and promotion event so that
 users can verify how AI agents (Claude and others) actually use the memory system.
 
-Log file location: {repo_root}/wiki/observability.jsonl
+Log file location: {repo_root}/.agent/observability.jsonl
+
+The log lives under the gitignored ``.agent/`` tree (not ``wiki/``) so its raw
+search keywords are never staged by the git-sync wiki filter or pushed to a
+remote (issue #77, Finding F1).
 
 Schema (one JSON object per line):
     {
@@ -40,7 +44,7 @@ from typing import Any
 
 
 class ObservabilityLogger:
-    """Thread-safe append-only logger to wiki/observability.jsonl.
+    """Thread-safe append-only logger to .agent/observability.jsonl.
 
     All public methods are fire-and-forget: they enqueue a write to a
     background thread so callers (hooks, gateway) never block on disk I/O.
@@ -48,7 +52,10 @@ class ObservabilityLogger:
 
     def __init__(self, repo_root: str) -> None:
         self._root = Path(repo_root)
-        self._log_path = self._root / "wiki" / "observability.jsonl"
+        # The observability log lives under the gitignored ``.agent/`` tree, not
+        # ``wiki/`` — keeping it out of the git-synced sub-tree so raw search
+        # keywords are never staged or pushed to a remote (issue #77, F1).
+        self._log_path = self._root / ".agent" / "observability.jsonl"
         self._lock = threading.Lock()
         self._ensure_log_file()
 

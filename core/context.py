@@ -487,7 +487,7 @@ def render_promotion_block(*, repo_root: str | None) -> str:
     if not repo_root:
         return ""
 
-    obs_log = Path(repo_root) / "wiki" / "observability.jsonl"
+    obs_log = Path(repo_root) / ".agent" / "observability.jsonl"
     if not obs_log.exists():
         return ""
 
