@@ -51,9 +51,19 @@ from core.gateway import MemoryGateway
 # Issue #69 sync helpers — IMPORTED, never re-implemented (handoff AC4 rule).
 from tests.test_store_sync import (
     _commit_count,
-    _init_repo_with_main,
-    _make_bare,
     _sync_config,
+)
+
+# Issue #24 sync-e2e CLONE plumbing — IMPORTED, never re-implemented. AC4 needs
+# two machines that share ONE history (so pull/push fast-forward cleanly); an
+# independent ``git init`` per machine produces two unrelated root histories
+# that cannot coexist on one ``main`` (non-fast-forward). ``_init_bare_with_main``
+# seeds the shared remote once; ``_clone`` gives each machine a working copy of
+# that single history.
+from tests.test_sync_e2e import (
+    _clone,
+    _init_bare_with_main,
+    _make_bare,
 )
 
 
@@ -459,12 +469,16 @@ def test_memory_lifecycle_is_identical_regardless_of_installed_host_blocks(tmp_p
 def test_memory_syncs_across_machines_with_different_host_blocks(tmp_path, monkeypatch):
     """A claude-block machine's captured memory round-trips byte-for-byte to a cursor-block machine.
 
-    Reuses the #69 ``MemoryStore`` sync helpers (``_make_bare``,
-    ``_init_repo_with_main``, ``_sync_config``) — the bare-repo plumbing is NOT
-    re-implemented here. Machine A installs the CLAUDE block; machine B installs
-    the CURSOR block; both share one bare remote. The proof is that the project
-    (wiki) item written on A is identical when read on B after a pull — sync is
-    host-independent.
+    Reuses the #69 ``MemoryStore`` sync config (``_sync_config``) and the #24
+    sync-e2e CLONE plumbing (``_make_bare``, ``_init_bare_with_main``,
+    ``_clone``) — no bare-repo plumbing is re-implemented here. Both machines are
+    CLONES of one shared bare remote, so they share a single git history and
+    pull/push fast-forward cleanly. (An independent ``git init`` per machine —
+    the prior approach — produced two unrelated root histories that cannot
+    coexist on one ``main`` and is therefore order/isolation-fragile.) Machine A
+    installs the CLAUDE block; machine B installs the CURSOR block. The proof is
+    that the project (wiki) item written on A is identical when read on B after a
+    pull — sync is host-independent.
     """
     from core.store import MemoryStore
 
@@ -473,12 +487,14 @@ def test_memory_syncs_across_machines_with_different_host_blocks(tmp_path, monke
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir(parents=True, exist_ok=True)
 
-    # given a shared bare remote and two working clones (machines A and B)
+    # given a shared bare remote seeded once with a single root history, and two
+    # working clones of that SAME history (machines A and B). Cloning — not an
+    # independent init per machine — is what makes the round-trip fast-forward
+    # cleanly and order-independent.
     bare = _make_bare(tmp_path / "bare.git")
-    machine_a = tmp_path / "machine_a"
-    _init_repo_with_main(machine_a, bare=bare)
-    machine_b = tmp_path / "machine_b"
-    _init_repo_with_main(machine_b, bare=bare)
+    _init_bare_with_main(bare, tmp_path / "seed_parent")
+    machine_a = _clone(bare, tmp_path / "machine_a")
+    machine_b = _clone(bare, tmp_path / "machine_b")
 
     # and each machine has a DIFFERENT host adapter block installed in its home
     home_a = tmp_path / "home_a"
