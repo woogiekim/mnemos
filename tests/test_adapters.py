@@ -19,6 +19,9 @@ from core.adapters.cursor import CURSOR_RULES_BLOCK
 # Helpers
 # ---------------------------------------------------------------------------
 
+# safe_repo_root: shared fixture defined in tests/conftest.py (Issue #70).
+
+
 def _make_claude_home(tmp_path: Path) -> Path:
     """Create a fake home with ~/.claude directory and minimal files."""
     home = tmp_path / "home"
@@ -94,7 +97,7 @@ class TestCursorAdapterIsPresent:
 # ---------------------------------------------------------------------------
 
 class TestClaudeCodeAdapterInstall:
-    def test_install_adds_hooks_to_settings_json(self, tmp_path):
+    def test_install_adds_hooks_to_settings_json(self, tmp_path, safe_repo_root):
         home = _make_claude_home(tmp_path)
         adapter = ClaudeCodeAdapter()
         messages = adapter.install(home)
@@ -111,7 +114,7 @@ class TestClaudeCodeAdapterInstall:
         user_cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
         assert "UserPromptSubmit.sh" in user_cmd
 
-    def test_install_registers_stop_hook(self, tmp_path):
+    def test_install_registers_stop_hook(self, tmp_path, safe_repo_root):
         """install() must register a Stop hook pointing at hooks/Stop.sh.
 
         Issue #4 anti-regression
@@ -166,12 +169,14 @@ class TestClaudeCodeAdapterInstall:
         content = claude_md.read_text()
         assert content.count("<!-- mnemos-start -->") == 1
 
-    def test_install_skips_missing_settings_json(self, tmp_path):
+    def test_install_skips_missing_settings_json(self, tmp_path, safe_repo_root):
         home = tmp_path / "home"
         (home / ".claude").mkdir(parents=True)
         # No settings.json
         (home / ".claude" / "CLAUDE.md").write_text("# Test\n")
 
+        # A SAFE repo_root is required to reach the settings-json branch; with an
+        # unsafe repo_root install() short-circuits with a [warning] (Issue #70).
         messages = ClaudeCodeAdapter().install(home)
         assert isinstance(messages, list)
         assert any("hooks unavailable" in msg for msg in messages)
@@ -303,6 +308,54 @@ class TestClaudeCodeAdapterUpdate:
         messages = ClaudeCodeAdapter().update(home)
         assert isinstance(messages, list)
         assert len(messages) > 0
+
+    def test_update_no_change_when_already_canonical(self, tmp_path):
+        """A second update() on canonical content reports unchanged.
+
+        Issue #70: this deterministically covers the no-change return branches of
+        _update_settings_json and _update_claude_md. Previously these branches
+        were only exercised by the developer's real ~/.claude via the autouse
+        Path.home() leak — exactly the hidden coupling this fix removes.
+        """
+        home = _make_claude_home(tmp_path)
+        adapter = ClaudeCodeAdapter()
+
+        adapter.update(home)
+        messages = adapter.update(home)
+
+        assert all("unchanged" in m for m in messages), messages
+
+    def test_update_preserves_non_mnemos_hook_entry(self, tmp_path):
+        """update() leaves a non-mnemos hook entry in place.
+
+        Issue #70: deterministically covers the False branch of
+        _is_mnemos_hook_entry (a hook command with no mnemos marker).
+        """
+        home = _make_claude_home(tmp_path)
+        settings = home / ".claude" / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]},
+                        ]
+                    }
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+
+        ClaudeCodeAdapter().update(home)
+
+        result = json.loads(settings.read_text())
+        cmds = [
+            h.get("command", "")
+            for entry in result["hooks"].get("PostToolUse", [])
+            for h in entry.get("hooks", [])
+        ]
+        assert any("echo hi" in cmd for cmd in cmds), cmds
 
     def test_update_returns_diff_in_messages_when_changed(self, tmp_path):
         home = _make_claude_home(tmp_path)

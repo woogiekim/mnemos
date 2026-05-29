@@ -49,24 +49,9 @@ def runner():
     return CliRunner()
 
 
-@pytest.fixture
-def safe_repo_root(tmp_path_factory):
-    """A guard-SAFE repo_root: marker-free path with an existing ``hooks/`` dir.
-
-    ``tmp_path`` lives under a ``pytest-of-`` / ``/private/var/folders`` marker,
-    so a child of it is always flagged unsafe. To exercise the genuine SAFE
-    branch of the *real* predicate we build the directory under the repository
-    working tree (no temp marker in the path) and create a ``hooks/`` child so
-    the on-disk existence check passes. The directory is cleaned up afterward.
-    """
-    base = Path.cwd() / ".issue70-safe-repo-root"
-    hooks = base / "hooks"
-    hooks.mkdir(parents=True, exist_ok=True)
-    yield base
-    # best-effort cleanup
-    import shutil
-
-    shutil.rmtree(base, ignore_errors=True)
+# safe_repo_root: shared fixture defined in tests/conftest.py (Issue #70). It
+# also sets MNEMOS_REPO_ROOT to the safe base; tests that re-set it via their
+# own monkeypatch.setenv are idempotent with that.
 
 
 def _make_claude_home(tmp_path: Path) -> Path:

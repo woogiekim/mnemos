@@ -22,6 +22,9 @@ def runner():
     return CliRunner()
 
 
+# safe_repo_root: shared fixture defined in tests/conftest.py (Issue #70).
+
+
 def _make_claude_home_with_hooks(tmp_path: Path) -> Path:
     """Create a home with fully-installed Claude Code hooks.
 
@@ -240,7 +243,9 @@ class TestDoctorCommand:
         assert result.exit_code == 0, result.output
         assert "SKIPPED" in result.output
 
-    def test_doctor_auto_fixes_missing_claude_hooks(self, runner, tmp_path, monkeypatch):
+    def test_doctor_auto_fixes_missing_claude_hooks(
+        self, runner, tmp_path, monkeypatch, safe_repo_root
+    ):
         home = _make_claude_home_missing_hooks(tmp_path)
         result = self._run_doctor(runner, home, monkeypatch)
         assert result.exit_code == 0, result.output
@@ -271,7 +276,9 @@ class TestDoctorCommand:
         assert result.exit_code == 0, result.output
         assert "All hooks verified" in result.output
 
-    def test_doctor_shows_repair_complete_message_when_fixed(self, runner, tmp_path, monkeypatch):
+    def test_doctor_shows_repair_complete_message_when_fixed(
+        self, runner, tmp_path, monkeypatch, safe_repo_root
+    ):
         home = _make_claude_home_missing_hooks(tmp_path)
         result = self._run_doctor(runner, home, monkeypatch)
         assert result.exit_code == 0, result.output
@@ -289,7 +296,9 @@ class TestDoctorCommand:
         assert "OK" in result.output
         assert "FIXED" not in result.output
 
-    def test_doctor_both_adapters_fixed(self, runner, tmp_path, monkeypatch):
+    def test_doctor_both_adapters_fixed(
+        self, runner, tmp_path, monkeypatch, safe_repo_root
+    ):
         """When both adapters are present but both missing hooks, both show FIXED."""
         home = _make_claude_home_missing_hooks(tmp_path)
         cursor_dir = home / ".cursor"
