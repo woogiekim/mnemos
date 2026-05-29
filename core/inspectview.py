@@ -100,16 +100,11 @@ def _project_item(
 
     # promotable / next_layer reuse the PolicyEngine — no threshold
     # duplication. When the layer is unknown to policy.yaml the engine
-    # returns False; we propagate that as ``promotable=False, next_layer=None``.
+    # returns False; the unknown-layer branch propagates that as
+    # ``promotable=False, next_layer=None`` without touching get_next_layer
+    # (which would raise on an unknown layer).
     promotable = bool(policy_engine.check_promotion_eligible(item))
-    next_layer: str | None
-    if promotable:
-        try:
-            next_layer = policy_engine.get_next_layer(layer)
-        except policy.PolicyViolationError:
-            next_layer = None
-    else:
-        next_layer = None
+    next_layer = policy_engine.get_next_layer(layer) if promotable else None
 
     raw_tags = item.get("tags", []) or []
     tags = [t for t in raw_tags if isinstance(t, str)]
