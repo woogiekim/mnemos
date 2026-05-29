@@ -1,0 +1,48 @@
+{
+  "continuity": {
+    "recall": 1.0,
+    "surfaced_anchors": 4,
+    "total_anchors": 4
+  },
+  "days": 14,
+  "lifecycle": {
+    "days_scanned": 14,
+    "invalid_stage_count": 0,
+    "items_scanned": 46,
+    "layer_monotonicity_violation_count": 0,
+    "orphaned_supersede_count": 0,
+    "violations": 0
+  },
+  "recovery": {
+    "degradation_detected": true,
+    "post_fault_item_count": 23,
+    "post_recovery_item_count": 46,
+    "pre_fault_item_count": 46,
+    "recovery_consistent": true
+  },
+  "relevance": {
+    "normalized_rank_variance": 0.0,
+    "observed_ranks": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "rank_variance": 0.0,
+    "samples": 14,
+    "stability": 1.0
+  },
+  "seed": 42,
+  "start_epoch": 1700000000.0,
+  "total_captures": 46
+}

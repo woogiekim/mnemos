@@ -18,6 +18,23 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Long-running beta validation harness + `mnemos beta-run` CLI
+  ([#82](https://github.com/woogiekim/mnemos/issues/82), epic #65):
+  - `core/beta_harness.py` — a deterministic, seeded virtual-clock driver
+    (`VirtualClock`, a per-day capture/search/promote/GC/lifecycle workflow)
+    that exercises the real `MemoryGateway` / store on an isolated tmp home
+    (no mocks) and reports five acceptance-criteria metrics: contextual
+    continuity recall, retrieval relevance stability, lifecycle-invariant
+    consistency, and degradation + recovery.
+  - `mnemos beta-run --days N --seed S --output PATH [--json]` — runs the
+    harness and emits a JSON or human/markdown report. Two same-seed runs
+    produce a byte-identical normalized report.
+  - Simulated time injected without any production signature change (capture
+    `created_at` override + `age_hours: 0.0` harness policy + clock-injectable
+    `compute_garbage_score(now=…)`). Stdlib only — no new dependency.
+  - Operator guide [docs/beta-validation.md](docs/beta-validation.md) with an
+    embedded real captured sample run; tracked sample report under
+    [docs/examples/beta-run-sample.json](docs/examples/beta-run-sample.json).
 - `mnemos compact` CLI group for similar-memory detection + semantic
   compression with lineage audit
   ([#81](https://github.com/woogiekim/mnemos/issues/81)):
