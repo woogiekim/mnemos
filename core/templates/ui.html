@@ -1,23 +1,435 @@
 <!DOCTYPE html>
 <!--
-  Unified mnemos inspection UI (issue #83) — PLACEHOLDER.
-  The designer stage replaces this file with the full three-tab UI. The two
-  load-bearing tokens below MUST be preserved by any replacement:
+  Unified mnemos inspection UI (issue #83).
+  ONE self-contained static HTML surface — vanilla JS, no network, no eval,
+  no CDN. The embedded payload is parsed client-side from the ui-data script
+  block (avoids file:// CORS) and renders identically inside a pywebview
+  native window or when opened directly in a browser.
+
+  Three tabs:
+    * Graph          — canvas force-directed domain graph (data.graph)
+    * Memory         — search + drill-down (data.memory)
+    * Policy Cohesion — recurring-theme cluster table (data.policy_cohesion)
+
+  Cross-filter: clicking a domain node switches to the Memory tab filtered to
+  that domain's member_ids; clicking a policy cluster filters Memory to its
+  member_ids. An honest edge-density banner shows shown_edges / total_edges.
+
+  Load-bearing tokens (asserted verbatim by tests/packaging — do not rename):
     * <script id="ui-data" type="application/json">__UI_DATA_JSON__</script>
-    * <canvas id="graph" ...>  (the Graph tab force-layout target)
-  Self-contained: no network, no eval, no CDN.
+    * <canvas id="graph" ...>
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mnemos UI</title>
+  <style>
+    :root {
+      --bg: #f7f7f9; --panel: #fff; --ink: #1c1c22; --muted: #6b6b76;
+      --line: #e2e2e8; --accent: #3454d1; --accent-soft: #e7ecfb; --warn: #b4690e;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--ink); background: var(--bg); display: flex; flex-direction: column;
+    }
+    header {
+      padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 16px; flex: 0 0 auto;
+    }
+    header h1 { font-size: 16px; margin: 0; }
+    #header-meta { color: var(--muted); font-size: 12px; }
+    nav { display: flex; gap: 4px; margin-left: auto; }
+    nav button {
+      border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+      padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    nav button[aria-selected="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+    main { flex: 1 1 auto; min-height: 0; position: relative; }
+    .tab { position: absolute; inset: 0; display: none; }
+    .tab.active { display: flex; }
+
+    /* Graph tab */
+    #tab-graph { flex-direction: column; }
+    #edge-density-banner {
+      padding: 6px 16px; background: var(--accent-soft); color: var(--ink);
+      font-size: 12px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+    }
+    #graph-wrap { flex: 1 1 auto; min-height: 0; display: flex; }
+    canvas { flex: 1 1 auto; cursor: grab; background: #fff; }
+    #graph-empty { margin: auto; color: var(--muted); }
+
+    /* Memory tab */
+    #tab-memory { flex-direction: row; }
+    #memory-list-col { flex: 1 1 60%; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+    .controls { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex: 0 0 auto; }
+    .controls input[type="search"] { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; }
+    #active-filter { margin-top: 8px; font-size: 12px; color: var(--accent); display: none; }
+    #active-filter.shown { display: block; }
+    #active-filter button { margin-left: 8px; font-size: 11px; cursor: pointer; }
+    #result-count { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    #result-list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1 1 auto; }
+    #result-list li { padding: 8px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+    #result-list li:hover { background: var(--accent-soft); }
+    .mem-id { font-weight: 600; }
+    .mem-sub { color: var(--muted); font-size: 12px; }
+    #memory-empty { padding: 20px; color: var(--muted); }
+    #drilldown { flex: 1 1 40%; min-width: 0; overflow: auto; padding: 14px; background: var(--panel); }
+    #drilldown[hidden] { display: none; }
+    .panel { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; }
+    .panel h3 { margin: 0; padding: 8px 12px; font-size: 13px; background: var(--bg); border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; }
+    .panel dl { margin: 0; padding: 10px 12px; display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+    .panel dt { color: var(--muted); }
+    .panel dd { margin: 0; word-break: break-word; }
+    #dd-content { white-space: pre-wrap; padding: 10px 12px; }
+
+    /* Policy tab */
+    #tab-policy { flex-direction: column; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: var(--panel); position: sticky; top: 0; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover { background: var(--accent-soft); }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); font-size: 11px; margin: 1px; }
+    #policy-empty { padding: 20px; color: var(--muted); }
+    footer { padding: 6px 16px; background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+  </style>
 </head>
 <body>
-  <main>
+  <header>
     <h1>mnemos unified inspection UI</h1>
-    <canvas id="graph" width="960" height="600"></canvas>
+    <span id="header-meta"></span>
+    <nav role="tablist">
+      <button id="btn-graph" role="tab" aria-selected="true" aria-controls="tab-graph">Graph</button>
+      <button id="btn-memory" role="tab" aria-selected="false" aria-controls="tab-memory">Memory</button>
+      <button id="btn-policy" role="tab" aria-selected="false" aria-controls="tab-policy">Policy Cohesion</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Graph tab -->
+    <section id="tab-graph" class="tab active" role="tabpanel">
+      <div id="edge-density-banner"></div>
+      <div id="graph-wrap">
+        <canvas id="graph" width="1200" height="700"></canvas>
+        <p id="graph-empty" hidden>No domains to display.</p>
+      </div>
+    </section>
+
+    <!-- Memory tab -->
+    <section id="tab-memory" class="tab" role="tabpanel">
+      <div id="memory-list-col">
+        <div class="controls">
+          <input id="search-input" type="search" role="search"
+                 placeholder="Search memories by id, content, tags, layer…" aria-label="Search memories">
+          <div id="active-filter">
+            Filtered by <span id="active-filter-label"></span>
+            <button id="clear-filter" type="button">clear</button>
+          </div>
+          <div id="result-count"></div>
+        </div>
+        <ul id="result-list"></ul>
+        <p id="memory-empty" hidden>No memories match the current filter.</p>
+      </div>
+      <aside id="drilldown" hidden>
+        <h2 id="drilldown-title">(memory)</h2>
+        <div class="panel"><h3>Content</h3><div id="dd-content"></div></div>
+        <div class="panel" data-panel="trust">
+          <h3>Trust</h3>
+          <dl>
+            <dt>Layer</dt><dd id="dd-layer"></dd>
+            <dt>Quality score</dt><dd id="dd-quality"></dd>
+            <dt>Access count</dt><dd id="dd-access"></dd>
+          </dl>
+        </div>
+        <div class="panel" data-panel="provenance">
+          <h3>Provenance</h3>
+          <dl>
+            <dt>Run id</dt><dd id="dd-run"></dd>
+            <dt>Session id</dt><dd id="dd-session"></dd>
+            <dt>Created at</dt><dd id="dd-created"></dd>
+            <dt>Content hash</dt><dd id="dd-hash"></dd>
+            <dt>Path</dt><dd id="dd-path"></dd>
+          </dl>
+        </div>
+        <div class="panel" data-panel="lifecycle">
+          <h3>Lifecycle</h3>
+          <dl>
+            <dt>Stage</dt><dd id="dd-stage"></dd>
+            <dt>Promotable</dt><dd id="dd-promotable"></dd>
+            <dt>Next layer</dt><dd id="dd-next"></dd>
+            <dt>Archived</dt><dd id="dd-archived"></dd>
+          </dl>
+        </div>
+      </aside>
+    </section>
+
+    <!-- Policy Cohesion tab -->
+    <section id="tab-policy" class="tab" role="tabpanel">
+      <table id="policy-table">
+        <thead>
+          <tr><th>Theme</th><th>Members</th><th>Layers</th><th>Recurrence</th><th>Suggested layer</th></tr>
+        </thead>
+        <tbody id="policy-body"></tbody>
+      </table>
+      <p id="policy-empty" hidden>No policy-cohesion clusters.</p>
+    </section>
   </main>
+
+  <footer id="footer-meta"></footer>
+
   <script id="ui-data" type="application/json">__UI_DATA_JSON__</script>
+  <script>
+    // Vendored, dependency-free renderer. No fetch / XHR / eval / Function.
+    (function () {
+      "use strict";
+      var data = {};
+      try {
+        data = JSON.parse(document.getElementById("ui-data").textContent || "{}");
+      } catch (e) {
+        data = {};
+      }
+      var graph = data.graph || {};
+      var memory = data.memory || {};
+      var policy = data.policy_cohesion || {};
+      var domains = graph.domains || [];
+      var relationships = graph.relationships || [];
+      var memories = memory.memories || [];
+      var clusters = policy.clusters || [];
+      var density = graph.edge_density || {};
+
+      document.getElementById("header-meta").textContent =
+        domains.length + " domains · " + memories.length + " memories · " +
+        clusters.length + " policy clusters";
+      document.getElementById("footer-meta").textContent =
+        "schema v" + (data.schema_version || "?") + " · generated " + (data.generated_at || "");
+
+      // ---- Tab switching ------------------------------------------------- //
+      var tabs = {
+        graph: { btn: document.getElementById("btn-graph"), panel: document.getElementById("tab-graph") },
+        memory: { btn: document.getElementById("btn-memory"), panel: document.getElementById("tab-memory") },
+        policy: { btn: document.getElementById("btn-policy"), panel: document.getElementById("tab-policy") }
+      };
+      function showTab(name) {
+        Object.keys(tabs).forEach(function (k) {
+          var on = k === name;
+          tabs[k].btn.setAttribute("aria-selected", on ? "true" : "false");
+          tabs[k].panel.classList.toggle("active", on);
+        });
+      }
+      tabs.graph.btn.addEventListener("click", function () { showTab("graph"); });
+      tabs.memory.btn.addEventListener("click", function () { showTab("memory"); });
+      tabs.policy.btn.addEventListener("click", function () { showTab("policy"); });
+
+      // ---- Edge-density banner ------------------------------------------- //
+      document.getElementById("edge-density-banner").textContent =
+        "Showing top " + (density.shown_edges != null ? density.shown_edges : relationships.length) +
+        " of " + (density.total_edges != null ? density.total_edges : relationships.length) +
+        " edges (max " + (density.max_edges_per_node != null ? density.max_edges_per_node : "∞") +
+        " per node, weight ≥ " + (density.edge_weight_threshold != null ? density.edge_weight_threshold : 0) + ").";
+
+      // ---- Memory cross-filter state ------------------------------------- //
+      var activeFilterIds = null;   // null = no domain/policy filter
+      var activeFilterLabel = "";
+      var searchInput = document.getElementById("search-input");
+      var resultList = document.getElementById("result-list");
+      var resultCount = document.getElementById("result-count");
+      var memoryEmpty = document.getElementById("memory-empty");
+      var activeFilterBox = document.getElementById("active-filter");
+      var activeFilterLabelEl = document.getElementById("active-filter-label");
+      var drilldown = document.getElementById("drilldown");
+
+      function matchesSearch(mem, q) {
+        if (!q) return true;
+        q = q.toLowerCase();
+        if ((mem.id || "").toLowerCase().indexOf(q) !== -1) return true;
+        if ((mem.content || "").toLowerCase().indexOf(q) !== -1) return true;
+        if ((mem.layer || "").toLowerCase().indexOf(q) !== -1) return true;
+        return (mem.tags || []).some(function (t) { return String(t).toLowerCase().indexOf(q) !== -1; });
+      }
+
+      function renderMemoryList() {
+        var q = searchInput.value.trim();
+        var filterSet = activeFilterIds ? new Set(activeFilterIds) : null;
+        var rows = memories.filter(function (m) {
+          if (filterSet && !filterSet.has(m.id)) return false;
+          return matchesSearch(m, q);
+        });
+        resultList.innerHTML = "";
+        rows.forEach(function (mem) {
+          var li = document.createElement("li");
+          var idEl = document.createElement("div");
+          idEl.className = "mem-id";
+          idEl.textContent = mem.id || "(memory)";
+          var sub = document.createElement("div");
+          sub.className = "mem-sub";
+          sub.textContent = (mem.layer || "?") + " · " + (mem.tags || []).join(", ");
+          li.appendChild(idEl);
+          li.appendChild(sub);
+          li.addEventListener("click", function () { showDrilldown(mem); });
+          resultList.appendChild(li);
+        });
+        resultCount.textContent = rows.length + " result" + (rows.length === 1 ? "" : "s");
+        memoryEmpty.hidden = rows.length !== 0;
+        activeFilterBox.classList.toggle("shown", !!activeFilterIds);
+        activeFilterLabelEl.textContent = activeFilterLabel;
+      }
+
+      function setText(id, value) {
+        document.getElementById(id).textContent = (value === null || value === undefined) ? "—" : String(value);
+      }
+      function showDrilldown(mem) {
+        document.getElementById("drilldown-title").textContent = mem.id || "(memory)";
+        document.getElementById("dd-content").textContent = String(mem.content || "");
+        setText("dd-layer", mem.layer);
+        setText("dd-quality", mem.quality_score);
+        setText("dd-access", mem.access_count);
+        setText("dd-run", mem.run_id);
+        setText("dd-session", mem.session_id);
+        setText("dd-created", mem.created_at);
+        setText("dd-hash", mem.content_hash);
+        setText("dd-path", mem.path);
+        setText("dd-stage", mem.stage);
+        setText("dd-promotable", mem.promotable);
+        setText("dd-next", mem.next_layer);
+        setText("dd-archived", mem.archived);
+        drilldown.hidden = false;
+      }
+
+      function applyCrossFilter(ids, label) {
+        activeFilterIds = ids;
+        activeFilterLabel = label;
+        searchInput.value = "";
+        showTab("memory");
+        renderMemoryList();
+      }
+      function clearFilter() {
+        activeFilterIds = null;
+        activeFilterLabel = "";
+        renderMemoryList();
+      }
+      document.getElementById("clear-filter").addEventListener("click", clearFilter);
+      searchInput.addEventListener("input", renderMemoryList);
+      renderMemoryList();
+
+      // ---- Policy cohesion table ----------------------------------------- //
+      var policyBody = document.getElementById("policy-body");
+      clusters.forEach(function (c) {
+        var tr = document.createElement("tr");
+        function cell(text) { var td = document.createElement("td"); td.textContent = text; return td; }
+        function pillCell(arr) {
+          var td = document.createElement("td");
+          (arr || []).forEach(function (v) {
+            var s = document.createElement("span"); s.className = "pill"; s.textContent = String(v); td.appendChild(s);
+          });
+          return td;
+        }
+        tr.appendChild(cell(c.theme || "—"));
+        tr.appendChild(cell((c.member_ids || []).length + " members"));
+        tr.appendChild(pillCell(c.layers));
+        tr.appendChild(cell(c.recurrence != null ? c.recurrence : "—"));
+        tr.appendChild(cell(c.suggested_layer || "—"));
+        tr.addEventListener("click", function () {
+          applyCrossFilter(c.member_ids || [], "policy theme “" + (c.theme || "?") + "”");
+        });
+        policyBody.appendChild(tr);
+      });
+      document.getElementById("policy-empty").hidden = clusters.length !== 0;
+
+      // ---- Graph canvas force-directed renderer -------------------------- //
+      var canvas = document.getElementById("graph");
+      var graphEmpty = document.getElementById("graph-empty");
+      if (!domains.length) {
+        canvas.hidden = true;
+        graphEmpty.hidden = false;
+      } else {
+        var ctx = canvas.getContext("2d");
+        var nodes = domains.map(function (d, i) {
+          var theta = (i / domains.length) * Math.PI * 2;
+          return {
+            key: d.key,
+            label: d.label || d.key,
+            member_ids: d.member_ids || [],
+            x: canvas.width / 2 + Math.cos(theta) * 240,
+            y: canvas.height / 2 + Math.sin(theta) * 240,
+            vx: 0, vy: 0,
+            r: Math.max(6, Math.min(22, 6 + (d.member_ids || []).length))
+          };
+        });
+        var nodeByMember = {};
+        nodes.forEach(function (n) {
+          (n.member_ids || []).forEach(function (mid) {
+            if (!(mid in nodeByMember)) nodeByMember[mid] = n;
+          });
+        });
+        // Edges connect domains whose member sets touch the relationship's endpoints.
+        var edges = [];
+        relationships.forEach(function (rel) {
+          var a = nodeByMember[rel.source_id];
+          var b = nodeByMember[rel.target_id];
+          if (a && b && a !== b) edges.push({ a: a, b: b, w: rel.weight || 0.1 });
+        });
+
+        var frames = 0;
+        function step() {
+          for (var i = 0; i < nodes.length; i++) {
+            for (var j = i + 1; j < nodes.length; j++) {
+              var dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+              var dist2 = dx * dx + dy * dy || 0.01;
+              var rep = 1800 / dist2;
+              var d = Math.sqrt(dist2);
+              nodes[i].vx += (dx / d) * rep; nodes[i].vy += (dy / d) * rep;
+              nodes[j].vx -= (dx / d) * rep; nodes[j].vy -= (dy / d) * rep;
+            }
+          }
+          edges.forEach(function (e) {
+            var dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
+            var d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            var force = (d - 120) * 0.01 * (0.3 + e.w);
+            e.a.vx += (dx / d) * force; e.a.vy += (dy / d) * force;
+            e.b.vx -= (dx / d) * force; e.b.vy -= (dy / d) * force;
+          });
+          nodes.forEach(function (n) {
+            n.vx += (canvas.width / 2 - n.x) * 0.0009;
+            n.vy += (canvas.height / 2 - n.y) * 0.0009;
+            n.x += n.vx; n.y += n.vy; n.vx *= 0.86; n.vy *= 0.86;
+          });
+          draw();
+          frames++;
+          if (frames < 320) requestAnimationFrame(step);
+        }
+        function draw() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.strokeStyle = "#c9c9d4"; ctx.lineWidth = 1;
+          edges.forEach(function (e) {
+            ctx.globalAlpha = Math.min(1, 0.15 + e.w);
+            ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke();
+          });
+          ctx.globalAlpha = 1;
+          nodes.forEach(function (n) {
+            ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+            ctx.fillStyle = "#3454d1"; ctx.fill();
+            ctx.fillStyle = "#1c1c22"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText(n.label, n.x, n.y - n.r - 4);
+          });
+        }
+        canvas.addEventListener("click", function (evt) {
+          var rect = canvas.getBoundingClientRect();
+          var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+          var mx = (evt.clientX - rect.left) * sx, my = (evt.clientY - rect.top) * sy;
+          for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i], dx = mx - n.x, dy = my - n.y;
+            if (dx * dx + dy * dy <= (n.r + 4) * (n.r + 4)) {
+              applyCrossFilter(n.member_ids || [], "domain “" + n.label + "”");
+              return;
+            }
+          }
+        });
+        requestAnimationFrame(step);
+      }
+    })();
+  </script>
 </body>
 </html>
