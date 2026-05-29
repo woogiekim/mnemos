@@ -548,6 +548,135 @@ class TestCli:
 # ---------------------------------------------------------------------------
 
 
+class TestDefensivePaths:
+    """Coverage for the small defensive branches in core.backup + core.cli."""
+
+    def test_iter_layer_files_skips_missing_layer_dir(self, tmp_path):
+        """``make_backup`` tolerates a repo with no layer dirs at all — the
+        ``layer_dir.is_dir()`` skip branch is exercised."""
+        from core.backup import _iter_layer_files, make_backup
+
+        # Bare repo root with NO ``wiki/`` sub-tree at all.
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        assert _iter_layer_files(bare) == []
+
+        # And the public API works end-to-end on a bare root.
+        archive = tmp_path / "bare.tar.gz"
+        make_backup(bare, archive)
+        assert archive.exists()
+
+    def test_read_manifest_missing_raises_value_error(self, tmp_path):
+        """An archive without ``manifest.json`` raises ``ValueError`` from
+        :func:`read_backup_manifest`."""
+        from core.backup import read_backup_manifest
+
+        no_manifest = tmp_path / "no-manifest.tar.gz"
+        body = b"hello"
+        with tarfile.open(no_manifest, "w:gz") as tar:
+            info = tarfile.TarInfo("only-file.md")
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+
+        with pytest.raises(ValueError) as exc:
+            read_backup_manifest(no_manifest)
+        assert "manifest.json" in str(exc.value)
+
+    def test_restore_ignores_non_file_members(self, tmp_path):
+        """Restore tolerates directory and symlink entries in a tarball —
+        the ``isfile()`` skip branch is exercised."""
+        from core.backup import restore_backup, SCHEMA_VERSION
+
+        mixed = tmp_path / "mixed.tar.gz"
+        manifest_bytes = json.dumps({
+            "schema_version": SCHEMA_VERSION,
+            "source_host": "test",
+            "generated_at": "2026-05-29T07:41:00Z",
+            "item_count": 0,
+            "layer_summary": {},
+        }).encode("utf-8")
+        with tarfile.open(mixed, "w:gz") as tar:
+            mi = tarfile.TarInfo("manifest.json")
+            mi.size = len(manifest_bytes)
+            tar.addfile(mi, io.BytesIO(manifest_bytes))
+
+            # Directory entry — not a file.
+            di = tarfile.TarInfo("wiki/projects")
+            di.type = tarfile.DIRTYPE
+            di.mode = 0o755
+            tar.addfile(di)
+
+        dst = _bootstrap_repo(tmp_path / "dst")
+        report = restore_backup(mixed, dst)
+        assert report.restored_count == 0
+        assert report.skipped_count == 0
+        assert report.overwritten_count == 0
+
+    def test_id_from_path_handles_short_names(self):
+        """``_id_from_path`` falls back to the raw name when the path does
+        not have the canonical ``wiki/<layer>/<id>.md`` three-part shape."""
+        from core.backup import _id_from_path
+
+        assert _id_from_path("bare.md") == "bare"
+        assert _id_from_path("just-a-name") == "just-a-name"
+        assert _id_from_path("wiki/projects/canonical.md") == "canonical"
+
+    def test_cli_backup_propagates_make_backup_error(self, tmp_path, monkeypatch):
+        """``mnemos backup`` reports a clear error (and exits non-zero) when
+        the underlying ``make_backup`` call raises."""
+        from core.cli import cli
+
+        # Pointing --output at a path inside a non-existent parent dir
+        # surfaces an OSError from tarfile.open through the CLI's error
+        # branch.
+        bad = tmp_path / "nope" / "child" / "out.tar.gz"
+        runner = CliRunner()
+        result = runner.invoke(cli, ["backup", "--output", str(bad)])
+        assert result.exit_code != 0
+        assert "error:" in result.output
+
+    def test_cli_restore_propagates_schema_error(self, tmp_path, monkeypatch):
+        """``mnemos restore`` exits 1 and prints the message when the
+        archive declares an unknown schema_version."""
+        from core.backup import SCHEMA_VERSION
+        from core.cli import cli
+
+        bad = tmp_path / "bad.tar.gz"
+        manifest_bytes = json.dumps({
+            "schema_version": SCHEMA_VERSION + 1,
+            "source_host": "test",
+            "generated_at": "2026-05-29T07:42:00Z",
+            "item_count": 0,
+            "layer_summary": {},
+        }).encode("utf-8")
+        with tarfile.open(bad, "w:gz") as tar:
+            mi = tarfile.TarInfo("manifest.json")
+            mi.size = len(manifest_bytes)
+            tar.addfile(mi, io.BytesIO(manifest_bytes))
+
+        dst = _bootstrap_repo(tmp_path / "dst")
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(dst))
+        runner = CliRunner()
+        result = runner.invoke(cli, ["restore", "--input", str(bad)])
+        assert result.exit_code == 1
+        assert "schema_version" in result.output
+
+    def test_cli_restore_propagates_generic_error(self, tmp_path, monkeypatch):
+        """``mnemos restore`` also handles non-ValueError exceptions from
+        the underlying API (e.g. tarfile corruption)."""
+        from core.cli import cli
+
+        # A file that exists on disk but is not a valid tar.gz archive.
+        bogus = tmp_path / "bogus.tar.gz"
+        bogus.write_bytes(b"this is definitely not a gzip stream")
+        dst = _bootstrap_repo(tmp_path / "dst")
+        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(dst))
+        runner = CliRunner()
+        result = runner.invoke(cli, ["restore", "--input", str(bogus)])
+        assert result.exit_code == 1
+        assert "error:" in result.output
+
+
 class TestEmptyStore:
     def test_empty_store_backup(self, tmp_path):
         """Backing up an empty store produces a valid archive whose manifest
