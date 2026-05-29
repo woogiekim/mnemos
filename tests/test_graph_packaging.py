@@ -27,6 +27,12 @@ PASS after the pyproject.toml + ``importlib.resources`` fix is applied.
 
 Runtime: ~10-30s (wheel build + venv create + pip install). Runs in the
 default suite — no opt-in mark.
+
+Venv tooling: prefers ``uv`` when available (faster, no ``ensurepip``
+bootstrap), and falls back to the stdlib ``venv.create(with_pip=True)``
+path otherwise. When neither tooling is available — or when the bootstrap
+actively errors out — the test fails loudly with a clear message rather
+than skipping silently, so a missing CI dependency is visible.
 """
 from __future__ import annotations
 
@@ -69,17 +75,97 @@ def _build_wheel(tmp_path: Path) -> Path:
     return wheels[0]
 
 
-def _create_venv(tmp_path: Path) -> tuple[Path, Path]:
-    """Create a fresh isolated venv. Return (venv_python, venv_mnemos_bin)."""
+def _create_venv_and_install_wheel(tmp_path: Path, wheel_path: Path) -> tuple[Path, Path]:
+    """Create a fresh isolated venv, install the wheel, return (python, mnemos).
+
+    Strategy:
+      1. Prefer ``uv venv`` + ``uv pip install`` — faster and avoids
+         ``ensurepip`` bootstrap issues that some non-relocatable bundled
+         Python interpreters exhibit.
+      2. Fall back to stdlib ``venv.create(with_pip=True)`` + the venv's
+         own ``pip``.
+
+    Either path must produce a venv with the wheel installed; otherwise
+    the test fails with a clear message (no silent skips).
+    """
     venv_dir = tmp_path / "venv"
-    venv.create(str(venv_dir), with_pip=True, clear=True)
+    bin_dirname = "Scripts" if os.name == "nt" else "bin"
+    python_name = "python.exe" if os.name == "nt" else "python"
+    mnemos_name = "mnemos.exe" if os.name == "nt" else "mnemos"
 
-    bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
-    venv_python = bin_dir / ("python.exe" if os.name == "nt" else "python")
-    venv_mnemos = bin_dir / ("mnemos.exe" if os.name == "nt" else "mnemos")
+    uv_path = shutil.which("uv")
 
-    assert venv_python.exists(), f"venv python not found at {venv_python}"
-    return venv_python, venv_mnemos
+    last_error: str | None = None
+
+    # Path 1: uv (preferred when available)
+    if uv_path is not None:
+        try:
+            subprocess.run(
+                [uv_path, "venv", "--python", "3.12", str(venv_dir)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    uv_path,
+                    "pip",
+                    "install",
+                    "--python",
+                    str(venv_dir / bin_dirname / python_name),
+                    str(wheel_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            venv_python = venv_dir / bin_dirname / python_name
+            venv_mnemos = venv_dir / bin_dirname / mnemos_name
+            assert venv_python.exists(), f"venv python not found at {venv_python}"
+            assert venv_mnemos.exists(), (
+                f"mnemos console script not installed at {venv_mnemos} "
+                "(check [project.scripts] in pyproject.toml)"
+            )
+            return venv_python, venv_mnemos
+        except (subprocess.CalledProcessError, AssertionError) as exc:
+            # Fall through to stdlib venv path; capture for the final error.
+            stderr = (
+                exc.stderr.decode("utf-8", "replace")
+                if isinstance(exc, subprocess.CalledProcessError) and exc.stderr
+                else str(exc)
+            )
+            last_error = f"uv path failed: {stderr.strip()}"
+            # Clean any partial venv before retrying with stdlib path.
+            if venv_dir.exists():
+                shutil.rmtree(venv_dir, ignore_errors=True)
+
+    # Path 2: stdlib venv + venv's own pip
+    try:
+        venv.create(str(venv_dir), with_pip=True, clear=True)
+        venv_python = venv_dir / bin_dirname / python_name
+        venv_mnemos = venv_dir / bin_dirname / mnemos_name
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", str(wheel_path)],
+            check=True,
+            capture_output=True,
+        )
+        assert venv_python.exists(), f"venv python not found at {venv_python}"
+        assert venv_mnemos.exists(), (
+            f"mnemos console script not installed at {venv_mnemos} "
+            "(check [project.scripts] in pyproject.toml)"
+        )
+        return venv_python, venv_mnemos
+    except (subprocess.CalledProcessError, OSError, AssertionError) as exc:
+        stderr = (
+            exc.stderr.decode("utf-8", "replace")
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr
+            else str(exc)
+        )
+        suffix = f" Earlier {last_error}." if last_error else ""
+        pytest.fail(
+            "Could not create an isolated venv to install the built wheel. "
+            f"stdlib venv.create failed: {stderr.strip()}.{suffix} "
+            "Install 'uv' (https://docs.astral.sh/uv/) or ensure the "
+            "interpreter running pytest can bootstrap pip via ensurepip."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -119,13 +205,7 @@ class TestInstalledWheelLoadsTemplate:
         wheel-zip, zipapp) — the central guarantee the fix delivers.
         """
         wheel_path = _build_wheel(tmp_path)
-        venv_python, _ = _create_venv(tmp_path)
-
-        subprocess.run(
-            [str(venv_python), "-m", "pip", "install", str(wheel_path)],
-            check=True,
-            capture_output=True,
-        )
+        venv_python, _ = _create_venv_and_install_wheel(tmp_path, wheel_path)
 
         # Read the template from inside the fresh venv using importlib.resources.
         probe = (
@@ -165,13 +245,7 @@ class TestMnemosGraphCliInVenv:
             )
 
         wheel_path = _build_wheel(tmp_path)
-        venv_python, venv_mnemos = _create_venv(tmp_path)
-
-        subprocess.run(
-            [str(venv_python), "-m", "pip", "install", str(wheel_path)],
-            check=True,
-            capture_output=True,
-        )
+        _, venv_mnemos = _create_venv_and_install_wheel(tmp_path, wheel_path)
 
         out_html = tmp_path / "out.html"
         env = os.environ.copy()
