@@ -18,6 +18,26 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Unified inspection UI as a native desktop app via `mnemos ui`
+  ([#83](https://github.com/woogiekim/mnemos/issues/83)):
+  - `core/unifiedview.py` — one self-contained static-HTML surface combining
+    the domain graph (#68), the raw-memory inspect view (#80), and a new
+    policy-cohesion panel (#67), built by reusing the existing payload builders
+    (no graph/memory payload reimplementation). Domain→memory and
+    policy→memory cross-filtering, plus controllable graph edge density
+    (`_cap_edges_by_node`: per-node top-N + weight threshold) to tame the
+    ~33k-edge hairball. Presentation only — no cohesion/policy/gateway/store
+    API or on-disk-format change (#84 is the separate persistence issue).
+  - `mnemos ui` — default launches a native pywebview desktop window;
+    `--output PATH` writes the self-contained HTML headlessly (CI/no-GUI) and
+    never imports pywebview; a missing `[ui]` extra on the default path exits
+    non-zero with an actionable `pip install 'mnemos[ui]'` hint. Edge-density
+    knobs `--max-edges-per-node` (default 8) / `--edge-weight-threshold`
+    (default 0.0), plus `--layer` / `--limit` / `--preview-width` / `--full`.
+  - Optional `[ui]` pip extra (`pywebview>=5.0`); base dependencies unchanged.
+    `core/templates/ui.html` ships via the existing package-data glob.
+  - Operator guide [docs/unified-inspection-ui.md](docs/unified-inspection-ui.md);
+    cross-linked from the #68 and #80 docs.
 - Long-running beta validation harness + `mnemos beta-run` CLI
   ([#82](https://github.com/woogiekim/mnemos/issues/82), epic #65):
   - `core/beta_harness.py` — a deterministic, seeded virtual-clock driver

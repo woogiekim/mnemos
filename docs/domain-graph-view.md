@@ -8,6 +8,11 @@
 > packaging pattern but surfaces per-memory inventory (trust, provenance,
 > lifecycle) rather than cross-memory cohesion.
 
+> See also: [Unified Inspection UI](./unified-inspection-ui.md) — the `mnemos ui`
+> desktop app (issue #83) that combines this graph with the raw-memory inspect
+> surface and a policy-cohesion panel; it reuses `build_graph_payload` verbatim
+> for its Graph tab.
+
 ## Background
 
 Issue #67 introduced `core/cohesion.py`, a read-only derivation layer that
