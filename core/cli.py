@@ -2962,3 +2962,77 @@ def memory_graph(
     click.echo(f"[mnemos] wrote {written}")
     if open_browser:
         webbrowser.open(str(written))
+
+
+# ---------------------------------------------------------------------------
+# backup / restore — explicit archive snapshots (issue #75)
+# ---------------------------------------------------------------------------
+@cli.command("backup")
+@click.option(
+    "--output",
+    "output",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Archive destination (default: ~/.mnemos/backups/<UTC ts>.tar.gz).",
+)
+def memory_backup(output: str | None) -> None:
+    """Write a gzip tar snapshot of the persistent wiki layers.
+
+    See ``docs/backup-restore.md`` for the dual-track model (continuous
+    git-sync vs. explicit archive snapshot) and operator guidance.
+    """
+    import datetime as _dt
+    from core.backup import make_backup
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+
+    if output is None:
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backups_dir = Path.home() / ".mnemos" / "backups"
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        output_path = backups_dir / f"{ts}.tar.gz"
+    else:
+        output_path = Path(output)
+
+    try:
+        written = make_backup(repo_root, output_path)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+    click.echo(str(Path(written).resolve()))
+
+
+@cli.command("restore")
+@click.option(
+    "--input",
+    "input_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help="Path to the backup archive to restore.",
+)
+@click.option(
+    "--overwrite",
+    "overwrite",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing files instead of the default skip-on-conflict.",
+)
+def memory_restore(input_path: str, overwrite: bool) -> None:
+    """Restore a backup archive into the active MNEMOS_REPO_ROOT."""
+    from core.backup import restore_backup
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    try:
+        report = restore_backup(input_path, repo_root, overwrite=overwrite)
+    except ValueError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"restored: {report.restored_count}  "
+        f"skipped: {report.skipped_count}  "
+        f"overwritten: {report.overwritten_count}"
+    )

@@ -282,7 +282,13 @@ with a single remote git repository (`mnemos sync init --remote <url>`, pull on
 capture, commit on write, push after commit, manual `mnemos sync continue` on
 conflict).  See the [remote sync operator guide](docs/remote-sync.md) for
 setup, the normal pull → commit → push flow, the conflict resolution path,
-backup hand-off (tracked in #75), and known limits.
+and known limits.
+
+For explicit, portable snapshots (the disaster-recovery / multi-host hand-off
+companion to remote sync), see the
+[backup & restore operator guide](docs/backup-restore.md) — covers
+`mnemos backup` / `mnemos restore`, the dual-track model, and the manifest
+schema.
 
 ## Wiki Repo Structure
 

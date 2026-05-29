@@ -235,22 +235,24 @@ re-stage, and re-run.
 
 ---
 
-## Backup (see #75)
+## Backup
 
 Backup and restore (snapshotting the wiki tree outside the git history,
-or rebuilding from an archived snapshot) is **tracked separately** in
-[issue #75](https://github.com/woogiekim/mnemos/issues/75).  It is a
-distinct workstream from remote sync — `git push` is the operational
-distribution channel; backup is the disaster-recovery channel.  Do
-**not** rely on remote sync as a backup substitute.
+or rebuilding from an archived snapshot) is a **distinct workstream**
+from remote sync — `git push` is the operational distribution channel;
+backup is the disaster-recovery channel.  Do **not** rely on remote sync
+as a backup substitute.
 
-When #75 lands, this section will link to the operator guide it
-produces.  Until then, the recommended interim posture is:
+See the [backup & restore operator guide](backup-restore.md) for the
+`mnemos backup` / `mnemos restore` commands, the dual-track model, the
+multi-host hand-off scenario, and the manifest schema (issue #75).
 
-- Treat the remote `origin` as durable storage but not as a backup.
-- Take periodic out-of-band snapshots of the wiki tree (`tar`, `rsync`,
-  or your existing host-level backup tool) until #75 ships a first-party
-  command.
+In short:
+
+- Treat the remote `origin` as durable distribution storage but not as a
+  backup.
+- Take explicit `mnemos backup` snapshots on your own cadence for
+  disaster-recovery and multi-host hand-off.
 
 ---
 
