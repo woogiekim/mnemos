@@ -290,6 +290,15 @@ companion to remote sync), see the
 `mnemos backup` / `mnemos restore`, the dual-track model, and the manifest
 schema.
 
+## Releasing
+
+For cutting a release — the SemVer policy across the CLI + memory store + host
+adapters, the tag/changelog/build/publish workflow, the rollback strategy, and a
+captured dry-run rehearsal — see the
+[release workflow & versioning policy guide](docs/release-workflow.md). The
+dry-run-by-default helper [`scripts/release.sh`](scripts/release.sh) runs the
+pre-flight checks and prints the release commands.
+
 ## Wiki Repo Structure
 
 After running `./install.sh` (or `mnemos install .`):
