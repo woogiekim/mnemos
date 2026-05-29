@@ -13,6 +13,10 @@
 
 > Companion docs — cross-linked, not duplicated:
 >
+> - [Unified Inspection UI](./unified-inspection-ui.md) — the `mnemos ui`
+>   desktop app (issue #83) that combines this inspect surface with the domain
+>   graph and a policy-cohesion panel; it reuses `build_inspect_payload`
+>   verbatim for its Memory tab.
 > - [Domain-Relationship Graph View](./domain-graph-view.md) — sibling
 >   `mnemos graph` UI, same packaging/template pattern.
 > - [Security & Privacy](./security-privacy.md) — what stays local; the
