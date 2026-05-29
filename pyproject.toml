@@ -50,3 +50,6 @@ exclude_also = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["core*", "agents*"]
+
+[tool.setuptools.package-data]
+core = ["templates/*.html"]

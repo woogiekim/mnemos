@@ -58,11 +58,6 @@ def _truncate_preview(content: str, width: int, full: bool) -> str:
     return content[:width] + "..."
 
 
-def _default_template_path() -> Path:
-    """Return the path to the bundled HTML template."""
-    return Path(__file__).resolve().parent / "templates" / "graph.html"
-
-
 def build_graph_payload(
     items: list[dict],
     preview_width: int = _DEFAULT_PREVIEW_WIDTH,
@@ -157,8 +152,15 @@ def render_html(
     """
     import json
 
-    path = template_path if template_path is not None else _default_template_path()
-    template_text = Path(path).read_text(encoding="utf-8")
+    if template_path is not None:
+        template_text = Path(template_path).read_text(encoding="utf-8")
+    else:
+        from importlib.resources import files
+
+        template_text = (
+            files("core.templates").joinpath("graph.html").read_text("utf-8")
+        )
+
     payload_json = json.dumps(payload, ensure_ascii=False)
     return template_text.replace(_GRAPH_DATA_PLACEHOLDER, payload_json)
 
