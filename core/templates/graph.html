@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mnemos · domain graph</title>
+  <style>
+    :root {
+      --bg: #fafafa;
+      --fg: #1a1a1a;
+      --muted: #666;
+      --accent: #1f6feb;
+      --panel-bg: #ffffff;
+      --panel-border: #d0d7de;
+      --badge-bg: #eaeef2;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    header { padding: 12px 20px; border-bottom: 1px solid var(--panel-border); background: #fff; }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+    main { display: flex; height: calc(100vh - 90px); }
+    canvas { flex: 1 1 auto; cursor: grab; background: #fff; }
+    aside {
+      width: 360px; max-width: 40vw; padding: 16px;
+      border-left: 1px solid var(--panel-border); background: var(--panel-bg);
+      overflow-y: auto;
+    }
+    aside[hidden] { display: none; }
+    aside header { display: flex; justify-content: space-between; align-items: center;
+                   padding: 0 0 8px 0; border-bottom: 1px solid var(--panel-border); margin-bottom: 12px; background: transparent; }
+    aside h2 { margin: 0; font-size: 16px; }
+    aside button {
+      border: none; background: transparent; font-size: 20px; line-height: 1;
+      cursor: pointer; color: var(--muted);
+    }
+    aside button:hover { color: var(--fg); }
+    aside ul { list-style: none; margin: 0; padding: 0; }
+    aside li {
+      padding: 8px 0; border-bottom: 1px solid var(--panel-border);
+      font-size: 13px; line-height: 1.45;
+    }
+    aside li:last-child { border-bottom: none; }
+    .mid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+    .badge {
+      display: inline-block; padding: 1px 6px; border-radius: 3px;
+      background: var(--badge-bg); color: var(--muted);
+      font-size: 11px; margin-left: 6px;
+    }
+    .tags { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    #empty-state { padding: 40px; text-align: center; color: var(--muted); font-size: 14px; }
+    footer { padding: 8px 20px; border-top: 1px solid var(--panel-border);
+             background: #fff; color: var(--muted); font-size: 12px;
+             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+</head>
+<body>
+  <header><h1>mnemos · domain graph</h1></header>
+  <main>
+    <canvas id="graph" width="1200" height="700"></canvas>
+    <aside id="drilldown" role="complementary" hidden>
+      <header>
+        <h2 id="drilldown-title">Domain</h2>
+        <button id="drilldown-close" aria-label="Close">&times;</button>
+      </header>
+      <div id="drilldown-body"></div>
+    </aside>
+  </main>
+  <p id="empty-state" hidden>no domains yet — capture some memories first</p>
+  <footer id="meta"></footer>
+
+  <script id="graph-data" type="application/json">__GRAPH_DATA_JSON__</script>
+  <script>
+    // Vendored canvas force-directed renderer + drill-down handler.
+    // No external deps, no network, no eval. ~190 LOC.
+    (function () {
+      var dataEl = document.getElementById('graph-data');
+      var payload = JSON.parse(dataEl.textContent || '{}');
+      var canvas = document.getElementById('graph');
+      var ctx = canvas.getContext('2d');
+      var aside = document.getElementById('drilldown');
+      var asideTitle = document.getElementById('drilldown-title');
+      var asideBody = document.getElementById('drilldown-body');
+      var closeBtn = document.getElementById('drilldown-close');
+      var emptyState = document.getElementById('empty-state');
+      var meta = document.getElementById('meta');
+
+      meta.textContent =
+        'schema_version=' + (payload.schema_version || '?') +
+        ' · generated_at=' + (payload.generated_at || '?');
+
+      var domains = payload.domains || [];
+      var rels = payload.relationships || [];
+      var memories = payload.memories || {};
+
+      if (domains.length === 0) {
+        emptyState.hidden = false;
+        canvas.style.display = 'none';
+        return;
+      }
+
+      // Build node and edge tables. Each domain is a node; member memories
+      // are revealed in the drill-down panel rather than rendered as nodes.
+      var nodes = domains.map(function (d, i) {
+        var theta = (2 * Math.PI * i) / domains.length;
+        return {
+          key: d.key,
+          label: d.label || d.key,
+          score: typeof d.cohesion_score === 'number' ? d.cohesion_score : 1.0,
+          members: d.member_ids || [],
+          x: canvas.width / 2 + Math.cos(theta) * 200,
+          y: canvas.height / 2 + Math.sin(theta) * 200,
+          vx: 0, vy: 0,
+        };
+      });
+      var keyToNode = {};
+      nodes.forEach(function (n) { keyToNode[n.key] = n; });
+
+      // Edges between domain nodes derive from relationships whose source/target
+      // ids land in different domains. We map each member id back to its first
+      // owning domain key for the simple visual layer.
+      var memberToDomain = {};
+      nodes.forEach(function (n) {
+        n.members.forEach(function (mid) {
+          if (!(mid in memberToDomain)) memberToDomain[mid] = n.key;
+        });
+      });
+      var edgeSet = {};
+      var edges = [];
+      rels.forEach(function (r) {
+        var sk = memberToDomain[r.source_id];
+        var tk = memberToDomain[r.target_id];
+        if (!sk || !tk || sk === tk) return;
+        var key = sk < tk ? sk + '|' + tk + '|' + r.kind : tk + '|' + sk + '|' + r.kind;
+        if (edgeSet[key]) return;
+        edgeSet[key] = true;
+        edges.push({ source: sk, target: tk, kind: r.kind });
+      });
+
+      var EDGE_STYLE = {
+        shares_tag:        { color: '#1f6feb', dash: [] },
+        same_layer:        { color: '#8c8c8c', dash: [4, 3] },
+        co_domain:         { color: '#2da44e', dash: [] },
+        promotion_lineage: { color: '#bf8700', dash: [] },
+        references:        { color: '#bf8700', dash: [4, 3] },
+      };
+
+      function step() {
+        // Repulsion between every pair.
+        for (var i = 0; i < nodes.length; i++) {
+          for (var j = i + 1; j < nodes.length; j++) {
+            var a = nodes[i], b = nodes[j];
+            var dx = a.x - b.x, dy = a.y - b.y;
+            var d2 = dx * dx + dy * dy + 0.01;
+            var f = 4000 / d2;
+            var dist = Math.sqrt(d2);
+            var fx = (dx / dist) * f, fy = (dy / dist) * f;
+            a.vx += fx; a.vy += fy;
+            b.vx -= fx; b.vy -= fy;
+          }
+        }
+        // Spring along edges.
+        edges.forEach(function (e) {
+          var a = keyToNode[e.source], b = keyToNode[e.target];
+          if (!a || !b) return;
+          var dx = b.x - a.x, dy = b.y - a.y;
+          var d = Math.sqrt(dx * dx + dy * dy) + 0.01;
+          var k = (d - 160) * 0.01;
+          var fx = (dx / d) * k, fy = (dy / d) * k;
+          a.vx += fx; a.vy += fy;
+          b.vx -= fx; b.vy -= fy;
+        });
+        // Center bias + damping + integrate.
+        nodes.forEach(function (n) {
+          n.vx += (canvas.width / 2 - n.x) * 0.0008;
+          n.vy += (canvas.height / 2 - n.y) * 0.0008;
+          n.vx *= 0.82; n.vy *= 0.82;
+          n.x += n.vx; n.y += n.vy;
+        });
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        edges.forEach(function (e) {
+          var a = keyToNode[e.source], b = keyToNode[e.target];
+          if (!a || !b) return;
+          var style = EDGE_STYLE[e.kind] || { color: '#999', dash: [] };
+          ctx.strokeStyle = style.color;
+          ctx.setLineDash(style.dash);
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        });
+        ctx.setLineDash([]);
+        nodes.forEach(function (n) {
+          var r = 8 + 18 * Math.max(0, Math.min(1, n.score));
+          ctx.beginPath();
+          ctx.fillStyle = '#1f6feb';
+          ctx.strokeStyle = '#0b3a8c';
+          ctx.lineWidth = 1.5;
+          ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = '#1a1a1a';
+          ctx.font = '12px -apple-system, system-ui, sans-serif';
+          ctx.fillText(n.label, n.x + r + 4, n.y + 4);
+          n._r = r;
+        });
+      }
+
+      // Run a fixed number of integration frames for initial layout.
+      for (var s = 0; s < 300; s++) step();
+      draw();
+
+      // Click → drill-down. Hit-test against current node positions.
+      canvas.addEventListener('click', function (evt) {
+        var rect = canvas.getBoundingClientRect();
+        var scaleX = canvas.width / rect.width;
+        var scaleY = canvas.height / rect.height;
+        var cx = (evt.clientX - rect.left) * scaleX;
+        var cy = (evt.clientY - rect.top) * scaleY;
+        for (var i = nodes.length - 1; i >= 0; i--) {
+          var n = nodes[i];
+          var dx = cx - n.x, dy = cy - n.y;
+          if (dx * dx + dy * dy <= (n._r || 12) * (n._r || 12)) {
+            openDrilldown(n);
+            return;
+          }
+        }
+      });
+
+      function openDrilldown(node) {
+        asideTitle.textContent = node.label + ' (' + node.key + ')';
+        var html = '<p>cohesion_score: ' + node.score.toFixed(3) + '</p>';
+        if (node.members.length === 0) {
+          html += '<p class="tags">no member memories</p>';
+        } else {
+          html += '<ul>';
+          for (var i = 0; i < node.members.length; i++) {
+            var mid = node.members[i];
+            var m = memories[mid] || { id: mid, layer: '?', tags: [], content_preview: '' };
+            var tags = (m.tags || []).join(', ');
+            html += '<li>';
+            html += '<span class="mid">' + escapeHtml(m.id) + '</span>';
+            html += '<span class="badge">' + escapeHtml(m.layer) + '</span>';
+            if (tags) html += '<div class="tags">' + escapeHtml(tags) + '</div>';
+            html += '<div>' + escapeHtml(m.content_preview) + '</div>';
+            html += '</li>';
+          }
+          html += '</ul>';
+        }
+        asideBody.innerHTML = html;
+        aside.hidden = false;
+      }
+
+      function closeDrilldown() { aside.hidden = true; }
+      closeBtn.addEventListener('click', closeDrilldown);
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') closeDrilldown();
+      });
+
+      function escapeHtml(s) {
+        s = (s == null) ? '' : String(s);
+        return s
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+    })();
+  </script>
+</body>
+</html>
