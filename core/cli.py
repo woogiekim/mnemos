@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import webbrowser
 from pathlib import Path
 
 import click
@@ -2867,3 +2868,97 @@ def memory_migrate(
     )
     if actual_skipped:
         click.echo(f"Skipped {actual_skipped} already up-to-date item(s)")
+
+
+# ---------------------------------------------------------------------------
+# graph — domain-relationship graph-view UI (issue #68)
+# ---------------------------------------------------------------------------
+@cli.command("graph")
+@click.option(
+    "--output",
+    "output",
+    default="./domain-graph.html",
+    type=click.Path(dir_okay=False, writable=True),
+    help="Output HTML file path (default: ./domain-graph.html).",
+)
+@click.option(
+    "--layer",
+    "layers",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--limit",
+    "limit",
+    default=None,
+    type=int,
+    help="Cap the number of source memory items.",
+)
+@click.option(
+    "--preview-width",
+    "preview_width",
+    default=240,
+    type=int,
+    help="Character cap for the drill-down content preview (default: 240).",
+)
+@click.option(
+    "--full",
+    "full",
+    is_flag=True,
+    default=False,
+    help="Embed full memory content in drill-down (overrides --preview-width).",
+)
+@click.option(
+    "--open/--no-open",
+    "open_browser",
+    default=False,
+    help="Open the rendered HTML in the default browser (default: --no-open).",
+)
+def memory_graph(
+    output: str,
+    layers: tuple[str, ...],
+    limit: int | None,
+    preview_width: int,
+    full: bool,
+    open_browser: bool,
+) -> None:
+    """Render the domain-relationship graph as a self-contained HTML file.
+
+    Builds the issue-#67 ``DomainGraph`` from the active backend's memories,
+    augments it with a drill-down memory lookup, and writes a vendored
+    canvas force-layout HTML file at OUTPUT.
+    """
+    from core.graphview import write_graph_html
+
+    gw = _get_gateway()
+    layer_list = list(layers) if layers else None
+    rows = gw.list_all(layers=layer_list, limit=limit)
+
+    # Project gw.list_all() rows ({"item_id", "layer", "content", "tags",
+    # "created_at"}) into the cohesion-expected item shape ({"id", "layer",
+    # "content", "tags"}). Out-of-band fields (created_at) are dropped.
+    items = [
+        {
+            "id": row.get("item_id"),
+            "layer": row.get("layer", ""),
+            "content": row.get("content", ""),
+            "tags": row.get("tags", []) or [],
+        }
+        for row in rows
+    ]
+
+    output_path = Path(output)
+    try:
+        written = write_graph_html(
+            items,
+            output_path,
+            preview_width=preview_width,
+            full=full,
+        )
+    except ValueError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"[mnemos] wrote {written}")
+    if open_browser:
+        webbrowser.open(str(written))
