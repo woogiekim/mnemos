@@ -1,0 +1,434 @@
+"""Final-memory distillation — persist derived domains + aggregated policies (#84).
+
+This module is the *persistence / management* layer that issue #67's
+read-only cohesion derivation (:mod:`core.cohesion`) lacks. It turns the
+ephemeral, on-demand views produced by :func:`core.cohesion.derive_domains`
+and :func:`core.cohesion.aggregate_policy_cohesion` into **managed, durable
+memory artifacts** with lineage, lifecycle-aware layers, deterministic
+idempotent re-builds, and sync/backup safety.
+
+It deliberately reuses three existing seams rather than duplicating logic:
+
+* :func:`core.cohesion.derive_domains` / :func:`core.cohesion.aggregate_policy_cohesion`
+  produce the artifact *bodies* (read-only over the item dicts).
+* :func:`core.compaction.derive_merged_layer` derives each artifact's layer
+  from its sources via :class:`~core.policy.PolicyEngine` (never hard-coded).
+* ``gateway.capture(extra_metadata=..., no_classify=True, item_id=...)`` is the
+  single persistence seam, so FTS / audit / event-bus all run normally and no
+  public API on the gateway / store / policy / cohesion / backup modules changes.
+
+Lineage is **non-destructive and bidirectional** — the deliberate difference
+from #81 compaction:
+
+* The artifact carries ``sources: [...]`` plus an ``artifact_kind`` marker
+  (``"domain"`` | ``"policy"``).
+* Each source gains an APPEND-ONLY ``distilled_into: [...]`` back-pointer.
+  Sources are NEVER archived, superseded, or forgotten — domains / policies are
+  an *additive* higher layer over the originals (#81 supersedes-and-archives;
+  #84 only annotates).
+
+Determinism + idempotency:
+
+* The artifact id is ``uuid5(namespace, "{kind}:{sorted source ids}")`` so the
+  same kind over the same source-set always yields the same id and body.
+* Re-running is a no-op: :func:`apply_domain_plan` / :func:`apply_policy_plan`
+  skip when ``store.read(artifact_id)`` already resolves, so no duplicate
+  artifact is written and ``distilled_into`` is never double-appended.
+
+Feedback-loop guard: the planners EXCLUDE items that already carry an
+``artifact_kind`` of ``"domain"`` or ``"policy"`` from the source pool, so a
+distilled artifact can never become a source of a future re-derivation. (The
+``distilled:`` marker-tag namespace is additionally outside
+:data:`core.cohesion._POLICY_PREFIXES`, so policy cohesion ignores artifacts.)
+
+The new per-item front-matter is additive YAML — ``backup.SCHEMA_VERSION`` is
+NOT bumped and the fields ride through backup/restore + git-sync round-trips
+without any reader-side change.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import uuid
+from typing import Any, Sequence
+
+from core import cohesion
+from core.compaction import _GatewayLike, _PolicyLike, derive_merged_layer
+
+
+#: Stable namespace for deterministic artifact ids. Generated once and frozen —
+#: changing it would change every artifact id, so it is part of the contract.
+_DISTILL_NAMESPACE = uuid.UUID("6d6e656d-6f73-8400-a000-646973746c31")
+
+#: artifact_kind discriminators.
+KIND_DOMAIN = "domain"
+KIND_POLICY = "policy"
+
+#: distillation_method identifiers recorded on each artifact.
+DISTILL_METHOD_DOMAIN = "domain-distill-v1"
+DISTILL_METHOD_POLICY = "policy-distill-v1"
+
+#: Marker-tag namespace for distilled artifacts. Outside cohesion._POLICY_PREFIXES
+#: so re-derivation never treats an artifact as a policy theme.
+_DISTILL_TAG_PREFIX = "distilled"
+
+#: Metadata key for the append-only back-pointer written on each source.
+DISTILLED_INTO_KEY = "distilled_into"
+
+#: artifact_kind values that must never re-enter the source pool.
+_ARTIFACT_KINDS = frozenset({KIND_DOMAIN, KIND_POLICY})
+
+
+# --------------------------------------------------------------------------- #
+# Plan data classes (pure — produced without writing)
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True)
+class DistillPlan:
+    """A single would-be artifact — the pure result of a planner.
+
+    ``artifact_id`` is deterministic, so a plan can be compared / dry-run
+    without writing. ``existing`` is set by the planner when the artifact id
+    already resolves in the store, so the CLI's review output can flag which
+    plans an ``apply`` would skip.
+    """
+
+    kind: str
+    artifact_id: str
+    label: str
+    sources: tuple[str, ...]
+    layer: str
+    content: str
+    method: str
+    tag: str
+    extra_metadata: dict[str, Any]
+    existing: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class DistillResult:
+    """Outcome of applying a single :class:`DistillPlan`."""
+
+    kind: str
+    artifact_id: str
+    sources: tuple[str, ...]
+    layer: str
+    applied: bool
+
+
+# --------------------------------------------------------------------------- #
+# Source-pool collection (read-only; feedback-loop guard lives here)
+# --------------------------------------------------------------------------- #
+def collect_source_items(
+    gateway: _GatewayLike,
+    layers: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return live memory items eligible to be distilled.
+
+    Walks every layer (or the named subset) via the store's
+    ``iter_layer_items`` — the same collection path the compact CLI uses — and
+    EXCLUDES any item already carrying an ``artifact_kind`` of ``"domain"`` or
+    ``"policy"``. This is the feedback-loop guard: a distilled artifact can
+    never become a source of a later re-derivation.
+    """
+    from core.layers import LAYER_STATIC_PATHS
+
+    static_layers = list(LAYER_STATIC_PATHS.keys())
+    dynamic_layers = ["ephemeral", "working", "session"]
+    all_layers = static_layers + dynamic_layers
+    if layers:
+        all_layers = [layer for layer in all_layers if layer in layers]
+
+    items: list[dict[str, Any]] = []
+    for layer in all_layers:
+        try:
+            layer_items = list(gateway._store.iter_layer_items(layer))
+        except Exception:  # pragma: no cover - defensive; iter_layer_items is best-effort
+            # iter_layer_items is best-effort — silently skip layers that error.
+            continue
+        for item in layer_items:
+            if item.get("artifact_kind") in _ARTIFACT_KINDS:
+                continue
+            items.append(item)
+
+    return items
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic id + content
+# --------------------------------------------------------------------------- #
+def _artifact_id(kind: str, source_ids: Sequence[str]) -> str:
+    """Return the deterministic artifact id for *kind* over *source_ids*."""
+    key = f"{kind}:{','.join(sorted(source_ids))}"
+    return str(uuid.uuid5(_DISTILL_NAMESPACE, key))
+
+
+def _sources_block(sources: Sequence[dict[str, Any]]) -> list[str]:
+    """Return the deterministic ``## Sources`` audit lines (mirrors #81)."""
+    lines = ["## Sources", ""]
+    for src in sorted(sources, key=lambda s: str(s.get("id", ""))):
+        sid = str(src.get("id", "?"))
+        layer = str(src.get("layer", "?"))
+        created = str(src.get("created_at", "?"))
+        lines.append(f"- {sid} (layer={layer}, created_at={created})")
+    return lines
+
+
+def _domain_content(domain: cohesion.Domain, sources: Sequence[dict[str, Any]]) -> str:
+    """Return the deterministic markdown body for a domain artifact."""
+    lines = [f"# Domain: {domain.label}", ""]
+    lines.append(f"- key: {domain.key}")
+    lines.append(f"- cohesion_score: {domain.cohesion_score}")
+    lines.append(f"- layers: {', '.join(domain.layers) if domain.layers else '(none)'}")
+    lines.append(f"- tags: {', '.join(domain.tags) if domain.tags else '(none)'}")
+    lines.append("")
+    lines.extend(_sources_block(sources))
+
+    return "\n".join(lines) + "\n"
+
+
+def _policy_content(
+    cluster: cohesion.PolicyCohesion, sources: Sequence[dict[str, Any]]
+) -> str:
+    """Return the deterministic markdown body for a policy artifact."""
+    lines = [f"# Policy: {cluster.theme}", ""]
+    lines.append(f"- recurrence: {cluster.recurrence}")
+    lines.append(f"- layers: {', '.join(cluster.layers) if cluster.layers else '(none)'}")
+    lines.append(f"- suggested_layer: {cluster.suggested_layer or '(none)'}")
+    lines.append("")
+    lines.extend(_sources_block(sources))
+
+    return "\n".join(lines) + "\n"
+
+
+def _index_items_by_id(items: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return a ``{id: item}`` map for the items that carry an id."""
+    indexed: dict[str, dict[str, Any]] = {}
+    for item in items:
+        iid = item.get("id")
+        if iid:
+            indexed[str(iid)] = item
+    return indexed
+
+
+def _artifact_exists(gateway: _GatewayLike, artifact_id: str) -> bool:
+    """Return ``True`` when *artifact_id* already resolves in the store.
+
+    Uses ``store.read`` (side-effect free) rather than ``gateway.read`` so the
+    idempotency probe never bumps access_count or triggers auto-promotion.
+    """
+    try:
+        gateway._store.read(artifact_id)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Domain planning + apply
+# --------------------------------------------------------------------------- #
+def compute_domain_plan(
+    gateway: _GatewayLike,
+    *,
+    layers: Sequence[str] | None = None,
+) -> list[DistillPlan]:
+    """Build would-be domain artifacts WITHOUT writing (pure planner).
+
+    Derives domains over the eligible source pool via
+    :func:`core.cohesion.derive_domains`, then for each domain computes the
+    deterministic artifact id, layer (via :func:`derive_merged_layer`), body,
+    and additive metadata. Solo / id-less domains are skipped — distilling a
+    domain with no member ids would produce an empty lineage.
+    """
+    items = collect_source_items(gateway, layers)
+    indexed = _index_items_by_id(items)
+    domains = cohesion.derive_domains(items)
+
+    plans: list[DistillPlan] = []
+    for domain in domains:
+        member_sources = [indexed[mid] for mid in domain.member_ids if mid in indexed]
+        if not member_sources:  # pragma: no cover - defensive; domain ids always index
+            continue
+
+        source_ids = tuple(str(s.get("id")) for s in member_sources)
+        artifact_id = _artifact_id(KIND_DOMAIN, source_ids)
+        layer = derive_merged_layer(member_sources, gateway._policy)
+        content = _domain_content(domain, member_sources)
+
+        extra_metadata = {
+            "artifact_kind": KIND_DOMAIN,
+            "distillation_method": DISTILL_METHOD_DOMAIN,
+            "sources": sorted(source_ids),
+            "cohesion_schema_version": cohesion.SCHEMA_VERSION,
+            "domain_key": domain.key,
+        }
+        plans.append(
+            DistillPlan(
+                kind=KIND_DOMAIN,
+                artifact_id=artifact_id,
+                label=domain.label,
+                sources=tuple(sorted(source_ids)),
+                layer=layer,
+                content=content,
+                method=DISTILL_METHOD_DOMAIN,
+                tag=f"{_DISTILL_TAG_PREFIX}:{KIND_DOMAIN}",
+                extra_metadata=extra_metadata,
+                existing=_artifact_exists(gateway, artifact_id),
+            )
+        )
+
+    return plans
+
+
+def apply_domain_plan(gateway: _GatewayLike, plan: DistillPlan) -> DistillResult:
+    """Persist a domain *plan* — idempotent, non-destructive lineage."""
+    return _apply_plan(gateway, plan)
+
+
+# --------------------------------------------------------------------------- #
+# Policy planning + apply
+# --------------------------------------------------------------------------- #
+def compute_policy_plan(
+    gateway: _GatewayLike,
+    *,
+    policy: _PolicyLike | None = None,
+    layers: Sequence[str] | None = None,
+) -> list[DistillPlan]:
+    """Build would-be policy artifacts WITHOUT writing (pure planner).
+
+    Aggregates recurring policy themes over the eligible source pool via
+    :func:`core.cohesion.aggregate_policy_cohesion`. The artifact layer is
+    derived from the cluster's source items (not from the cohesion-suggested
+    layer) so the PolicyEngine promotion chain — not a hard-coded value — is
+    the single source of truth, consistent with #81 compaction.
+    """
+    items = collect_source_items(gateway, layers)
+    indexed = _index_items_by_id(items)
+    effective_policy = policy if policy is not None else gateway._policy
+    clusters = cohesion.aggregate_policy_cohesion(items, effective_policy)
+
+    plans: list[DistillPlan] = []
+    for cluster in clusters:
+        member_sources = [indexed[mid] for mid in cluster.member_ids if mid in indexed]
+        if not member_sources:  # pragma: no cover - defensive; cluster ids always index
+            continue
+
+        source_ids = tuple(str(s.get("id")) for s in member_sources)
+        artifact_id = _artifact_id(KIND_POLICY, source_ids)
+        layer = derive_merged_layer(member_sources, effective_policy)
+        content = _policy_content(cluster, member_sources)
+
+        extra_metadata = {
+            "artifact_kind": KIND_POLICY,
+            "distillation_method": DISTILL_METHOD_POLICY,
+            "sources": sorted(source_ids),
+            "cohesion_schema_version": cohesion.SCHEMA_VERSION,
+            "policy_theme": cluster.theme,
+            "recurrence": cluster.recurrence,
+            "suggested_layer": cluster.suggested_layer,
+        }
+        plans.append(
+            DistillPlan(
+                kind=KIND_POLICY,
+                artifact_id=artifact_id,
+                label=cluster.theme,
+                sources=tuple(sorted(source_ids)),
+                layer=layer,
+                content=content,
+                method=DISTILL_METHOD_POLICY,
+                tag=f"{_DISTILL_TAG_PREFIX}:{KIND_POLICY}",
+                extra_metadata=extra_metadata,
+                existing=_artifact_exists(gateway, artifact_id),
+            )
+        )
+
+    return plans
+
+
+def apply_policy_plan(gateway: _GatewayLike, plan: DistillPlan) -> DistillResult:
+    """Persist a policy *plan* — idempotent, non-destructive lineage."""
+    return _apply_plan(gateway, plan)
+
+
+# --------------------------------------------------------------------------- #
+# Shared apply path
+# --------------------------------------------------------------------------- #
+def _apply_plan(gateway: _GatewayLike, plan: DistillPlan) -> DistillResult:
+    """Write *plan* idempotently and append non-destructive back-links.
+
+    Skip-if-exists: when the deterministic artifact id already resolves in the
+    store, nothing is written and no ``distilled_into`` back-link is touched —
+    so a second run is a true no-op.
+    """
+    if _artifact_exists(gateway, plan.artifact_id):
+        return DistillResult(
+            kind=plan.kind,
+            artifact_id=plan.artifact_id,
+            sources=plan.sources,
+            layer=plan.layer,
+            applied=False,
+        )
+
+    gateway.capture(
+        content=plan.content,
+        layer=plan.layer,
+        item_id=plan.artifact_id,
+        tags=[plan.tag],
+        extra_metadata=plan.extra_metadata,
+        no_classify=True,
+    )
+
+    for source_id in plan.sources:
+        _append_distilled_into(gateway, source_id, plan.artifact_id)
+
+    return DistillResult(
+        kind=plan.kind,
+        artifact_id=plan.artifact_id,
+        sources=plan.sources,
+        layer=plan.layer,
+        applied=True,
+    )
+
+
+def _append_distilled_into(
+    gateway: _GatewayLike, source_id: str, artifact_id: str
+) -> None:
+    """Append *artifact_id* to *source_id*'s ``distilled_into`` list.
+
+    Non-destructive and append-only: the existing list is preserved, the new
+    id is added only when absent (dedupe), and the source is never archived,
+    superseded, or moved. The path is re-resolved via ``store.read`` so a
+    silent auto-promotion move never strands the back-link write.
+    """
+    try:
+        source = gateway._store.read(source_id)
+    except FileNotFoundError:
+        # The source disappeared (hard-deleted by a hook, etc.). The artifact's
+        # own `sources` array remains the authoritative lineage record.
+        return
+
+    existing = source.get(DISTILLED_INTO_KEY)
+    distilled_into = list(existing) if isinstance(existing, list) else []
+    if artifact_id in distilled_into:
+        return
+    distilled_into.append(artifact_id)
+
+    path = source.get("_path")
+    if path:
+        gateway._store.update(path, metadata_updates={DISTILLED_INTO_KEY: distilled_into})
+
+
+# --------------------------------------------------------------------------- #
+# Audit navigation
+# --------------------------------------------------------------------------- #
+def restore_distilled_source(gateway: _GatewayLike, source_id: str) -> dict[str, Any]:
+    """Return the snapshot for *source_id* with its ``distilled_into`` surfaced.
+
+    Mirrors :func:`core.compaction.restore_source`: a thin, side-effect-free
+    read (via the store, not the gateway) that documents the audit intent. The
+    returned dict always carries a ``distilled_into`` key (an empty list when
+    the source has not yet contributed to any distilled artifact).
+    """
+    item = gateway._store.read(source_id)
+    existing = item.get(DISTILLED_INTO_KEY)
+    item[DISTILLED_INTO_KEY] = list(existing) if isinstance(existing, list) else []
+    return item
