@@ -2965,6 +2965,103 @@ def memory_graph(
 
 
 # ---------------------------------------------------------------------------
+# inspect — memory-inspection UI (issue #80)
+# ---------------------------------------------------------------------------
+@cli.command("inspect")
+@click.option(
+    "--output",
+    "output",
+    default="./memory-inspect.html",
+    type=click.Path(dir_okay=False, writable=True),
+    help="Output HTML file path (default: ./memory-inspect.html).",
+)
+@click.option(
+    "--layer",
+    "layers",
+    multiple=True,
+    help="Restrict source items to the named layer(s); repeatable.",
+)
+@click.option(
+    "--limit",
+    "limit",
+    default=None,
+    type=int,
+    help="Cap the number of source memory items.",
+)
+@click.option(
+    "--preview-width",
+    "preview_width",
+    default=240,
+    type=int,
+    help="Character cap for the drill-down content preview (default: 240).",
+)
+@click.option(
+    "--full",
+    "full",
+    is_flag=True,
+    default=False,
+    help="Embed full memory content in drill-down (overrides --preview-width).",
+)
+@click.option(
+    "--open/--no-open",
+    "open_browser",
+    default=False,
+    help="Open the rendered HTML in the default browser (default: --no-open).",
+)
+def memory_inspect(
+    output: str,
+    layers: tuple[str, ...],
+    limit: int | None,
+    preview_width: int,
+    full: bool,
+    open_browser: bool,
+) -> None:
+    """Render the memory-inspection surface as a self-contained HTML file.
+
+    Walks the active backend's persisted memories layer-by-layer and emits
+    a vendored static-HTML inspection UI (search + drill-down + trust /
+    provenance / lifecycle panels) at OUTPUT. Mirrors ``mnemos graph`` —
+    no network, no eval, embedded JSON payload only.
+    """
+    from core.inspectview import write_inspect_html
+    from core.layers import LAYER_STATIC_PATHS
+
+    gw = _get_gateway()
+
+    static_layers = list(LAYER_STATIC_PATHS.keys())
+    dynamic_layers = ["ephemeral", "working", "session"]
+    all_layers = static_layers + dynamic_layers
+    if layers:
+        all_layers = [l for l in all_layers if l in layers]
+
+    items: list[dict] = []
+    for layer in all_layers:
+        if limit is not None and len(items) >= limit:
+            break
+        for item in gw._store.iter_layer_items(layer):
+            if limit is not None and len(items) >= limit:
+                break
+            items.append(item)
+
+    output_path = Path(output)
+    try:
+        written = write_inspect_html(
+            items,
+            output_path,
+            gw._policy,
+            preview_width=preview_width,
+            full=full,
+        )
+    except ValueError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"[mnemos] wrote {written}")
+    if open_browser:
+        webbrowser.open(str(written))
+
+
+# ---------------------------------------------------------------------------
 # backup / restore — explicit archive snapshots (issue #75)
 # ---------------------------------------------------------------------------
 @cli.command("backup")
