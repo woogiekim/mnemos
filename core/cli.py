@@ -745,7 +745,10 @@ def doctor_cmd() -> None:
       CursorAdapter ....... FIXED (re-registered 2 hook(s))
       SomeAdapter ......... SKIPPED (not detected)
     """
+    import os
+
     from core.adapters import ClaudeCodeAdapter, CursorAdapter
+    from core.adapters.claude import is_unsafe_repo_root
 
     home = Path.home()
     adapters = [ClaudeCodeAdapter(), CursorAdapter()]
@@ -762,12 +765,23 @@ def doctor_cmd() -> None:
         ok, missing = adapter.verify_hooks(home)
         if ok:
             click.echo(f"{label} {dots} OK")
-        else:
-            # Auto-repair: re-register all hooks without requiring a flag
-            adapter.install(home)
-            count = len(missing)
-            click.echo(f"{label} {dots} FIXED (re-registered {count} hook(s))")
-            all_ok = False
+            continue
+
+        # Auto-repair would call adapter.install(home), which templates the
+        # active MNEMOS_REPO_ROOT into hook commands. Guard the Claude hook
+        # repair with the shared predicate so a temp/dangling repo_root can
+        # never be baked into a real settings.json (Issue #70). This condition
+        # alone is not a failure — doctor still exits 0.
+        repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
+        if isinstance(adapter, ClaudeCodeAdapter) and is_unsafe_repo_root(repo_root):
+            click.echo(f"{label} {dots} SKIPPED (unsafe repo_root {repo_root!r})")
+            continue
+
+        # Auto-repair: re-register all hooks without requiring a flag
+        adapter.install(home)
+        count = len(missing)
+        click.echo(f"{label} {dots} FIXED (re-registered {count} hook(s))")
+        all_ok = False
 
     if all_ok:
         click.echo("[mnemos] All hooks verified — nothing to repair.")

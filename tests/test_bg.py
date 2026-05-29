@@ -774,9 +774,10 @@ class TestBgCheckCliCommand:
 # ---------------------------------------------------------------------------
 
 class TestClaudeAdapterBgHook:
-    def test_install_registers_two_post_tool_use_entries(self, tmp_path: Path, monkeypatch):
+    def test_install_registers_two_post_tool_use_entries(self, tmp_path: Path, monkeypatch, safe_repo_root):
         """After install, settings.json should have two PostToolUse hooks."""
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+        # Issue #70: a SAFE repo_root is required for install() to template hooks;
+        # the autouse temp default would be refused. safe_repo_root sets it.
         from core.adapters.claude import ClaudeCodeAdapter
 
         claude_dir = tmp_path / ".claude"
@@ -793,8 +794,7 @@ class TestClaudeAdapterBgHook:
         post_hooks = data["hooks"].get("PostToolUse", [])
         assert len(post_hooks) == 2, f"Expected 2 PostToolUse hooks, got {len(post_hooks)}"
 
-    def test_install_registers_ingest_hook(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+    def test_install_registers_ingest_hook(self, tmp_path: Path, monkeypatch, safe_repo_root):
         from core.adapters.claude import ClaudeCodeAdapter
 
         claude_dir = tmp_path / ".claude"
@@ -811,8 +811,7 @@ class TestClaudeAdapterBgHook:
         cmds = " ".join(str(h) for h in post_hooks)
         assert "ingest-claude-md" in cmds
 
-    def test_install_registers_bg_hook(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+    def test_install_registers_bg_hook(self, tmp_path: Path, monkeypatch, safe_repo_root):
         from core.adapters.claude import ClaudeCodeAdapter
 
         claude_dir = tmp_path / ".claude"
@@ -856,8 +855,7 @@ class TestClaudeAdapterBgHook:
         assert not ok
         assert any("bg-check" in m for m in missing)
 
-    def test_verify_hooks_passes_when_all_present(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
+    def test_verify_hooks_passes_when_all_present(self, tmp_path: Path, monkeypatch, safe_repo_root):
         from core.adapters.claude import ClaudeCodeAdapter
 
         claude_dir = tmp_path / ".claude"
@@ -872,9 +870,8 @@ class TestClaudeAdapterBgHook:
         assert ok, f"Expected all hooks present but missing: {missing}"
         assert missing == []
 
-    def test_idempotent_install(self, tmp_path: Path, monkeypatch):
+    def test_idempotent_install(self, tmp_path: Path, monkeypatch, safe_repo_root):
         """Running install twice should not add duplicate hooks."""
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
         from core.adapters.claude import ClaudeCodeAdapter
         import json
 

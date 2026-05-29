@@ -94,6 +94,41 @@ _STOP_HOOK_TEMPLATE = {
 
 
 # ---------------------------------------------------------------------------
+# repo_root safety guard (Issue #70)
+# ---------------------------------------------------------------------------
+
+# Substring markers that indicate a temp / non-standard repo_root which must
+# never be templated into a real ~/.claude/settings.json. A test that isolates
+# MNEMOS_REPO_ROOT to a per-test temp dir (pytest tmp factory) would otherwise
+# bake a soon-to-be-deleted path into the developer's live settings, leaving the
+# mnemos hooks dangling. See tests/test_home_isolation.py.
+_UNSAFE_REPO_ROOT_MARKERS = ("pytest-of-", "/T/", "/tmp/", "/private/var/folders")
+
+
+def is_unsafe_repo_root(repo_root: str) -> bool:
+    """Return True when *repo_root* must not be templated into settings.json.
+
+    A repo_root is unsafe when ANY of the following holds:
+    - it is empty or whitespace-only;
+    - its path contains a temp / non-standard marker
+      (``pytest-of-``, ``/T/``, ``/tmp/``, ``/private/var/folders``);
+    - ``{repo_root}/hooks`` is not an existing directory on disk.
+
+    Otherwise the repo_root is safe and hooks template as before.
+    """
+    if not repo_root or not repo_root.strip():
+        return True
+
+    if any(marker in repo_root for marker in _UNSAFE_REPO_ROOT_MARKERS):
+        return True
+
+    if not (Path(repo_root) / "hooks").is_dir():
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -201,12 +236,20 @@ class ClaudeCodeAdapter(HostAdapter):
         messages: list[str] = []
         repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
 
-        # settings.json
+        # settings.json — refuse to template an unsafe repo_root into the hooks
+        # so a temp/dangling path can never be baked into a real settings.json
+        # (Issue #70). The existing hook commands are left untouched.
         settings_path = home / ".claude" / "settings.json"
-        msgs = self._install_settings_json(settings_path, repo_root)
-        messages.extend(msgs)
+        if is_unsafe_repo_root(repo_root):
+            messages.append(
+                f"[warning] refusing to template unsafe MNEMOS_REPO_ROOT "
+                f"({repo_root!r}) into {settings_path} — hooks left unchanged"
+            )
+        else:
+            msgs = self._install_settings_json(settings_path, repo_root)
+            messages.extend(msgs)
 
-        # CLAUDE.md
+        # CLAUDE.md — unaffected by the repo_root guard.
         claude_md_path = home / ".claude" / "CLAUDE.md"
         msgs = self._install_claude_md(claude_md_path)
         messages.extend(msgs)

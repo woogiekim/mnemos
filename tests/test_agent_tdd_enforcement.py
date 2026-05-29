@@ -278,7 +278,7 @@ class TestBackendSkillPaths:
     so skill-specific guidance (e.g. TDD cycle details) is skipped entirely.
     """
 
-    def test_backend_tdd_skill_path_is_reachable(self) -> None:
+    def test_backend_tdd_skill_path_is_reachable(self, real_home_snapshot) -> None:
         content = _read_agent("backend")
         # Extract absolute skill paths (starting with ~/.agent-crew) from the Skills section.
         # Relative paths like core/agents/skills/api-design.md are project-specific
@@ -291,9 +291,12 @@ class TestBackendSkillPaths:
             "The old (broken) path `~/.agent-crew/agents/skills/tdd.md` no longer exists — "
             "the correct path is `~/.agent-crew/system/agents/skills/tdd.md`"
         )
+        # Expand ~ against the developer's REAL home (the autouse HOME-isolation
+        # fixture redirects Path.home() to a temp dir; this test checks real
+        # on-disk asset reachability, not CLI home resolution). Issue #70.
+        real_home, _ = real_home_snapshot
         for raw_path in abs_skill_paths:
-            # Expand ~ to the real home directory
-            expanded = Path(raw_path.replace("~", str(Path.home())))
+            expanded = Path(raw_path.replace("~", str(real_home)))
             assert expanded.exists(), (
                 f"Skill file referenced in backend.md does not exist: {raw_path}\n"
                 f"Expanded to: {expanded}\n"

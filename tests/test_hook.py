@@ -590,10 +590,11 @@ class _FakeHome:
 
 
 class TestAdapterInstallHookFormat:
-    def test_install_writes_hook_script_reference(self, tmp_path, monkeypatch):
+    def test_install_writes_hook_script_reference(self, tmp_path, monkeypatch, safe_repo_root):
         """install() must write a UserPromptSubmit hook that references the script."""
-        fake = _FakeHome(tmp_path, repo_root="/my/mnemos")
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", fake.repo_root)
+        # Issue #70: install() refuses an unsafe repo_root; safe_repo_root sets a
+        # marker-free path with an existing hooks/ dir so templating proceeds.
+        fake = _FakeHome(tmp_path, repo_root=str(safe_repo_root))
 
         ClaudeCodeAdapter().install(fake.home)
 
@@ -604,11 +605,10 @@ class TestAdapterInstallHookFormat:
             for entry in user_hooks
         ), f"UserPromptSubmit.sh not found in hook entries: {user_hooks}"
 
-    def test_install_embeds_repo_root_in_command(self, tmp_path, monkeypatch):
+    def test_install_embeds_repo_root_in_command(self, tmp_path, monkeypatch, safe_repo_root):
         """install() must embed the actual MNEMOS_REPO_ROOT in the hook command."""
-        repo_root = "/specific/repo/path"
+        repo_root = str(safe_repo_root)
         fake = _FakeHome(tmp_path, repo_root=repo_root)
-        monkeypatch.setenv("MNEMOS_REPO_ROOT", repo_root)
 
         ClaudeCodeAdapter().install(fake.home)
 
