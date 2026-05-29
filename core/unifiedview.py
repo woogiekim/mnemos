@@ -294,6 +294,14 @@ def launch_app(html: str, *, title: str = "mnemos") -> None:
     imports and runs every other function in this module without pywebview
     installed.
 
+    The HTML is written to a temporary ``.html`` file (UTF-8) and loaded via a
+    ``file://`` URL rather than passed inline as ``html=``. Inline HTML is
+    size-limited in WKWebView/pywebview — the real ~1.7MB unified payload is
+    silently rendered as raw text instead of a UI (issue #83). A ``file://``
+    load is size-independent. The temp file lives for the lifetime of the
+    blocking :func:`webview.start` event loop and is removed afterwards, so no
+    temp files are left behind on normal window close.
+
     Args:
         html: The rendered unified-UI HTML string.
         title: Native window title.
@@ -313,5 +321,14 @@ def launch_app(html: str, *, title: str = "mnemos") -> None:
             "mnemos ui --output ./mnemos-ui.html"
         ) from exc
 
-    webview.create_window(title, html=html)
-    webview.start()
+    import tempfile
+
+    # Write the HTML to a temp file and load it via an absolute file:// URL.
+    # The TemporaryDirectory context spans both create_window and the blocking
+    # start() call, then removes the file when start() returns (normal close).
+    with tempfile.TemporaryDirectory(prefix="mnemos-ui-") as tmp_dir:
+        html_path = Path(tmp_dir, "mnemos-ui.html").resolve()
+        html_path.write_text(html, encoding="utf-8")
+
+        webview.create_window(title, url="file://" + str(html_path))
+        webview.start()

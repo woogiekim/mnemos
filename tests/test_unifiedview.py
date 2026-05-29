@@ -336,25 +336,66 @@ class TestRenderAndWrite:
 # launch_app — 100% coverage via fake-webview injection (no GUI, no loop)
 # --------------------------------------------------------------------------- #
 class TestLaunchApp:
-    def test_happy_path_calls_create_window_and_start(self, monkeypatch):
+    @staticmethod
+    def _fake_webview(captured: dict) -> types.ModuleType:
+        """A fake ``webview`` module whose ``start()`` inspects the live file.
+
+        ``start()`` mirrors the blocking event loop: at the moment it runs the
+        temp file must exist and hold the passed HTML. We capture both the URL
+        handed to ``create_window`` and the file's existence/content as seen
+        *during the session* so the test can assert the file:// + temp-file
+        mechanism without opening a real window.
+        """
         fake = types.ModuleType("webview")
-        fake.create_window = MagicMock()
-        fake.start = MagicMock()
+
+        def create_window(*args, **kwargs):
+            captured["create_window_args"] = args
+            captured["create_window_kwargs"] = kwargs
+            captured["url"] = kwargs.get("url", args[1] if len(args) > 1 else None)
+
+        def start():
+            url = captured["url"]
+            # file://<abspath> -> filesystem path
+            path = Path(url[len("file://"):])
+            captured["existed_during_start"] = path.exists()
+            captured["content_during_start"] = (
+                path.read_text(encoding="utf-8") if path.exists() else None
+            )
+            captured["path"] = path
+
+        fake.create_window = MagicMock(side_effect=create_window)
+        fake.start = MagicMock(side_effect=start)
+        return fake
+
+    def test_happy_path_loads_file_url_and_starts(self, monkeypatch):
+        captured: dict = {}
+        fake = self._fake_webview(captured)
         monkeypatch.setitem(sys.modules, "webview", fake)
 
-        unifiedview.launch_app("<html>hi</html>", title="My UI")
+        html = "<html>hi #83</html>"
+        unifiedview.launch_app(html, title="My UI")
 
-        fake.create_window.assert_called_once_with("My UI", html="<html>hi</html>")
+        # (a) create_window is called with a file:// url (and the right title).
+        assert captured["create_window_args"][0] == "My UI"
+        assert captured["url"].startswith("file://")
+        # No inline html= is passed anymore.
+        assert "html" not in captured["create_window_kwargs"]
+        # (b) the file the URL points at existed and held the HTML during start().
+        assert captured["existed_during_start"] is True
+        assert captured["content_during_start"] == html
+        # (c) start() was called.
         fake.start.assert_called_once_with()
+        # (d) the temp file is cleaned up after launch_app returns.
+        assert not captured["path"].exists()
 
     def test_default_title(self, monkeypatch):
-        fake = types.ModuleType("webview")
-        fake.create_window = MagicMock()
-        fake.start = MagicMock()
+        captured: dict = {}
+        fake = self._fake_webview(captured)
         monkeypatch.setitem(sys.modules, "webview", fake)
 
         unifiedview.launch_app("<html/>")
-        fake.create_window.assert_called_once_with("mnemos", html="<html/>")
+        assert captured["create_window_args"][0] == "mnemos"
+        assert captured["url"].startswith("file://")
 
     def test_missing_extra_raises_pywebview_not_installed(self, monkeypatch):
         # A None entry in sys.modules makes `import webview` raise ImportError.
