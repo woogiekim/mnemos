@@ -626,3 +626,47 @@ class TestUi86RegressionGuards:
             '<script id="ui-data" type="application/json">__UI_DATA_JSON__</script>'
             in tpl
         )
+
+
+class TestFuturisticWhiteTheme91:
+    """Issue #91 — the rendered template carries the new white-themed,
+    futuristic visual language. These assertions are intentionally light
+    structural substring checks that lock in the load-bearing theme tokens
+    (palette accent, glass header, pill-shaped tabs, tabular numerics).
+    They do not pin exhaustive CSS — only enough that an accidental revert
+    of the #91 theme is caught at test time."""
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "x", tag="agent:backend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    def test_palette_accent_token_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The deep electric-blue accent is the futuristic primary.
+        assert "--accent: #2563eb" in html
+
+    def test_near_white_app_background_token_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Slate-50-family near-white background.
+        assert "--bg: #f8fafc" in html
+
+    def test_header_glass_backdrop_filter_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Subtle glass effect on the top bar.
+        assert "backdrop-filter" in html
+
+    def test_tab_buttons_are_pill_shaped(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Pill-shaped nav buttons — full-radius pills.
+        assert "border-radius: 9999px" in html
+
+    def test_tabular_numerics_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Counts use monospaced figures so columns align.
+        assert "font-variant-numeric: tabular-nums" in html

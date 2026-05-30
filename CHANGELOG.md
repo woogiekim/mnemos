@@ -18,6 +18,27 @@ restore` of an older archive is always a breaking change.
 
 ### Changed
 
+- Futuristic white theme for `mnemos ui`
+  ([#91](https://github.com/woogiekim/mnemos/issues/91)):
+  `core/templates/ui.html` ships a redesigned `<style>` block built on a
+  near-white surface palette (`--bg: #f8fafc`, `--surface: #ffffff`) with
+  a deep electric-blue accent (`--accent: #2563eb`) and a cyan secondary
+  (`--accent-2: #06b6d4`). The header gains a subtle glass effect
+  (`backdrop-filter: saturate(140%) blur(8px)`), nav tabs become pills
+  (`border-radius: 9999px`) with an active blue/ring treatment, and every
+  count surface (header meta, sidebar counts, edge-density banner,
+  footer) uses `font-variant-numeric: tabular-nums` for column-aligned
+  digits. Panel cards gain a soft elevation shadow, the policy table
+  header uses uppercase tracked labels, scrollbars are slimmed to a
+  translucent thumb, and the graph canvas reuses the same palette
+  (`#2563eb` node fill, `#1d4ed8` stroke, cyan focus halo). DOM
+  structure, IDs, classes, JS logic, payload contract,
+  [#83](https://github.com/woogiekim/mnemos/issues/83) layout chain,
+  [#85](https://github.com/woogiekim/mnemos/issues/85) `display_title` +
+  `mem-id-pill` binding, [#86](https://github.com/woogiekim/mnemos/issues/86)
+  domain sidebar, and [#90](https://github.com/woogiekim/mnemos/issues/90)
+  Memory-first tab order are all unchanged — only the visual language
+  was reworked.
 - Memory-first tab order in `mnemos ui`
   ([#90](https://github.com/woogiekim/mnemos/issues/90)):
   `core/templates/ui.html` swaps the nav tab order so **Memory** is the
