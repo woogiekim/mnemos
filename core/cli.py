@@ -3090,16 +3090,20 @@ def memory_inspect(
 @click.option(
     "--preview-width",
     "preview_width",
-    default=240,
+    default=480,
     type=int,
-    help="Character cap for the drill-down content preview (default: 240).",
+    help=(
+        "Character cap for the LIST row preview (default: 480, issue #92). "
+        "The drill-down panel always renders the full untruncated content "
+        "via ``mem.content_full`` regardless of this value."
+    ),
 )
 @click.option(
     "--full",
     "full",
     is_flag=True,
     default=False,
-    help="Embed full memory content in drill-down (overrides --preview-width).",
+    help="Embed full memory content in the list preview (overrides --preview-width).",
 )
 @click.option(
     "--max-edges-per-node",

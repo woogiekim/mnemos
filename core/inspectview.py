@@ -229,6 +229,12 @@ def _project_item(
     """
     raw_content = item.get("content", "") or ""
     content, truncated = _truncate_preview(raw_content, preview_width, full)
+    # Issue #92: always emit the untruncated content as a separate field so
+    # the drill-down panel can render the full memory regardless of the
+    # list preview-width. ``content`` keeps the preview-truncated value for
+    # the 2-line list row (backward compat); ``content_full`` carries the
+    # original RAW content verbatim. In ``--full`` mode the two are equal.
+    content_full = raw_content
 
     layer = item.get("layer", "") or ""
     stage = item.get("stage", "") or ""
@@ -261,6 +267,7 @@ def _project_item(
         "stage": stage,
         "tags": tags,
         "content": content,
+        "content_full": content_full,
         "preview_truncated": truncated,
         "quality_score": item.get("quality_score"),
         "access_count": item.get("access_count", 0),

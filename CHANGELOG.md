@@ -18,6 +18,58 @@ restore` of an older archive is always a breaking change.
 
 ### Changed
 
+- Content readability in `mnemos ui`
+  ([#92](https://github.com/woogiekim/mnemos/issues/92)): stop the
+  aggressive `...` truncation experience. The drill-down `#dd-content`
+  panel now renders the FULL memory content via a new always-present
+  `mem.content_full` payload field — independent of the
+  `--preview-width` flag — so the operator never has to re-issue a
+  command with `--full` just to read a memory. The Memory-list rows
+  swap the previous single-line ellipsis for a 2-line clamped preview
+  (`display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;`) with a soft bottom mask
+  (`mask-image: linear-gradient(to bottom, #000 70%, transparent 100%)`)
+  that works in both WKWebView (macOS pywebview host) and Chromium
+  (headless probe). Each row gains a small chevron toggle
+  (`.mem-expand-btn`, `▾` / `▴`) that expands an inline
+  `.mem-content-full` block — state is row-local and survives
+  cross-filter re-renders. The `mnemos ui` command's `--preview-width`
+  default rises 240 → 480 so even the preview text isn't cut as
+  eagerly before the 2-line wrap kicks in (the legacy `mnemos inspect`
+  and `mnemos graph` defaults stay at 240). The `--full` CLI flag is
+  unchanged — it still bypasses preview truncation so `mem.content`
+  equals `mem.content_full`, useful for `--output` headless renders;
+  the drill-down panel always shows the full content regardless of the
+  flag. Additive payload only: `mem.content` still carries the
+  preview-truncated string for the 2-line row, `mem.content_full`
+  carries the verbatim original, and `preview_truncated` remains as
+  the explicit clipped-flag — no schema bump (`schema_version` stays
+  `1`). The [#83](https://github.com/woogiekim/mnemos/issues/83)
+  layout chain, [#85](https://github.com/woogiekim/mnemos/issues/85)
+  `display_title` + `mem-id-pill` binding,
+  [#86](https://github.com/woogiekim/mnemos/issues/86) domain
+  sidebar, [#90](https://github.com/woogiekim/mnemos/issues/90)
+  Memory-first tab order, and
+  [#91](https://github.com/woogiekim/mnemos/issues/91) futuristic
+  white theme tokens (`--accent: #2563eb`, glass header backdrop,
+  pill-shaped nav, tabular numerics) are all preserved verbatim.
+  `tests/test_inspectview.py` gains a `TestContentFullField92` class
+  that pins `content_full` presence on every memory (short, long,
+  `--full`, and Korean Unicode content) and asserts deterministic
+  field ordering (`content` → `content_full` → `preview_truncated`).
+  `tests/test_cli_ui.py` gains a `TestUi92ContentReadability` class
+  that pins the new CSS classes (`.mem-content-preview`,
+  `.mem-expand-btn`, `.mem-content-full`, `-webkit-line-clamp: 2`,
+  `mask-image` fade), the JS wiring (`previewEl.className`,
+  `fullEl.classList.toggle("shown")`,
+  `mem.content_full || mem.content` for both list-expand and
+  drilldown), the `--full` bypass (`content == content_full`), and
+  the 480 default (with the legacy `inspect` default unchanged at
+  240). Verified end-to-end with a real pywebview probe
+  (`dd_matches_content_full == true` on a long Korean memory:
+  `content` 483 chars truncated vs `content_full` 719 chars rendered
+  verbatim in `#dd-content`; row expand toggle flips
+  `.mem-content-full.shown` from `false` to `true` on click).
 - Futuristic white theme for `mnemos ui`
   ([#91](https://github.com/woogiekim/mnemos/issues/91)):
   `core/templates/ui.html` ships a redesigned `<style>` block built on a

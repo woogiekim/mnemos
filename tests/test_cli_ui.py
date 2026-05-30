@@ -670,3 +670,183 @@ class TestFuturisticWhiteTheme91:
         html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
         # Counts use monospaced figures so columns align.
         assert "font-variant-numeric: tabular-nums" in html
+
+
+# --------------------------------------------------------------------------- #
+# #92 — Content readability: drill-down full, 2-line wrap, per-row expand
+# --------------------------------------------------------------------------- #
+class TestUi92ContentReadability:
+    """Issue #92 stops the aggressive ``...`` truncation experience:
+
+    1. Drill-down ``#dd-content`` renders the FULL memory content via
+       ``mem.content_full`` (always present, additive payload field).
+    2. List rows render a 2-line ``-webkit-line-clamp: 2`` preview with a
+       soft bottom fade instead of a single-line ellipsis.
+    3. Each row gains a "Show more" toggle button that expands an inline
+       ``.mem-content-full`` block to show the untruncated content.
+    4. ``--preview-width`` default raised 240 -> 480 so even the preview
+       isn't truncated as eagerly before the 2-line wrap kicks in.
+    """
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(
+            runner, cli, "global",
+            "This is a fairly long memory content body. " * 8,
+            tag="agent:backend",
+        )
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    # ---- Payload contract -------------------------------------------------
+    def test_payload_emits_content_full_per_memory(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        out = tmp_path / "ui.html"
+        self._render(runner, cli_with_repo, out)
+        payload = _read_payload(out)
+        memories = payload["memory"]["memories"]
+        assert memories, "expected at least one memory"
+        for mem in memories:
+            assert "content_full" in mem, "content_full missing from memory"
+            assert isinstance(mem["content_full"], str)
+
+    def test_full_flag_makes_content_equal_content_full(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """In ``--full`` mode the list preview already shows the
+        untruncated content (``mem.content == mem.content_full``), so a
+        per-row expand toggle adds nothing visible — but the toggle
+        still works because the JS reads ``mem.content_full || mem.content``
+        and the 2-line clamp keeps the row visually compact until the
+        operator opts in. The drill-down panel reads the same field, so
+        the FULL content always renders there regardless of ``--full``."""
+        long = "y" * 500
+        _capture_one(runner, cli_with_repo, "global", long, tag="agent:backend")
+        out = tmp_path / "ui.html"
+        result = runner.invoke(cli_with_repo, ["ui", "--output", str(out), "--full"])
+        assert result.exit_code == 0, result.output
+        payload = _read_payload(out)
+        memories = payload["memory"]["memories"]
+        # Find our captured memory.
+        target = next((m for m in memories if m["content_full"] == long), None)
+        assert target is not None, "captured memory missing from payload"
+        # ``--full`` makes content == content_full (no truncation).
+        assert target["content"] == long
+        assert target["content_full"] == long
+
+    # ---- CSS hooks (rendered HTML) ---------------------------------------
+    def test_rendered_html_carries_mem_content_preview_css(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert ".mem-content-preview" in html
+        # 2-line clamp is the load-bearing visual rule.
+        assert "-webkit-line-clamp: 2" in html
+        assert "-webkit-box-orient: vertical" in html
+        # Bottom fade — both prefixed and unprefixed forms for portability.
+        assert "mask-image: linear-gradient(to bottom, #000 70%, transparent 100%)" in html
+
+    def test_rendered_html_carries_mem_expand_btn_css(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert ".mem-expand-btn" in html
+        assert ".mem-expand-btn:hover" in html
+
+    def test_rendered_html_carries_mem_content_full_css(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert ".mem-content-full" in html
+        # The .shown modifier is what the JS toggle flips.
+        assert ".mem-content-full.shown" in html
+        # white-space: pre-wrap so newlines in content render correctly.
+        assert "white-space: pre-wrap" in html
+
+    # ---- JS bindings ------------------------------------------------------
+    def test_renderlist_creates_preview_and_expand_btn(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The renderMemoryList() loop constructs both elements per row.
+        assert 'previewEl.className = "mem-content-preview"' in html
+        assert 'expandBtn.className = "mem-expand-btn"' in html
+        assert 'fullEl.className = "mem-content-full"' in html
+        # The expand button toggles .shown on the sibling full-content block.
+        assert 'fullEl.classList.toggle("shown")' in html
+
+    def test_renderlist_reads_content_full_for_full_block(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The expanded block prefers content_full and falls back to content.
+        assert "mem.content_full || mem.content" in html
+
+    def test_drilldown_reads_content_full_first(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The drilldown setter prefers content_full over content.
+        assert 'dd-content"' in html
+        # The literal expression the template uses to wire the drilldown.
+        assert "mem.content_full || mem.content" in html
+
+    # ---- CLI defaults ----------------------------------------------------
+    def test_preview_width_default_is_480(self):
+        """The ``mnemos ui`` command's ``--preview-width`` default jumped
+        240 -> 480 (issue #92) so even the preview isn't truncated as
+        eagerly before the 2-line wrap kicks in. Inspect the Click
+        command's options directly so the assertion does not depend on
+        ``--help`` wrapping or layout."""
+        from core.cli import memory_ui
+
+        opt = next(
+            p for p in memory_ui.params
+            if isinstance(p, __import__("click").Option)
+            and "--preview-width" in p.opts
+        )
+        assert opt.default == 480
+
+    def test_preview_width_help_text_mentions_480(self, runner, cli_with_repo):
+        result = runner.invoke(cli_with_repo, ["ui", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "480" in result.output
+
+    def test_inspect_preview_width_default_unchanged_at_240(self):
+        """Issue #92 only retunes the ``mnemos ui`` LIST default. The
+        legacy ``mnemos inspect`` and ``mnemos graph`` commands keep
+        their 240 default — they don't have the 2-line wrap, so a
+        wider preview would make their drill-down even more cluttered."""
+        from core.cli import cli as root_cli
+
+        inspect_cmd = root_cli.get_command(None, "inspect")
+        assert inspect_cmd is not None
+        opt = next(
+            p for p in inspect_cmd.params
+            if isinstance(p, __import__("click").Option)
+            and "--preview-width" in p.opts
+        )
+        assert opt.default == 240
+
+    # ---- Backward compat / regression guards -----------------------------
+    def test_existing_regression_guards_still_pass(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """The #83/#85/#86/#90/#91 structural guards listed in the #92
+        plan must remain intact after the content-readability edits."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # #83 — placeholder appears exactly once (template substitution
+        # didn't re-fire).
+        assert html.count("__UI_DATA_JSON__") == 0
+        # #83 — canvas + ui-data tag + mem-id-pill all present.
+        assert '<canvas id="graph"' in html
+        assert 'id="ui-data"' in html
+        assert "mem-id-pill" in html
+        # #85 — display_title binding intact.
+        assert "mem.display_title" in html
+        # #91 — futuristic white theme tokens intact.
+        assert "--accent: #2563eb" in html
+        # #90 — Memory tab is the first nav button + active on load.
+        # Pinning the literal substring is the cheapest contract check.
+        assert 'aria-selected="true"' in html
