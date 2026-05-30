@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core import cohesion, graphview, inspectview
 from core.policy import PolicyEngine
@@ -286,7 +286,12 @@ def write_unified_html(
     return output_path.resolve()
 
 
-def launch_app(html: str, *, title: str = "mnemos") -> None:
+def launch_app(
+    html: str,
+    *,
+    title: str = "mnemos",
+    ready: Callable[[Any], None] | None = None,
+) -> None:
     """Host *html* in a native pywebview desktop window.
 
     This is the ONLY pywebview-touching code in the codebase. ``webview`` is
@@ -305,6 +310,13 @@ def launch_app(html: str, *, title: str = "mnemos") -> None:
     Args:
         html: The rendered unified-UI HTML string.
         title: Native window title.
+        ready: Optional callback invoked with the freshly-created
+            :class:`webview.Window` AFTER ``create_window`` returns and
+            BEFORE ``webview.start()`` begins blocking. Used by the live-
+            update path (issue #95) to start a file watcher that calls
+            ``window.evaluate_js(...)`` whenever the memory store changes.
+            ``None`` (the default) preserves the original call-site
+            behavior — no callback fires.
 
     Raises:
         PywebviewNotInstalled: When the optional ``[ui]`` extra is not installed
@@ -330,5 +342,7 @@ def launch_app(html: str, *, title: str = "mnemos") -> None:
         html_path = Path(tmp_dir, "mnemos-ui.html").resolve()
         html_path.write_text(html, encoding="utf-8")
 
-        webview.create_window(title, url="file://" + str(html_path))
+        window = webview.create_window(title, url="file://" + str(html_path))
+        if ready is not None:
+            ready(window)
         webview.start()

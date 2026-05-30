@@ -92,7 +92,52 @@ def main() -> None:
     # native pywebview window via the #83 file:// launcher.
     payload = build_unified_payload(items, gw._policy)
     html = render_html(payload)
-    launch_app(html, title="mnemos")
+
+    # Step 3c (#95): live updates. When ``app.live_update.enabled`` is True
+    # (the default), start a file watcher that re-renders the payload and
+    # pushes it through the JS bridge whenever the memory store changes.
+    # The watcher is wired AFTER ``create_window`` returns (via the
+    # ``ready`` callback) so we capture the actual window object, then
+    # stopped on process exit via ``atexit``. When the user opts out via
+    # ``app.live_update.enabled: false`` the original static call-site
+    # behavior is preserved verbatim.
+    from core.config import get_backend_config
+
+    cfg = get_backend_config(repo_root=os.environ["MNEMOS_REPO_ROOT"])
+    if cfg.app.live_update.enabled:
+        import atexit
+        import json as _json
+
+        from app.live_watcher import LiveWatcher, resolve_watched_paths
+
+        def on_ready(window: object) -> None:
+            def rebuild() -> None:
+                try:
+                    live_items: list[dict] = []
+                    for layer in all_layers:
+                        live_items.extend(gw._store.iter_layer_items(layer))
+                    new_payload = build_unified_payload(live_items, gw._policy)
+                    js = (
+                        "window.mnemos && window.mnemos.applyUpdate("
+                        + _json.dumps(new_payload)
+                        + ");"
+                    )
+                    window.evaluate_js(js)  # type: ignore[attr-defined]
+                except Exception:  # pragma: no cover - defensive guard
+                    # Never let a rebuild error crash the long-running app.
+                    pass
+
+            watcher = LiveWatcher(
+                paths=resolve_watched_paths(gw),
+                debounce_ms=cfg.app.live_update.debounce_ms,
+                on_rebuild=rebuild,
+            )
+            watcher.start()
+            atexit.register(watcher.stop)
+
+        launch_app(html, title="mnemos", ready=on_ready)
+    else:
+        launch_app(html, title="mnemos")
 
 
 if __name__ == "__main__":  # pragma: no cover - executed only by the bundled binary

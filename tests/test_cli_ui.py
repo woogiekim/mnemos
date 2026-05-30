@@ -994,3 +994,96 @@ class TestUi93DrilldownRelatedGraph:
         tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
         assert 'id="dd-related-graph"' in tpl
         assert "buildRelatedGraph" in tpl
+
+
+# --------------------------------------------------------------------------- #
+# #95 — Live-update JS bridge tokens in the rendered template
+# --------------------------------------------------------------------------- #
+class TestUi95LiveUpdateTokens:
+    """Issue #95 — the unified template grows a small JS bridge so the
+    desktop-app file watcher can push debounced payload deltas into the
+    open window via ``window.evaluate_js``. The bridge MUST be present
+    in the rendered HTML (so it loads when the page loads) AND in the
+    template SOURCE (so a static grep can verify it survives future
+    refactors). These tests pin both surfaces."""
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "live-probe", tag="agent:backend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    def test_window_mnemos_bridge_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "window.mnemos" in html
+        assert "applyUpdate" in html
+
+    def test_apply_payload_function_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The state-preserving installer name is the contract — assert as
+        # a substring so a stylistic rewrite that keeps the name passes.
+        assert "applyPayload" in html
+
+    def test_data_mem_id_attribute_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Stable per-row id so live-update can re-apply expand toggles by
+        # memory id after a debounced rebuild.
+        assert "data-mem-id" in html
+
+    def test_current_drilldown_id_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The state-preservation contract requires reading the currently-
+        # open drilldown id from ``window.__currentDrilldownId``.
+        assert "__currentDrilldownId" in html
+
+    def test_apply_payload_invocation_substring_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """The rendered HTML must mention ``applyPayload(`` so the
+        wiring is regression-detectable from a static grep."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "applyPayload(" in html
+
+    def test_regression_guards_intact_after_95(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """The #83/#85/#86/#90/#91/#92/#93 guards must remain green."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # #83 — placeholder appears zero times in the RENDERED HTML.
+        assert html.count("__UI_DATA_JSON__") == 0
+        # #83 — canvas + ui-data tag + mem-id-pill all present.
+        assert '<canvas id="graph"' in html
+        assert 'id="ui-data"' in html
+        assert "mem-id-pill" in html
+        # #85 — display_title binding intact.
+        assert "mem.display_title" in html
+        # #91 — futuristic white theme tokens intact.
+        assert "--accent: #2563eb" in html
+        # #90 — Memory tab is the first nav button + active on load.
+        assert 'aria-selected="true"' in html
+        # #93 — related-graph drilldown canvas still wired.
+        assert "buildRelatedGraph" in html
+        # #92 — content-readability hooks intact.
+        assert ".mem-content-full.shown" in html
+
+    def test_template_source_ui_data_json_singleton(self):
+        """The TEMPLATE SOURCE mentions ``__UI_DATA_JSON__`` exactly once
+        — the #83 root-cause regression guard."""
+        from importlib.resources import files
+        tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
+        assert tpl.count("__UI_DATA_JSON__") == 1
+        assert (
+            '<script id="ui-data" type="application/json">__UI_DATA_JSON__</script>'
+            in tpl
+        )
+
+    def test_template_source_contains_95_tokens(self):
+        """The TEMPLATE SOURCE must carry the new #95 bridge tokens so
+        the rendered HTML inherits them deterministically."""
+        from importlib.resources import files
+        tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
+        assert "window.mnemos" in tpl
+        assert "applyUpdate" in tpl
+        assert "applyPayload" in tpl
+        assert "data-mem-id" in tpl
+        assert "__currentDrilldownId" in tpl

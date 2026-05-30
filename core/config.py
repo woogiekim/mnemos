@@ -133,6 +133,46 @@ class DistillationConfig:
 
 
 @dataclass
+class LiveUpdateConfig:
+    """Resolved ``app.live_update.*`` configuration (issue #95).
+
+    Controls the long-running desktop-app file watcher that pushes
+    re-rendered payloads into the open pywebview window when the memory
+    store changes. Tolerant of missing / malformed input — a non-bool
+    ``enabled`` falls back to ``True``; a non-int / non-positive
+    ``debounce_ms`` falls back to ``300``. Mirrors
+    :class:`DistillationConfig` so both blocks behave identically when
+    ``mnemos.yml`` is empty or invalid.
+    """
+
+    #: Master switch.  When ``True`` (the default) the app starts a
+    #: file-system watcher that debounces events into a JS bridge call.
+    #: Set ``app.live_update.enabled: false`` in ``mnemos.yml`` to opt out
+    #: entirely; the window is then a static snapshot as before #95.
+    enabled: bool = True
+
+    #: Debounce window in milliseconds.  Events arriving within this
+    #: window after the first event are coalesced into a single rebuild.
+    #: Must be a positive integer; invalid (non-int, ``<= 0``) or missing
+    #: values fall back to the default of 300.
+    debounce_ms: int = 300
+
+
+@dataclass
+class AppConfig:
+    """Resolved ``app.*`` configuration (issue #95).
+
+    Top-level container for desktop-app-specific knobs.  Every nested
+    block has safe defaults so callers may read them without checking
+    whether the ``app:`` block was present in the YAML file.
+    """
+
+    #: Live-update configuration (always present; ``enabled=True`` by
+    #: default — issue #95).
+    live_update: LiveUpdateConfig = field(default_factory=LiveUpdateConfig)
+
+
+@dataclass
 class BackendConfig:
     """Resolved backend configuration."""
 
@@ -148,6 +188,11 @@ class BackendConfig:
     #: Auto-distillation configuration (always present; ``enabled=True`` by
     #: default — issue #87).
     distillation: DistillationConfig = field(default_factory=DistillationConfig)
+
+    #: Application-level configuration block (issue #95). Always populated
+    #: with the dataclass defaults; carries the live-update knobs the
+    #: desktop app reads on launch.
+    app: AppConfig = field(default_factory=AppConfig)
 
 
 def _load_yaml_config(repo_root: str | None = None) -> dict[str, Any]:
@@ -242,6 +287,39 @@ def _parse_distillation_config(raw: Any) -> DistillationConfig:
     return DistillationConfig(enabled=enabled, interval_captures=interval)
 
 
+def _parse_live_update_config(raw: Any) -> LiveUpdateConfig:
+    """Parse the ``app.live_update`` sub-dict into :class:`LiveUpdateConfig`.
+
+    Tolerant of every kind of malformed input (issue #95): a non-dict
+    ``raw`` (None, string, list, …) yields the defaults; a non-bool
+    ``enabled`` falls back to ``True``; a non-int / non-positive
+    ``debounce_ms`` falls back to ``300``. Missing keys fall through to
+    the dataclass defaults. This mirrors :func:`_parse_distillation_config`
+    so the behaviour around invalid YAML is identical between blocks.
+    """
+    if not isinstance(raw, dict):
+        return LiveUpdateConfig()
+
+    enabled_raw = raw.get("enabled", True)
+    if isinstance(enabled_raw, bool):
+        enabled = enabled_raw
+    else:
+        enabled = True
+
+    debounce_raw = raw.get("debounce_ms", 300)
+    if isinstance(debounce_raw, bool):
+        # ``bool`` is a subclass of ``int``; treat True/False as invalid
+        # so the user's intent ("how many ms") is not silently coerced
+        # to 1 or 0.
+        debounce = 300
+    elif isinstance(debounce_raw, int) and debounce_raw > 0:
+        debounce = debounce_raw
+    else:
+        debounce = 300
+
+    return LiveUpdateConfig(enabled=enabled, debounce_ms=debounce)
+
+
 def get_backend_config(repo_root: str | None = None) -> BackendConfig:
     """Return the resolved :class:`BackendConfig` for the current environment.
 
@@ -295,9 +373,19 @@ def get_backend_config(repo_root: str | None = None) -> BackendConfig:
     distillation_raw = storage_cfg.get("distillation")
     distillation = _parse_distillation_config(distillation_raw)
 
+    # Resolve the top-level ``app`` block (issue #95). Always populated with
+    # defaults; the only nested key for now is ``live_update``. Set
+    # ``app.live_update.enabled: false`` in ``mnemos.yml`` to opt out of the
+    # desktop app's live-update file watcher.
+    app_raw = config.get("app") or {}
+    live_update_raw = app_raw.get("live_update") if isinstance(app_raw, dict) else None
+    live_update = _parse_live_update_config(live_update_raw)
+    app_cfg = AppConfig(live_update=live_update)
+
     return BackendConfig(
         backend=backend_name,
         vault_path=vault_path,
         sync=sync,
         distillation=distillation,
+        app=app_cfg,
     )
