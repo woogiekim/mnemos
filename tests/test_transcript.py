@@ -257,3 +257,74 @@ def test_user_preference_paragraph_routes_to_global_layer() -> None:
     transcript = [{"role": "assistant", "content": body}]
     insights = extract_insights(transcript)
     assert any(i.layer == "global" for i in insights)
+
+
+# ---------------------------------------------------------------------------
+# 16. Decision-word expansion (issue #89 follow-up to #88)
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionWordExpansion89:
+    """Issue #89: short durable statements like "user preference: …" were being
+    dropped by the mechanics blacklist's short-paragraph rule because
+    `_DECISION_WORDS` lacked "preference" / "constraint" and their Korean
+    equivalents. These tests pin the expansion in place.
+    """
+
+    def test_short_user_preference_passes_and_routes_global(self) -> None:
+        from core.transcript import extract_insights
+
+        transcript = [
+            {
+                "role": "assistant",
+                "content": "user preference: always TDD for new core code.",
+            }
+        ]
+        insights = extract_insights(transcript)
+        paragraph_insights = [i for i in insights if i.kind == "paragraph"]
+        assert len(paragraph_insights) == 1
+        assert paragraph_insights[0].layer == "global"
+        assert "user preference" in paragraph_insights[0].content
+
+    def test_short_project_constraint_passes(self) -> None:
+        from core.transcript import extract_insights
+
+        transcript = [
+            {
+                "role": "assistant",
+                "content": "project constraint: never auto-merge.",
+            }
+        ]
+        insights = extract_insights(transcript)
+        paragraph_insights = [i for i in insights if i.kind == "paragraph"]
+        assert len(paragraph_insights) == 1
+        # Length sanity: confirms we'd have been dropped without "constraint"
+        # in _DECISION_WORDS.
+        assert len(paragraph_insights[0].content) < 80
+        # Layer routing intentionally not pinned to a specific non-global
+        # name; just confirms it is NOT mis-routed to global.
+        assert paragraph_insights[0].layer != "global"
+
+    def test_short_korean_선호_passes(self) -> None:
+        from core.transcript import extract_insights
+
+        transcript = [{"role": "assistant", "content": "사용자 선호: 항상 TDD."}]
+        insights = extract_insights(transcript)
+        paragraph_insights = [i for i in insights if i.kind == "paragraph"]
+        assert len(paragraph_insights) == 1
+
+    def test_short_korean_제약_passes(self) -> None:
+        from core.transcript import extract_insights
+
+        transcript = [{"role": "assistant", "content": "제약: PyPI 사용 금지."}]
+        insights = extract_insights(transcript)
+        paragraph_insights = [i for i in insights if i.kind == "paragraph"]
+        assert len(paragraph_insights) == 1
+
+    def test_short_paragraph_without_any_decision_word_still_dropped(self) -> None:
+        # Regression guard: the short-paragraph filter must still drop a tiny
+        # non-decision paragraph after the _DECISION_WORDS expansion.
+        from core.transcript import extract_insights
+
+        transcript = [{"role": "assistant", "content": "안녕하세요"}]
+        assert extract_insights(transcript) == []

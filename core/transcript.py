@@ -23,7 +23,7 @@ _MARKER_LINE_RE = re.compile(r"^\s*✻\s+(💡|💾|🧠)\s+(.+?)(?:\s+\([a-z]+\
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
 _FENCED_BLOCK_RE = re.compile(r"```\s*(?:bash|sh|shell|json|yaml|toml|py|python|ts|tsx|js|jsx|rs|go)\b", re.IGNORECASE)
 _FUNCTION_CALL_RE = re.compile(r"<function_calls>|<invoke\s+name=|<parameter\s+name=|tool_use:|command=\"", re.IGNORECASE)
-_DECISION_WORDS = ("결론", "원인은", "근본 원인", "결정", "decided", "decision:", "root cause", "tl;dr", "summary:")
+_DECISION_WORDS = ("결론", "원인은", "근본 원인", "결정", "선호", "제약", "decided", "decision:", "root cause", "tl;dr", "summary:", "preference", "constraint")
 _THINKING_STUBS = ("확인하겠", "let me check", "looking at", "i'll now", "let's", "잠시")
 
 

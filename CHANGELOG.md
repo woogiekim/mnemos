@@ -58,6 +58,16 @@ restore` of an older archive is always a breaking change.
 
 ### Fixed
 
+- Short durable statements like `"user preference: always TDD for new core
+  code."` are no longer dropped by the mechanics-blacklist's
+  short-paragraph rule
+  ([#89](https://github.com/woogiekim/mnemos/issues/89) follow-up to
+  [#88](https://github.com/woogiekim/mnemos/issues/88)).
+  `core/transcript.py` `_DECISION_WORDS` is extended with `"preference"`,
+  `"constraint"`, `"선호"`, and `"제약"` so that `_is_short_non_decision_paragraph`
+  recognises them as decision-bearing and lets the surrounding paragraph
+  through `extract_insights` as `kind="paragraph"`. `backup.SCHEMA_VERSION`
+  stays at `1`; no other module changes.
 - `_derive_display_title` no longer surfaces horizontal-rule lines (`---`,
   `===`, `***`, `___`, `- - -`) as memory titles
   ([#85](https://github.com/woogiekim/mnemos/issues/85) follow-up). On a real
