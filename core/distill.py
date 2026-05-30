@@ -49,7 +49,11 @@ without any reader-side change.
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any, Sequence
 
 from core import cohesion
@@ -420,6 +424,170 @@ def _append_distilled_into(
 # --------------------------------------------------------------------------- #
 # Audit navigation
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Automatic distillation (#87) — orchestration + state-file sidecar
+# --------------------------------------------------------------------------- #
+#: Path to the persistent counter sidecar. Always under the user's HOME so it
+#: rides through MNEMOS_REPO_ROOT changes and pytest's ``isolate_home``.
+_DISTILL_STATE_RELPATH = ".mnemos/.distill-state.json"
+
+#: Default state-file payload used whenever the sidecar is missing or corrupt.
+_DEFAULT_DISTILL_STATE: dict[str, Any] = {
+    "captures_since_last_distill": 0,
+    "last_distill_at": "",
+}
+
+
+def _state_path() -> Path:
+    """Return the absolute path to ``~/.mnemos/.distill-state.json``.
+
+    ``Path.home()`` resolution is delegated, so ``isolate_home`` redirects the
+    sidecar to the test's tmp HOME automatically; production callers land at
+    the real ``~/.mnemos/`` directory.
+    """
+    return Path.home() / ".mnemos" / ".distill-state.json"
+
+
+def _read_distill_state(path: Path) -> dict[str, Any]:
+    """Return ``{captures_since_last_distill, last_distill_at}``.
+
+    Tolerant of every failure mode: a missing file, an unreadable file, a
+    non-JSON payload, or a JSON payload whose schema doesn't match — all
+    collapse to :data:`_DEFAULT_DISTILL_STATE`. The auto-distill subscriber
+    relies on this never raising so that ``capture()`` cannot be broken by
+    a corrupt sidecar.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return dict(_DEFAULT_DISTILL_STATE)
+
+    if not isinstance(data, dict):
+        return dict(_DEFAULT_DISTILL_STATE)
+
+    counter_raw = data.get("captures_since_last_distill", 0)
+    if isinstance(counter_raw, bool) or not isinstance(counter_raw, int):
+        counter = 0
+    else:
+        counter = counter_raw
+
+    last = data.get("last_distill_at", "")
+    if not isinstance(last, str):
+        last = ""
+
+    return {
+        "captures_since_last_distill": counter,
+        "last_distill_at": last,
+    }
+
+
+def _write_distill_state(path: Path, state: dict[str, Any]) -> None:
+    """Atomically rewrite the sidecar via tempfile + os.replace.
+
+    The parent directory (``~/.mnemos/``) is created on demand. Writes are
+    crash-safe under concurrency: a partial write is never observable by a
+    concurrent reader because ``os.replace`` swaps the file atomically. The
+    tempfile is cleaned up on ``OSError`` before re-raising.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=".distill-state.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            json.dump(state, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except OSError:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def run_auto_distill(gateway: _GatewayLike) -> dict[str, dict[str, int]]:
+    """Run domain + policy distill in apply mode and return a small report.
+
+    Walks the existing planner → apply pipeline once for domains and once for
+    policies. Per-plan exceptions are swallowed (broad ``Exception``) and
+    counted in the ``errors`` field so that one bad plan does not derail the
+    rest of the sweep. The returned report shape is:
+
+    ``{"domains":  {"planned", "applied", "skipped", "errors"},
+       "policies": {"planned", "applied", "skipped", "errors"}}``
+
+    ``planned`` counts the plans returned by the planner; ``applied`` counts
+    plans whose write actually occurred; ``skipped`` counts idempotent
+    no-ops (skip-if-exists from #84); ``errors`` counts per-plan exceptions.
+    """
+    report: dict[str, dict[str, int]] = {
+        "domains": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+        "policies": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+    }
+
+    # ── Domain pipeline ───────────────────────────────────────────────────
+    try:
+        domain_plans = compute_domain_plan(gateway)
+    except Exception:
+        report["domains"]["errors"] += 1
+        domain_plans = []
+
+    # Auto-distill skips single-source domain plans: a 1-member domain
+    # conveys no aggregation value and would inflate the artifact count of
+    # an otherwise quiet store on the first capture. The explicit
+    # ``mnemos distill domains apply`` CLI is unaffected — it still produces
+    # 1-source artifacts when the operator runs it deliberately.
+    domain_plans = [p for p in domain_plans if len(p.sources) >= 2]
+
+    report["domains"]["planned"] = len(domain_plans)
+    for plan in domain_plans:
+        try:
+            result = apply_domain_plan(gateway, plan)
+        except Exception:
+            report["domains"]["errors"] += 1
+            continue
+        if result.applied:
+            report["domains"]["applied"] += 1
+        else:
+            report["domains"]["skipped"] += 1
+
+    # ── Policy pipeline ───────────────────────────────────────────────────
+    try:
+        policy_plans = compute_policy_plan(gateway)
+    except Exception:
+        report["policies"]["errors"] += 1
+        policy_plans = []
+
+    # Same single-source filter as domains, applied to policy plans so an
+    # automatic fire never aggregates a 1-source policy theme.
+    policy_plans = [p for p in policy_plans if len(p.sources) >= 2]
+
+    report["policies"]["planned"] = len(policy_plans)
+    for plan in policy_plans:
+        try:
+            result = apply_policy_plan(gateway, plan)
+        except Exception:
+            report["policies"]["errors"] += 1
+            continue
+        if result.applied:
+            report["policies"]["applied"] += 1
+        else:
+            report["policies"]["skipped"] += 1
+
+    return report
+
+
 def restore_distilled_source(gateway: _GatewayLike, source_id: str) -> dict[str, Any]:
     """Return the snapshot for *source_id* with its ``distilled_into`` surfaced.
 
