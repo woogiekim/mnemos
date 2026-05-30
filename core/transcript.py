@@ -15,10 +15,16 @@ _EMOJI_TO_LAYER = {"💡": "session", "💾": "project", "🧠": "global"}
 _CONTROL_LINE_RE = re.compile(r"^\s*(?:\[crew\]\b|STATUS\s*:|PLAN\s*:|BLOCKER\s*:|REVIEW\s*:|ROUTE\s*:|TASK\s*:|TASK_ID\s*:|TASK_DIR\s*:|PROJECT_ROOT\s*:|BRANCH\s*:|EXECUTION_MODE\s*:|SESSION_ID\s*:|REQUIREMENTS(?:_PATH)?\s*:|HANDOFF(?:_PATH)?\s*:|QUALITY_RULE_PATH\s*:|PIPELINE_PATH\s*:|AGENT_CREW_HOME\s*:|HOST_TASK_ID\s*:|PROGRESS(?:_LOG)?\s*:|<\/?mnemos-[^>]+>|<\/?mnemos-context[^>]*>|<\/?mnemos-capture-protocol>|\{TASK_DIR\}|\{PROJECT_ROOT\}|\{BRANCH\})", re.IGNORECASE)
 _HANDOFF_HINT_RE = re.compile(r"\b(?:handoff|downstream agent|stage agent|supervisor pipeline|agent-crew task|pipeline\.json|approval\.md|progress\.log)\b", re.IGNORECASE)
 _TRIVIAL_RE = re.compile(r"^(?:yes|yep|yeah|no|nope|ok|okay|sure|done|thanks|thank you|completed|continue|proceed|go|좋아요|네|아니요|완료|진행)$", re.IGNORECASE)
-_SIGNAL_RE = re.compile(r"\b(decision|decided|root cause|cause|summary|implemented|fixed|changed files|verification|captures|constraint|workflow|boundary|rationale|preference|architecture|regression)\b", re.IGNORECASE)
 _PROJECT_SIGNAL_RE = re.compile(r"\b(architecture|constraint|decision|decided|rationale|pattern|workflow)\b", re.IGNORECASE)
 _GLOBAL_SIGNAL_RE = re.compile(r"\b(user preference|preference:|always prefer|global convention|cross-project)\b", re.IGNORECASE)
 _MARKER_LINE_RE = re.compile(r"^\s*✻\s+(💡|💾|🧠)\s+(.+?)(?:\s+\([a-z]+\))?\s*$", re.MULTILINE)
+
+# Paragraph chunker and blacklist predicates (issue #88).
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
+_FENCED_BLOCK_RE = re.compile(r"```\s*(?:bash|sh|shell|json|yaml|toml|py|python|ts|tsx|js|jsx|rs|go)\b", re.IGNORECASE)
+_FUNCTION_CALL_RE = re.compile(r"<function_calls>|<invoke\s+name=|<parameter\s+name=|tool_use:|command=\"", re.IGNORECASE)
+_DECISION_WORDS = ("결론", "원인은", "근본 원인", "결정", "decided", "decision:", "root cause", "tl;dr", "summary:")
+_THINKING_STUBS = ("확인하겠", "let me check", "looking at", "i'll now", "let's", "잠시")
 
 
 @dataclass(frozen=True)
@@ -117,18 +123,6 @@ def _looks_internal(original: str, lines: list[str], dropped: int) -> bool:
     return _HANDOFF_HINT_RE.search(original) and any(token in original for token in ("TASK_ID:", "TASK_DIR:", "STATUS:", "PLAN:", "BLOCKER:"))
 
 
-def _summarize(lines: list[str]) -> str:
-    kept: list[str] = []
-    for line in lines:
-        if re.fullmatch(r"#{1,6}\s+\S.{0,60}", line):
-            continue
-        kept.append(re.sub(r"\s+", " ", line))
-        if len(" ".join(kept)) >= 360 or len(kept) >= 5:
-            break
-    summary = " ".join(kept).strip()
-    return summary[:497].rstrip() + "..." if len(summary) > 500 else summary
-
-
 def _layer_for_content(content: str, fallback: str = "session") -> str:
     if _GLOBAL_SIGNAL_RE.search(content):
         return "global"
@@ -137,37 +131,91 @@ def _layer_for_content(content: str, fallback: str = "session") -> str:
     return fallback
 
 
+def _paragraphs(text: str) -> list[str]:
+    """Split assistant text on blank-line boundaries; collapse internal whitespace."""
+    chunks: list[str] = []
+    for raw in _PARAGRAPH_SPLIT_RE.split(text):
+        collapsed = re.sub(r"\s+", " ", raw).strip()
+        if collapsed:
+            chunks.append(collapsed)
+    return chunks
+
+
+def _is_fenced_code_paragraph(paragraph: str) -> bool:
+    return bool(_FENCED_BLOCK_RE.search(paragraph))
+
+
+def _has_function_call_marker(paragraph: str) -> bool:
+    if _FUNCTION_CALL_RE.search(paragraph):
+        return True
+    return any(_CONTROL_LINE_RE.search(line) for line in paragraph.splitlines())
+
+
+def _has_decision_word(paragraph: str) -> bool:
+    lowered = paragraph.lower()
+    return any(word in lowered for word in _DECISION_WORDS)
+
+
+def _is_short_non_decision_paragraph(paragraph: str) -> bool:
+    collapsed = re.sub(r"\s+", " ", paragraph).strip()
+    return len(collapsed) < 80 and not _has_decision_word(paragraph)
+
+
+def _is_thinking_aloud(paragraph: str) -> bool:
+    lowered = re.sub(r"\s+", " ", paragraph).strip().lower()
+    return any(lowered.startswith(stub) for stub in _THINKING_STUBS)
+
+
+def _is_mechanical_paragraph(paragraph: str) -> bool:
+    return (
+        _is_fenced_code_paragraph(paragraph)
+        or _has_function_call_marker(paragraph)
+        or _is_short_non_decision_paragraph(paragraph)
+        or _is_thinking_aloud(paragraph)
+    )
+
+
 def extract_insights(messages: list[dict[str, Any]]) -> list[TranscriptInsight]:
-    """Extract deterministic durable insights from transcript messages."""
+    """Extract deterministic durable insights from transcript messages.
+
+    Substantive prose lands as ``kind="paragraph"`` via the blacklist
+    inversion introduced in issue #88. Markers and durable single-line
+    statements continue to emit their respective kinds.
+    """
     insights: list[TranscriptInsight] = []
     durable_re = re.compile(r"^\s*(?:[-*]\s*)?(decision|decided|root cause|summary|workflow boundary|constraint|rationale|preference)\s*[:：-]\s*(.+)$", re.IGNORECASE)
+    content_seen: set[str] = set()
     for index, message in enumerate(messages):
         role = message.get("role") or message.get("type") or ""
         if role not in {"assistant", "summary", "event", "stop"}:
             continue
         text = _message_text(message)
-        durable_contents: list[str] = []
+        # 1. Marker insights — unconditional emit per issue #88 (gate removed).
         for marker in _MARKER_LINE_RE.finditer(_mask_code(text)):
             content = marker.group(2).strip()
             if content and len(content.strip()) >= 12:
                 insights.append(TranscriptInsight(content, _EMOJI_TO_LAYER.get(marker.group(1), "session"), "marker", index))
+        # 2. Internal pipeline-control messages still short-circuit.
         lines, dropped = _clean_lines(text)
         if _looks_internal(text, lines, dropped):
             continue
+        # 3. Existing durable single-line statements (Decision:, Root cause:, ...).
         for line in lines:
             match = durable_re.match(line)
             if match:
                 content = f"{match.group(1).capitalize()}: {match.group(2).strip()}"
                 if not _is_trivial(content):
-                    durable_contents.append(content)
                     insights.append(TranscriptInsight(content, _layer_for_content(content), "durable-line", index))
-        summary = _summarize(lines)
-        summary_repeats_durable = any(
-            _normalise_content(summary) == _normalise_content(content)
-            for content in durable_contents
-        )
-        if summary and not summary_repeats_durable and not _is_trivial(summary) and _SIGNAL_RE.search(summary):
-            insights.append(TranscriptInsight(f"AI conversation insight: {summary}", _layer_for_content(summary), "assistant-summary", index))
+                    content_seen.add(_normalise_content(content))
+        # 4. Paragraph-level substantive prose (blacklist inversion).
+        for paragraph in _paragraphs(text):
+            if _is_mechanical_paragraph(paragraph):
+                continue
+            key = _normalise_content(paragraph)
+            if key in content_seen:
+                continue
+            content_seen.add(key)
+            insights.append(TranscriptInsight(paragraph, _layer_for_content(paragraph), "paragraph", index))
     deduped: list[TranscriptInsight] = []
     seen: set[tuple[str, str]] = set()
     for insight in insights:

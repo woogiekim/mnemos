@@ -78,7 +78,14 @@ Distillation reads the eligible memory pool, runs the existing
 `core.cohesion.derive_domains` / `core.cohesion.aggregate_policy_cohesion`
 functions to produce the artifact *bodies*, and persists each result via
 `gateway.capture(..., no_classify=True, item_id=<deterministic id>)` so FTS,
-the audit log, and the event bus all run normally.
+the audit log, and the event bus all run normally. After
+[#88](https://github.com/woogiekim/mnemos/issues/88) inverted the
+transcript-capture path to a paragraph-level blacklist, the distillation
+queue ingests substantive paragraphs from every assistant turn instead of
+just the narrow marker-line whitelist — the pool of raw inputs the cohesion
+and policy aggregators see is materially richer, which improves the
+signal-to-noise of derived domains and policy themes without requiring any
+change to the distillation contract or `backup.SCHEMA_VERSION`.
 
 ## CLI surface
 

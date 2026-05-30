@@ -78,6 +78,20 @@ When auto-push is enabled, committed `wiki/` content is pushed to the configured
 remote. See [remote-sync.md](./remote-sync.md) for the remote-sync contract and
 hardening (#79).
 
+### Capture surface broadened in #88
+
+Issue [#88](https://github.com/woogiekim/mnemos/issues/88) inverted the
+transcript-capture path from a marker-WHITELIST gate to a mechanics-BLACKLIST
+gate. Paragraph-level assistant prose now lands in the persisted store as
+`kind="paragraph"` insights (via `core/transcript.py` `extract_insights`)
+whenever a paragraph survives the four blacklist rules (fenced code,
+function-call markers, short non-decision, thinking-aloud). The leakage bound
+established by #77 is **unchanged**: only what `gateway.capture`'s layer
+routing puts into a synced layer (`project`, `global`, `entities`, `claims`,
+`topics`) reaches `wiki/` and the remote; ephemeral `.agent/` captures stay
+local. No new redactor ships with #88 — token-in-prose redaction beyond the
+existing observability helper remains a known follow-up in the #77 family.
+
 ## 3. Persisted-metadata field inventory (AC3)
 
 Every captured item carries a metadata block that is serialized to YAML

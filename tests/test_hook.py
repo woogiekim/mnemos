@@ -240,8 +240,8 @@ class TestStopHookInsightFallback:
         insights = extract_insights(transcript)
 
         assert len(insights) == 1
+        assert insights[0].kind == "paragraph"
         assert insights[0].layer == "session"
-        assert "AI conversation insight:" in insights[0].content
         assert "transcript fallback" in insights[0].content
 
     def test_fallback_excludes_internal_pipeline_control_signals(self, tmp_path):
@@ -282,7 +282,8 @@ class TestStopHookInsightFallback:
                 "role": "assistant",
                 "content": (
                     "STATUS: completed\n"
-                    "Changed files: hooks/Stop.sh and tests/test_hook.py.\n"
+                    "TASK_ID: 20260530-191514-0\n"
+                    "\n"
                     "Verification: pytest tests/test_hook.py confirmed the new "
                     "fallback captures meaningful summaries and rejects pipeline controls."
                 ),
@@ -294,7 +295,6 @@ class TestStopHookInsightFallback:
         assert len(insights) == 1
         content = insights[0].content
         assert "STATUS:" not in content
-        assert "Changed files" in content
         assert "fallback captures meaningful summaries" in content
 
     def test_explicit_marker_still_takes_precedence_over_fallback(self, tmp_path):
