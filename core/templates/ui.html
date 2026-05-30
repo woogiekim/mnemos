@@ -524,6 +524,13 @@
     // Vendored, dependency-free renderer. No fetch / XHR / eval / Function.
     (function () {
       "use strict";
+      // #95 — Module-scoped mutable containers, hoisted to the IIFE so
+      // ``applyPayload`` can mutate-in-place and downstream handlers
+      // (graph physics, memory list, related-graph, sidebar) all read
+      // the same arrays. Re-assignment of the containers is forbidden
+      // (closures captured before re-render would see stale refs);
+      // mutation via ``.length = 0`` + ``.push.apply`` keeps every
+      // reader pointed at the same array object across rebuilds.
       var data = {};
       try {
         data = JSON.parse(document.getElementById("ui-data").textContent || "{}");
@@ -533,21 +540,149 @@
       var graph = data.graph || {};
       var memory = data.memory || {};
       var policy = data.policy_cohesion || {};
-      var domains = graph.domains || [];
-      var relationships = graph.relationships || [];
-      var memories = memory.memories || [];
-      var clusters = policy.clusters || [];
+      var domains = (graph.domains || []).slice();
+      var relationships = (graph.relationships || []).slice();
+      var memories = (memory.memories || []).slice();
+      var clusters = (policy.clusters || []).slice();
       var density = graph.edge_density || {};
-
-      // #93 — id -> memory map for the drill-down related-graph sibling
-      // resolver. Built once on payload load; used by buildRelatedGraph
-      // to map sampled member_ids back to their full memory objects so
-      // sibling-node clicks can re-render the drill-down for the chosen
-      // sibling memory.
       var memoryById = {};
-      memories.forEach(function (m) {
-        if (m && m.id) memoryById[m.id] = m;
-      });
+      memories.forEach(function (m) { if (m && m.id) memoryById[m.id] = m; });
+
+      // Forward declarations for hoisted graph state — populated later by
+      // the canvas-init block and read by applyPayload's snapshot/restore.
+      var nodes = [];
+      var edges = [];
+      var view = { tx: 0, ty: 0, k: 1 };
+
+      // #95 — JS bridge surface. The Python side calls this from
+      // ``window.evaluate_js`` after each debounced rebuild. Defined
+      // BEFORE the first init body runs so the bridge is present even
+      // if the very first ``applyUpdate`` arrives before any user input.
+      window.mnemos = {
+        applyUpdate: function (p) { applyPayload(p, { preserveState: true }); }
+      };
+
+      function applyPayload(newData, opts) {
+        opts = opts || {};
+        var preserve = !!opts.preserveState;
+
+        // ---- Snapshot live UI state (only when preserving) ----------- //
+        var snap = null;
+        if (preserve) {
+          var activeTabEl = document.querySelector('button[role="tab"][aria-selected="true"]');
+          var selRow = document.querySelector('.domain-row[aria-selected="true"]');
+          var si = document.getElementById('search-input');
+          var rl = document.getElementById('result-list');
+          snap = {
+            activeTab: activeTabEl ? activeTabEl.id : null,
+            ddId: window.__currentDrilldownId || null,
+            domainKey: selRow ? selRow.getAttribute('data-domain-row') : null,
+            q: si ? si.value : "",
+            posMap: new Map(nodes.map(function (n) {
+              return [n.key || n.id, { x: n.x, y: n.y, _pinned: n._pinned }];
+            })),
+            expandedIds: Array.prototype.slice.call(
+              document.querySelectorAll('li[data-mem-id]')
+            ).filter(function (li) {
+              return li.querySelector('.mem-content-full.shown');
+            }).map(function (li) { return li.getAttribute('data-mem-id'); }),
+            scrollTop: rl ? rl.scrollTop : 0
+          };
+        }
+
+        // ---- Mutate module-scoped containers IN PLACE ---------------- //
+        var g = newData.graph || {};
+        var m = newData.memory || {};
+        var po = newData.policy_cohesion || {};
+        // Re-assign the local-to-IIFE references (these are NOT closed
+        // over by inner functions as objects — every reader reaches
+        // through ``graph`` / ``memory`` / ``policy`` at call time below
+        // OR through the hoisted arrays).
+        graph = g;
+        memory = m;
+        policy = po;
+        density = g.edge_density || {};
+        domains.length = 0;
+        Array.prototype.push.apply(domains, g.domains || []);
+        relationships.length = 0;
+        Array.prototype.push.apply(relationships, g.relationships || []);
+        memories.length = 0;
+        Array.prototype.push.apply(memories, m.memories || []);
+        clusters.length = 0;
+        Array.prototype.push.apply(clusters, po.clusters || []);
+        for (var k in memoryById) {
+          if (Object.prototype.hasOwnProperty.call(memoryById, k)) delete memoryById[k];
+        }
+        memories.forEach(function (mm) { if (mm && mm.id) memoryById[mm.id] = mm; });
+
+        // ---- Re-render dynamic surfaces ------------------------------ //
+        // Header / footer text
+        var hm = document.getElementById("header-meta");
+        if (hm) {
+          hm.textContent =
+            domains.length + " domains · " + memories.length + " memories · " +
+            clusters.length + " policy clusters";
+        }
+        var fm = document.getElementById("footer-meta");
+        if (fm) {
+          fm.textContent =
+            "schema v" + (newData.schema_version || "?") + " · generated " + (newData.generated_at || "");
+        }
+        // Edge-density banner
+        var edb = document.getElementById("edge-density-banner");
+        if (edb) {
+          edb.textContent =
+            "Showing top " + (density.shown_edges != null ? density.shown_edges : relationships.length) +
+            " of " + (density.total_edges != null ? density.total_edges : relationships.length) +
+            " edges (max " + (density.max_edges_per_node != null ? density.max_edges_per_node : "∞") +
+            " per node, weight ≥ " + (density.edge_weight_threshold != null ? density.edge_weight_threshold : 0) + ").";
+        }
+
+        // Repaint the memory list + sidebar from the new arrays.
+        if (typeof rebuildSidebar === "function") rebuildSidebar();
+        if (typeof rebuildPolicyTable === "function") rebuildPolicyTable();
+        if (typeof renderMemoryList === "function") renderMemoryList();
+        if (typeof rebuildGraphNodes === "function") rebuildGraphNodes(snap && snap.posMap);
+
+        // ---- Restore snapshot ---------------------------------------- //
+        if (preserve && snap) {
+          if (typeof showTab === "function") {
+            showTab((snap.activeTab || "btn-memory").replace("btn-", ""));
+          }
+          if (snap.ddId && memoryById[snap.ddId] && typeof showDrilldown === "function") {
+            showDrilldown(memoryById[snap.ddId]);
+          }
+          if (snap.domainKey === "__all__") {
+            if (typeof clearFilter === "function") clearFilter();
+          } else if (snap.domainKey) {
+            var d = domains.filter(function (dd) {
+              return (dd.key || dd.label) === snap.domainKey;
+            })[0];
+            if (d && typeof applyCrossFilter === "function") {
+              applyCrossFilter(d.member_ids, "domain " + (d.label || d.key));
+            }
+          }
+          var si2 = document.getElementById('search-input');
+          if (si2) si2.value = snap.q;
+          if (typeof renderMemoryList === "function") renderMemoryList();
+          // Re-expand previously expanded rows.
+          snap.expandedIds.forEach(function (id) {
+            var li = document.querySelector('li[data-mem-id="' + id + '"]');
+            if (!li) return;
+            var full = li.querySelector('.mem-content-full');
+            var btn = li.querySelector('.mem-expand-btn');
+            if (full && !full.classList.contains('shown')) {
+              full.classList.add('shown');
+              if (btn) {
+                btn.textContent = "▴";
+                btn.setAttribute('aria-expanded', 'true');
+              }
+            }
+          });
+          var rl2 = document.getElementById('result-list');
+          if (rl2) rl2.scrollTop = snap.scrollTop;
+        }
+      }
 
       document.getElementById("header-meta").textContent =
         domains.length + " domains · " + memories.length + " memories · " +
@@ -611,6 +746,9 @@
         while (resultList.firstChild) { resultList.removeChild(resultList.firstChild); }
         rows.forEach(function (mem) {
           var li = document.createElement("li");
+          // #95 — Stable per-row id so live-update can re-apply expand
+          // toggles by memory id after a debounced rebuild.
+          li.setAttribute('data-mem-id', mem.id || '');
           // #85 — primary heading is the derived display_title; id is shown
           // as a small muted pill on the secondary sub-line.
           var titleEl = document.createElement("div");
@@ -668,6 +806,9 @@
         document.getElementById(id).textContent = (value === null || value === undefined) ? "—" : String(value);
       }
       function showDrilldown(mem) {
+        // #95 — Remember the currently-opened drilldown id so a live-
+        // update rebuild can re-open the same memory after rebuilding.
+        window.__currentDrilldownId = mem ? (mem.id || null) : null;
         // #85 — drill-down heading uses display_title; the id remains visible
         // as the existing provenance-panel "Path" sibling label via setText.
         document.getElementById("drilldown-title").textContent =
@@ -994,62 +1135,76 @@
         return row;
       }
 
-      var pinnedAllRow = makeRow({
-        pinned: true,
-        selected: true,
-        dataKey: "__all__",
-        label: "All memories",
-        count: memories.length,
-        onActivate: function () { clearFilter(); }
-      });
-      sidebar.appendChild(pinnedAllRow);
+      // #95 — pinnedAllRow is module-scoped so the Esc key handler (which
+      // calls setSelectedDomainRow(pinnedAllRow)) keeps a stable reference
+      // across applyPayload rebuilds.
+      var pinnedAllRow = null;
 
-      var sortedDomains = domains.slice().sort(function (a, b) {
-        var la = (a.label || a.key || "").toLowerCase();
-        var lb = (b.label || b.key || "").toLowerCase();
-        if (la < lb) return -1;
-        if (la > lb) return 1;
-        return 0;
-      });
-      sortedDomains.forEach(function (d) {
-        var label = d.label || d.key || "(domain)";
-        var ids = d.member_ids || [];
-        var row = makeRow({
-          pinned: false,
-          selected: false,
-          dataKey: d.key || label,
-          label: label,
-          count: ids.length,
-          onActivate: function () {
-            applyCrossFilter(d.member_ids, "domain " + label);
-          }
+      function rebuildSidebar() {
+        // Clear the entire sidebar then rebuild every row from scratch.
+        // Cheap — at most ~50 rows for the real store.
+        while (sidebar.firstChild) { sidebar.removeChild(sidebar.firstChild); }
+        pinnedAllRow = makeRow({
+          pinned: true,
+          selected: true,
+          dataKey: "__all__",
+          label: "All memories",
+          count: memories.length,
+          onActivate: function () { clearFilter(); }
         });
-        sidebar.appendChild(row);
-      });
+        sidebar.appendChild(pinnedAllRow);
+        var sortedDomains = domains.slice().sort(function (a, b) {
+          var la = (a.label || a.key || "").toLowerCase();
+          var lb = (b.label || b.key || "").toLowerCase();
+          if (la < lb) return -1;
+          if (la > lb) return 1;
+          return 0;
+        });
+        sortedDomains.forEach(function (d) {
+          var label = d.label || d.key || "(domain)";
+          var ids = d.member_ids || [];
+          var row = makeRow({
+            pinned: false,
+            selected: false,
+            dataKey: d.key || label,
+            label: label,
+            count: ids.length,
+            onActivate: function () {
+              applyCrossFilter(d.member_ids, "domain " + label);
+            }
+          });
+          sidebar.appendChild(row);
+        });
+      }
+      rebuildSidebar();
 
       // ---- Policy cohesion table ----------------------------------------- //
       var policyBody = document.getElementById("policy-body");
-      clusters.forEach(function (c) {
-        var tr = document.createElement("tr");
-        function cell(text) { var td = document.createElement("td"); td.textContent = text; return td; }
-        function pillCell(arr) {
-          var td = document.createElement("td");
-          (arr || []).forEach(function (v) {
-            var s = document.createElement("span"); s.className = "pill"; s.textContent = String(v); td.appendChild(s);
+      function rebuildPolicyTable() {
+        while (policyBody.firstChild) { policyBody.removeChild(policyBody.firstChild); }
+        clusters.forEach(function (c) {
+          var tr = document.createElement("tr");
+          function cell(text) { var td = document.createElement("td"); td.textContent = text; return td; }
+          function pillCell(arr) {
+            var td = document.createElement("td");
+            (arr || []).forEach(function (v) {
+              var s = document.createElement("span"); s.className = "pill"; s.textContent = String(v); td.appendChild(s);
+            });
+            return td;
+          }
+          tr.appendChild(cell(c.theme || "—"));
+          tr.appendChild(cell((c.member_ids || []).length + " members"));
+          tr.appendChild(pillCell(c.layers));
+          tr.appendChild(cell(c.recurrence != null ? c.recurrence : "—"));
+          tr.appendChild(cell(c.suggested_layer || "—"));
+          tr.addEventListener("click", function () {
+            applyCrossFilter(c.member_ids || [], "policy theme “" + (c.theme || "?") + "”");
           });
-          return td;
-        }
-        tr.appendChild(cell(c.theme || "—"));
-        tr.appendChild(cell((c.member_ids || []).length + " members"));
-        tr.appendChild(pillCell(c.layers));
-        tr.appendChild(cell(c.recurrence != null ? c.recurrence : "—"));
-        tr.appendChild(cell(c.suggested_layer || "—"));
-        tr.addEventListener("click", function () {
-          applyCrossFilter(c.member_ids || [], "policy theme “" + (c.theme || "?") + "”");
+          policyBody.appendChild(tr);
         });
-        policyBody.appendChild(tr);
-      });
-      document.getElementById("policy-empty").hidden = clusters.length !== 0;
+        document.getElementById("policy-empty").hidden = clusters.length !== 0;
+      }
+      rebuildPolicyTable();
 
       // ---- Graph canvas — #86 Obsidian-style interactive subsystem ------- //
       // Replaces the previous canvas.click handler with a full pointer
@@ -1063,14 +1218,17 @@
       var graphEmpty = document.getElementById("graph-empty");
       var ZOOM_MIN = 0.2;
       var ZOOM_MAX = 5.0;
-      if (!domains.length) {
-        canvas.hidden = true;
-        graphEmpty.hidden = false;
-      } else {
-        var ctx = canvas.getContext("2d");
-        var nodes = domains.map(function (d, i) {
-          var theta = (i / domains.length) * Math.PI * 2;
-          return {
+      // #95 — Graph canvas is built lazily and re-buildable. The
+      // ``rebuildGraphNodes`` helper repopulates the hoisted ``nodes`` /
+      // ``edges`` arrays in place from the current ``domains`` /
+      // ``relationships`` and (optionally) restores previous node x/y/_pinned
+      // from a snapshot Map keyed by node.key. On the initial paint
+      // savedPosMap is undefined, so the radial seed positions apply.
+      function rebuildGraphNodes(savedPosMap) {
+        nodes.length = 0;
+        Array.prototype.push.apply(nodes, domains.map(function (d, i) {
+          var theta = (i / Math.max(1, domains.length)) * Math.PI * 2;
+          var node = {
             key: d.key,
             label: d.label || d.key,
             member_ids: d.member_ids || [],
@@ -1080,23 +1238,46 @@
             r: Math.max(6, Math.min(22, 6 + (d.member_ids || []).length)),
             _pinned: false
           };
-        });
-        var nodeByMember = {};
+          if (savedPosMap && savedPosMap.has(d.key)) {
+            var saved = savedPosMap.get(d.key);
+            node.x = saved.x;
+            node.y = saved.y;
+            node._pinned = saved._pinned;
+            node.vx = 0;
+            node.vy = 0;
+          }
+          return node;
+        }));
+        nodeByMember = {};
         nodes.forEach(function (n) {
           (n.member_ids || []).forEach(function (mid) {
             if (!(mid in nodeByMember)) nodeByMember[mid] = n;
           });
         });
-        // Edges connect domains whose member sets touch the relationship's endpoints.
-        var edges = [];
+        edges.length = 0;
         relationships.forEach(function (rel) {
           var a = nodeByMember[rel.source_id];
           var b = nodeByMember[rel.target_id];
           if (a && b && a !== b) edges.push({ a: a, b: b, w: rel.weight || 0.1 });
         });
+        if (typeof markDirty === "function") markDirty();
+      }
 
+      // ``nodeByMember`` is module-scoped so rebuildGraphNodes can repoint
+      // it on every rebuild while the hover/click handlers still resolve
+      // the latest node by member id.
+      var nodeByMember = {};
+
+      if (!domains.length) {
+        canvas.hidden = true;
+        graphEmpty.hidden = false;
+      } else {
+        var ctx = canvas.getContext("2d");
+        rebuildGraphNodes();
         // ---- View / interaction state ---------------------------------- //
-        var view = { tx: 0, ty: 0, k: 1 };
+        // ``view`` is hoisted at IIFE scope so the live-update snapshot
+        // can preserve pan/zoom across rebuilds; reset to defaults here.
+        view.tx = 0; view.ty = 0; view.k = 1;
         var dragNode = null;
         var draggingPointerId = null;
         var pan = null;        // { startSx, startSy, startTx, startTy }

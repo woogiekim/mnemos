@@ -18,6 +18,11 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Live-updating desktop app — file watcher + pywebview JS bridge re-renders
+  the open window without losing tab/drilldown/sidebar/search/graph-positions/expand-toggles.
+  Opt out via mnemos.yml `app.live_update.enabled: false`. New `[ui]` extra
+  dep `watchdog>=4.0`.
+  ([#95](https://github.com/woogiekim/mnemos/issues/95)).
 - Installable desktop app (macOS `.app` bundle) for the unified inspection UI
   ([#94](https://github.com/woogiekim/mnemos/issues/94)): a new
   `app/mnemos_app.py` entry reuses

@@ -182,9 +182,7 @@ uses, with a single safe default:
 | Window | `launch_app` (pywebview file://) | **same** launcher |
 | Repo-root default | `.` (current dir) | `~/.mnemos` (Finder-safe) |
 | Headless render | `mnemos ui --output PATH` | `MNEMOS_APP_HEADLESS=1` |
-| Live-data | refresh on next CLI invocation | **NO** live data yet — that is the
-                                          scope of follow-up
-                                          [#95](https://github.com/woogiekim/mnemos/issues/95) |
+| Live-data | refresh on next CLI invocation | **YES** — file-watcher pushes re-renders via the JS bridge (#95) |
 
 The desktop app is presentation only — the same payload builders, same
 templates, same launcher. The only difference is the entry point and the
@@ -255,3 +253,116 @@ without re-architecting:
 
 Both are tracked as follow-up issues; the macOS `.app` ships in #94 as the
 first target.
+
+---
+
+## Live updates
+
+> Issue [#95](https://github.com/woogiekim/mnemos/issues/95) — the desktop app
+> rebuilds its UI in real time as the memory store changes, so a `mnemos
+> capture` from another shell appears in the open window within a few hundred
+> milliseconds without a manual reload.
+
+### How it works
+
+The app starts a file-system watcher in the background **after**
+`create_window` returns but **before** `webview.start()` enters its blocking
+event loop. The watcher subscribes to the store root the gateway reads from:
+
+* **default `MemoryStore`** → `<repo_root>/wiki` (recursive)
+* **`ObsidianBackend`** → `<vault_path>` (recursive)
+
+When a file event fires, a single `threading.Timer` is armed (or re-armed) for
+the configured debounce window. After the quiet window elapses, the watcher:
+
+1. Re-walks every layer through `gateway._store.iter_layer_items(...)`.
+2. Calls `build_unified_payload(...)` against the same policy engine the
+   initial render used — no new payload logic.
+3. Serialises the new payload with `json.dumps(...)` and pipes it through
+   `window.evaluate_js("window.mnemos.applyUpdate(<json>)")`.
+
+The JS side (`window.mnemos.applyUpdate(payload)`) snapshots the live UI
+state, mutates the module-scoped arrays in place, re-renders, and restores
+the snapshot. Preserved state:
+
+| Surface | Preserved by |
+|---|---|
+| Active tab | `document.querySelector('button[role="tab"][aria-selected="true"]').id` |
+| Drilldown selection | `window.__currentDrilldownId` |
+| Sidebar domain row | `.domain-row[aria-selected="true"]` `data-domain-row` |
+| Search input | `#search-input.value` |
+| Graph node positions | `Map<nodeId, {x, y, _pinned}>` |
+| Expand toggles | `li[data-mem-id]` carrying `.mem-content-full.shown` |
+| Result-list scroll | `#result-list.scrollTop` |
+
+Concurrent pushes are serialised — a follow-up event arriving while a rebuild
+is still in flight sets a "follow-up" flag and the in-flight rebuild re-arms
+the timer when it completes, so the latest payload always wins without
+overlapping JS bridge calls. Rebuild exceptions are caught and logged via
+`core.observability` (when importable) — a transient store error never
+crashes the long-running app.
+
+### Config knobs
+
+The `mnemos.yml` `app.live_update` block controls the feature. Defaults
+match the issue spec; both keys are tolerant of malformed input (a non-bool
+`enabled` falls back to `true`; a non-int / non-positive `debounce_ms` falls
+back to `300`).
+
+```yaml
+app:
+  live_update:
+    enabled: true          # default true; set false to opt out
+    debounce_ms: 300       # default 300; positive int
+```
+
+### Opt-out
+
+To run the app as a static snapshot (the pre-#95 behavior), set
+`enabled: false`:
+
+```yaml
+app:
+  live_update:
+    enabled: false
+```
+
+The watcher does not start and `atexit` does not register a shutdown hook —
+the GUI path becomes identical to #94.
+
+### Manual smoke test
+
+From the built `.app` (or `app/mnemos_app.py` directly) in one terminal:
+
+```bash
+open dist/mnemos.app
+```
+
+From a second terminal, capture a memory and watch it appear in the Memory
+tab within ~`debounce_ms` ms:
+
+```bash
+mnemos capture "live-update probe — $(date)"
+```
+
+The new memory should appear in the Memory tab without losing the currently
+active tab, sidebar selection, search query, or expanded rows.
+
+### Troubleshooting
+
+* **Window does not update** — verify the resolved store root with
+  `mnemos search "" --limit 1` from the same shell that launches the app.
+  Finder-launched apps do NOT inherit shell env, so `MNEMOS_REPO_ROOT` must
+  be set on the command line (`MNEMOS_REPO_ROOT=/path open dist/mnemos.app`)
+  if it's not the default `~/.mnemos`.
+* **Updates are bursty/too aggressive** — raise `app.live_update.debounce_ms`
+  to coalesce more events into a single rebuild.
+* **Updates feel laggy** — lower `app.live_update.debounce_ms`. The smallest
+  sensible value is ~50–100ms; tighter windows degrade into per-event JS
+  bridge thrash.
+* **`[ui]` extra missing** — install with `pip install 'mnemos[ui]'`. The
+  watcher depends on `watchdog>=4.0`, which is now part of the `[ui]` extra.
+* **Memory store on a network filesystem** — `watchdog`'s `Observer` falls
+  back to polling on filesystems that do not emit kernel events; expect a
+  larger effective latency on those mounts. Local APFS/HFS+/ext4 stores
+  receive events synchronously.

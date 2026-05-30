@@ -430,3 +430,44 @@ class TestLaunchApp:
 
     def test_pywebview_not_installed_is_runtime_error(self):
         assert issubclass(unifiedview.PywebviewNotInstalled, RuntimeError)
+
+    def test_ready_callback_receives_window_before_start(self, monkeypatch):
+        """Issue #95 — ``launch_app(ready=...)`` invokes the callback with
+        the window object returned by ``create_window`` AFTER that call
+        and BEFORE ``webview.start()`` begins blocking. The default
+        ``ready=None`` keeps the existing call-sites identical."""
+        captured: dict = {}
+        fake = types.ModuleType("webview")
+        sentinel = object()  # stand-in for the pywebview Window instance.
+
+        # ``create_window`` returns the sentinel; ``start`` flips a flag.
+        ordering: list[str] = []
+        create_window_mock = MagicMock(side_effect=lambda *a, **kw: (
+            ordering.append("create_window") or sentinel
+        ))
+        start_mock = MagicMock(side_effect=lambda: ordering.append("start"))
+        fake.create_window = create_window_mock
+        fake.start = start_mock
+        monkeypatch.setitem(sys.modules, "webview", fake)
+
+        ready_mock = MagicMock(
+            side_effect=lambda w: ordering.append("ready") or captured.setdefault("window", w)
+        )
+        unifiedview.launch_app("<html/>", ready=ready_mock)
+
+        # (a) ready fired once with the sentinel returned by create_window.
+        ready_mock.assert_called_once_with(sentinel)
+        assert captured["window"] is sentinel
+        # (b) call order: create_window -> ready -> start.
+        assert ordering == ["create_window", "ready", "start"], ordering
+        # (c) start() ran exactly once (event loop entered).
+        start_mock.assert_called_once_with()
+
+    def test_default_ready_is_none_no_callback_fired(self, monkeypatch):
+        """Omitting ``ready`` keeps the existing behavior — nothing extra runs."""
+        captured: dict = {}
+        fake = self._fake_webview(captured)
+        monkeypatch.setitem(sys.modules, "webview", fake)
+        # No ready kwarg — exercises the ``ready is None`` branch.
+        unifiedview.launch_app("<html/>")
+        assert captured["url"].startswith("file://")
