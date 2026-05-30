@@ -449,6 +449,140 @@ class TestUiInteractiveGraph:
 
 
 # --------------------------------------------------------------------------- #
+# #90 — Memory-first tab order + default-active Memory tab
+# --------------------------------------------------------------------------- #
+class TestUi90MemoryFirstTab:
+    """Issue #90 swaps the tab order so Memory is the first tab in DOM AND
+    the default-active tab on load. Graph stays second, Policy Cohesion third.
+    The JS ``tabs = { graph, memory, policy }`` map and the ``showTab(...)``
+    function are unchanged — only the DOM order and the initial ``aria-selected`` /
+    ``class="tab active"`` placement move.
+    """
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "alpha", tag="agent:backend")
+        _capture_one(runner, cli, "global", "beta", tag="agent:frontend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    def test_memory_button_is_first_in_nav(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        pos_btn_memory = html.find('id="btn-memory"')
+        pos_btn_graph = html.find('id="btn-graph"')
+        pos_btn_policy = html.find('id="btn-policy"')
+        assert pos_btn_memory != -1
+        assert pos_btn_graph != -1
+        assert pos_btn_policy != -1
+        assert pos_btn_memory < pos_btn_graph < pos_btn_policy, (
+            "nav button order must be Memory → Graph → Policy "
+            f"(got memory@{pos_btn_memory}, graph@{pos_btn_graph}, "
+            f"policy@{pos_btn_policy})"
+        )
+
+    def test_memory_button_is_aria_selected_true_on_load(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert (
+            '<button id="btn-memory" role="tab" aria-selected="true"' in html
+        ), "Memory button must be aria-selected=true on initial render"
+        assert (
+            '<button id="btn-graph" role="tab" aria-selected="false"' in html
+        ), "Graph button must be aria-selected=false on initial render"
+        assert (
+            '<button id="btn-policy" role="tab" aria-selected="false"' in html
+        ), "Policy button must be aria-selected=false on initial render"
+
+    def test_tab_memory_section_appears_before_tab_graph_section(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """The hard-gate inline structural check — the position of
+        ``id="tab-memory"`` must be less than the position of
+        ``id="tab-graph"`` in the rendered HTML string."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        pos_tab_memory = html.find('id="tab-memory"')
+        pos_tab_graph = html.find('id="tab-graph"')
+        pos_tab_policy = html.find('id="tab-policy"')
+        assert pos_tab_memory != -1
+        assert pos_tab_graph != -1
+        assert pos_tab_policy != -1
+        assert pos_tab_memory < pos_tab_graph, (
+            "#tab-memory must appear before #tab-graph in DOM order "
+            f"(got memory@{pos_tab_memory}, graph@{pos_tab_graph})"
+        )
+        assert pos_tab_graph < pos_tab_policy, (
+            "#tab-graph must appear before #tab-policy in DOM order"
+        )
+
+    def test_memory_section_carries_tab_active_class_on_load(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """``class="tab active"`` moves from #tab-graph onto #tab-memory so the
+        Memory tab is the visible panel on first load. The Graph section keeps
+        just ``class="tab"`` and is hidden until the user clicks the Graph
+        button."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert (
+            '<section id="tab-memory" class="tab active"' in html
+        ), "Memory section must carry class='tab active' on initial render"
+        assert (
+            '<section id="tab-graph" class="tab"' in html
+        ), "Graph section must carry class='tab' (no 'active') on initial render"
+        # And the active class must NOT appear on the Graph section anymore.
+        assert (
+            '<section id="tab-graph" class="tab active"' not in html
+        ), "Graph section must not be the active tab on initial render"
+
+    def test_initial_active_tab_is_memory_and_sidebar_is_visible(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """Structural mirror of the pywebview probe (no real pywebview required).
+        Asserts ``active_tab_initial == 'tab-memory'`` AND that the Memory
+        sidebar is present inside the same active section — i.e. when the
+        page loads, the user immediately sees the domain sidebar without
+        having to click anything.
+        """
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Active tab on initial render is exactly #tab-memory.
+        # Find the unique "tab active" section and check its id.
+        marker = 'class="tab active"'
+        pos = html.find(marker)
+        assert pos != -1, "no .tab.active section in rendered HTML"
+        # Walk backward to the <section id="...".
+        section_open = html.rfind("<section", 0, pos)
+        assert section_open != -1
+        section_head = html[section_open:pos + len(marker)]
+        assert 'id="tab-memory"' in section_head, (
+            f"the .tab.active section must be #tab-memory; got: {section_head!r}"
+        )
+        # And the #domain-sidebar lives inside that same active section
+        # (i.e. appears AFTER the opening <section id="tab-memory" ...>
+        # and BEFORE the next </section>).
+        sidebar_pos = html.find('id="domain-sidebar"', section_open)
+        next_section_close = html.find("</section>", section_open)
+        assert sidebar_pos != -1
+        assert next_section_close != -1
+        assert section_open < sidebar_pos < next_section_close, (
+            "#domain-sidebar must be inside the initially-active #tab-memory "
+            "section so it is visible on first load (offsetParent !== null)"
+        )
+
+    def test_showtab_memory_still_targets_memory_tab(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """Cross-filter regression guard: the graph-node click handler calls
+        ``showTab('memory')`` after applyCrossFilter; the JS ``tabs`` map and
+        ``showTab`` function are unchanged by #90, so this contract still holds.
+        """
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert 'showTab("memory")' in html or "showTab('memory')" in html, (
+            "showTab('memory') call must remain wired for the graph→memory "
+            "cross-filter flow"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # #86 — Regression guards re-asserted in the same module
 # --------------------------------------------------------------------------- #
 class TestUi86RegressionGuards:

@@ -16,6 +16,29 @@ restore` of an older archive is always a breaking change.
 
 ## [Unreleased]
 
+### Changed
+
+- Memory-first tab order in `mnemos ui`
+  ([#90](https://github.com/woogiekim/mnemos/issues/90)):
+  `core/templates/ui.html` swaps the nav tab order so **Memory** is the
+  first tab in DOM and the default-active tab on load (Graph stays
+  second, Policy Cohesion third). `aria-selected="true"` and
+  `class="tab active"` move from the Graph button/section onto the
+  Memory button/section; the JS `tabs = { graph, memory, policy }` map,
+  the `showTab(...)` function, the `applyCrossFilter` graph→Memory
+  cross-filter wire, and the [#83](https://github.com/woogiekim/mnemos/issues/83)
+  layout chain (`body height:100vh`, `main height:0`) are unchanged.
+  Presentation only — no Python / payload / schema / on-disk change, no
+  new dependency. The Memory tab's `#domain-sidebar` is therefore
+  visible on first load without any click. `tests/test_cli_ui.py` gains
+  a `TestUi90MemoryFirstTab` class that pins the nav order, the
+  initial `aria-selected` placement, the section DOM order
+  (`#tab-memory` before `#tab-graph`), the `class="tab active"` move,
+  and that the `#domain-sidebar` lives inside the initially-active
+  section. Verified end-to-end with a real pywebview probe
+  (`active_tab_initial == "tab-memory"`, `#domain-sidebar.offsetParent
+  !== null`, `header.getBoundingClientRect().height > 0`).
+
 ### Added
 
 - Substantive AI capture
