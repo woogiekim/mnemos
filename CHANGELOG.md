@@ -16,6 +16,37 @@ restore` of an older archive is always a breaking change.
 
 ## [Unreleased]
 
+### Added
+
+- Installable desktop app (macOS `.app` bundle) for the unified inspection UI
+  ([#94](https://github.com/woogiekim/mnemos/issues/94)): a new
+  `app/mnemos_app.py` entry reuses
+  [#83](https://github.com/woogiekim/mnemos/issues/83)'s
+  `core.unifiedview.{build_unified_payload,render_html,write_unified_html,launch_app}`
+  and `core.cli._get_gateway` verbatim — no new payload logic — and exposes
+  the same item set as `mnemos ui`. The PyInstaller spec at
+  `app/mnemos_app.spec` declares the Cocoa pywebview hidden-imports plus
+  `core.templates/*.html` data files, and assembles `dist/mnemos.app` with
+  a `BUNDLE()` step (`bundle_identifier="io.mnemos.app"`,
+  `CFBundleShortVersionString="0.1.0"`, `NSHighResolutionCapable=True`).
+  `scripts/build_app.sh` is the dry-run-by-default operator helper that
+  invokes `pyinstaller --noconfirm app/mnemos_app.spec` under `--execute`
+  and verifies `Contents/{Info.plist,MacOS/mnemos,Resources/core/templates/ui.html}`;
+  it NEVER codesigns, notarizes, or pushes. `MNEMOS_APP_HEADLESS=1`
+  short-circuits the entry to write HTML via `write_unified_html` to
+  `MNEMOS_APP_HEADLESS_OUTPUT` (default `/tmp/mnemos-app-headless.html`)
+  and `sys.exit(0)` without importing `webview` — used by the build-smoke
+  test. `MNEMOS_REPO_ROOT` precedence is env-var → `~/.mnemos` default
+  (Finder-launched apps do NOT inherit shell env). A new
+  `[project.optional-dependencies] build = ["pyinstaller>=6.0"]` sibling
+  of `ui` keeps the build dep opt-in, and a new
+  `[tool.pytest.ini_options] markers = ["app_build: ..."]` registers the
+  opt-in smoke marker. The CLI `mnemos ui` surface, payload contract,
+  on-disk format, and `backup.SCHEMA_VERSION` are unchanged. Operator
+  guide [docs/desktop-app.md](docs/desktop-app.md) cross-links
+  [docs/unified-inspection-ui.md](docs/unified-inspection-ui.md) and
+  [docs/install-lifecycle.md](docs/install-lifecycle.md).
+
 ### Changed
 
 - Drill-down Related mini-graph for `mnemos ui`
