@@ -1,19 +1,21 @@
 <!DOCTYPE html>
 <!--
-  Unified mnemos inspection UI (issue #83).
+  Unified mnemos inspection UI (issue #83, extended #86).
   ONE self-contained static HTML surface — vanilla JS, no network, no eval,
   no CDN. The embedded payload is parsed client-side from the ui-data script
   block (avoids file:// CORS) and renders identically inside a pywebview
   native window or when opened directly in a browser.
 
   Three tabs:
-    * Graph          — canvas force-directed domain graph (data.graph)
-    * Memory         — search + drill-down (data.memory)
-    * Policy Cohesion — recurring-theme cluster table (data.policy_cohesion)
+    * Graph          — canvas force-directed domain graph (data.graph) with
+                       Obsidian-style pan/zoom/drag/hover/click (#86).
+    * Memory         — alphabetized domain sidebar (#86) + search + drill-down.
+    * Policy Cohesion — recurring-theme cluster table (data.policy_cohesion).
 
-  Cross-filter: clicking a domain node switches to the Memory tab filtered to
-  that domain's member_ids; clicking a policy cluster filters Memory to its
-  member_ids. An honest edge-density banner shows shown_edges / total_edges.
+  Cross-filter: clicking a sidebar row OR a graph node switches to / refines
+  the Memory tab filtered to that domain's member_ids. The pinned "All
+  memories" row clears the filter. An honest edge-density banner shows
+  shown_edges / total_edges.
 
   Load-bearing tokens (asserted verbatim by tests/packaging — do not rename):
     * the ui-data script element with id="ui-data" type="application/json"
@@ -77,11 +79,66 @@
       font-size: 12px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
     }
     #graph-wrap { flex: 1 1 auto; min-height: 0; display: flex; }
-    canvas { flex: 1 1 auto; cursor: grab; background: #fff; }
+    canvas { flex: 1 1 auto; cursor: grab; background: #fff; touch-action: none; }
     #graph-empty { margin: auto; color: var(--muted); }
 
-    /* Memory tab */
+    /* Memory tab — #86 domain sidebar is the first child, followed by the
+       existing list + drilldown columns. All three columns get min-width:0
+       so the flex row stays scrollable inside the #83 absolute-positioned
+       .tab box. */
     #tab-memory { flex-direction: row; }
+    #domain-sidebar {
+      flex: 0 0 220px;
+      min-width: 0;
+      overflow: auto;
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      padding: 6px 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .domain-row {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      padding: 6px 14px;
+      cursor: pointer;
+      font: inherit;
+      gap: 8px;
+      min-width: 0;
+    }
+    .domain-row:hover { background: var(--accent-soft); }
+    .domain-row[aria-selected="true"] {
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .domain-row:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+    .domain-row.pinned {
+      border-bottom: 1px solid var(--line);
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .domain-label {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .domain-count {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
     #memory-list-col { flex: 1 1 60%; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
     .controls { padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex: 0 0 auto; }
     .controls input[type="search"] { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; }
@@ -124,6 +181,27 @@
     .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); font-size: 11px; margin: 1px; }
     #policy-empty { padding: 20px; color: var(--muted); }
     footer { padding: 6px 16px; background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+
+    /* #86 — graph hover tooltip. position:fixed so it never inherits a
+       transform / scroll context. pointer-events:none keeps the canvas
+       pointer state machine in control. Tooltip body is built with
+       createElement + textContent only — no unsafe DOM-assignment sinks
+       and no eval. */
+    .graph-tooltip {
+      position: fixed;
+      pointer-events: none;
+      z-index: 9999;
+      background: var(--panel);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+      max-width: 260px;
+    }
+    .tt-label { font-weight: 600; }
+    .tt-sub { color: var(--muted); font-size: 11px; }
   </style>
 </head>
 <body>
@@ -147,8 +225,9 @@
       </div>
     </section>
 
-    <!-- Memory tab -->
+    <!-- Memory tab — #86 sidebar is FIRST child of #tab-memory. -->
     <section id="tab-memory" class="tab" role="tabpanel">
+      <aside id="domain-sidebar" role="list" aria-label="Domains"></aside>
       <div id="memory-list-col">
         <div class="controls">
           <input id="search-input" type="search" role="search"
@@ -289,7 +368,7 @@
           if (filterSet && !filterSet.has(m.id)) return false;
           return matchesSearch(m, q);
         });
-        resultList.innerHTML = "";
+        while (resultList.firstChild) { resultList.removeChild(resultList.firstChild); }
         rows.forEach(function (mem) {
           var li = document.createElement("li");
           // #85 — primary heading is the derived display_title; id is shown
@@ -360,6 +439,107 @@
       searchInput.addEventListener("input", renderMemoryList);
       renderMemoryList();
 
+      // ---- #86 — Domain sidebar (Memory tab) ----------------------------- //
+      // Pinned "All memories" row + one row per d in graph.domains
+      // (alphabetized by d.label.toLowerCase()). Each row is a <button>
+      // with role=listitem and tabindex=0; ArrowUp/ArrowDown move focus
+      // across rows; Enter/Space activates the focused row. Selection is
+      // a visual hint (aria-selected) only; the authoritative filter
+      // state remains activeFilterIds. The pinned row carries the stable
+      // attribute marker data-domain-row="__all__" so tests and external
+      // probes can locate it from a static source grep.
+      var sidebar = document.getElementById("domain-sidebar");
+      var PINNED_ALL_ATTR = 'data-domain-row="__all__"';
+
+      function setSelectedDomainRow(row) {
+        var all = sidebar.querySelectorAll(".domain-row");
+        for (var i = 0; i < all.length; i++) {
+          all[i].setAttribute("aria-selected", all[i] === row ? "true" : "false");
+        }
+      }
+
+      function moveFocus(delta) {
+        var rows = sidebar.querySelectorAll(".domain-row");
+        if (!rows.length) return;
+        var idx = -1;
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i] === document.activeElement) { idx = i; break; }
+        }
+        if (idx === -1) {
+          rows[0].focus();
+          return;
+        }
+        var next = idx + delta;
+        if (next < 0) next = 0;
+        if (next >= rows.length) next = rows.length - 1;
+        rows[next].focus();
+      }
+
+      function makeRow(opts) {
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "domain-row" + (opts.pinned ? " pinned" : "");
+        row.setAttribute("role", "listitem");
+        row.setAttribute("tabindex", "0");
+        row.setAttribute("aria-selected", opts.selected ? "true" : "false");
+        if (opts.dataKey) row.setAttribute("data-domain-row", opts.dataKey);
+        var labelEl = document.createElement("span");
+        labelEl.className = "domain-label";
+        labelEl.textContent = opts.label;
+        var countEl = document.createElement("span");
+        countEl.className = "domain-count";
+        countEl.textContent = String(opts.count);
+        row.appendChild(labelEl);
+        row.appendChild(countEl);
+        row.addEventListener("click", function () {
+          setSelectedDomainRow(row);
+          opts.onActivate();
+        });
+        row.addEventListener("keydown", function (evt) {
+          if (evt.key === "ArrowDown") { evt.preventDefault(); moveFocus(1); }
+          else if (evt.key === "ArrowUp") { evt.preventDefault(); moveFocus(-1); }
+          else if (evt.key === "Enter" || evt.key === " ") {
+            evt.preventDefault();
+            setSelectedDomainRow(row);
+            opts.onActivate();
+          }
+        });
+        return row;
+      }
+
+      var pinnedAllRow = makeRow({
+        pinned: true,
+        selected: true,
+        dataKey: "__all__",
+        label: "All memories",
+        count: memories.length,
+        onActivate: function () { clearFilter(); }
+      });
+      sidebar.appendChild(pinnedAllRow);
+
+      var sortedDomains = domains.slice().sort(function (a, b) {
+        var la = (a.label || a.key || "").toLowerCase();
+        var lb = (b.label || b.key || "").toLowerCase();
+        if (la < lb) return -1;
+        if (la > lb) return 1;
+        return 0;
+      });
+      sortedDomains.forEach(function (d) {
+        var label = d.label || d.key || "(domain)";
+        var ids = d.member_ids || [];
+        var row = makeRow({
+          pinned: false,
+          selected: false,
+          dataKey: d.key || label,
+          label: label,
+          count: ids.length,
+          onActivate: function () {
+            applyCrossFilter(d.member_ids, "domain " + label);
+          }
+        });
+        sidebar.appendChild(row);
+      });
+
       // ---- Policy cohesion table ----------------------------------------- //
       var policyBody = document.getElementById("policy-body");
       clusters.forEach(function (c) {
@@ -384,9 +564,18 @@
       });
       document.getElementById("policy-empty").hidden = clusters.length !== 0;
 
-      // ---- Graph canvas force-directed renderer -------------------------- //
+      // ---- Graph canvas — #86 Obsidian-style interactive subsystem ------- //
+      // Replaces the previous canvas.click handler with a full pointer
+      // state machine: pan (drag empty area), drag-pin (drag node), wheel
+      // zoom (cursor-anchored, clamped [ZOOM_MIN, ZOOM_MAX]), hover
+      // tooltip (createElement + textContent only — no unsafe DOM
+      // assignment sinks, no eval), and Esc handling. The simulation
+      // runs on a rAF + dirty flag loop that self-stops when idle
+      // for >200ms.
       var canvas = document.getElementById("graph");
       var graphEmpty = document.getElementById("graph-empty");
+      var ZOOM_MIN = 0.2;
+      var ZOOM_MAX = 5.0;
       if (!domains.length) {
         canvas.hidden = true;
         graphEmpty.hidden = false;
@@ -401,7 +590,8 @@
             x: canvas.width / 2 + Math.cos(theta) * 240,
             y: canvas.height / 2 + Math.sin(theta) * 240,
             vx: 0, vy: 0,
-            r: Math.max(6, Math.min(22, 6 + (d.member_ids || []).length))
+            r: Math.max(6, Math.min(22, 6 + (d.member_ids || []).length)),
+            _pinned: false
           };
         });
         var nodeByMember = {};
@@ -418,62 +608,296 @@
           if (a && b && a !== b) edges.push({ a: a, b: b, w: rel.weight || 0.1 });
         });
 
-        var frames = 0;
-        function step() {
+        // ---- View / interaction state ---------------------------------- //
+        var view = { tx: 0, ty: 0, k: 1 };
+        var dragNode = null;
+        var draggingPointerId = null;
+        var pan = null;        // { startSx, startSy, startTx, startTy }
+        var focusedNode = null;
+        var hoverNode = null;
+        var tooltipEl = null;
+        var lastPointerDown = null; // { x, y, t }
+        var dirty = true;
+        var loopRunning = false;
+        var lastInteractionAt = Date.now();
+
+        function markDirty() { dirty = true; lastInteractionAt = Date.now(); ensureRunning(); }
+
+        function canvasPointer(evt) {
+          var rect = canvas.getBoundingClientRect();
+          var sx = canvas.width / rect.width;
+          var sy = canvas.height / rect.height;
+          return {
+            x: (evt.clientX - rect.left) * sx,
+            y: (evt.clientY - rect.top) * sy
+          };
+        }
+        function screenToWorld(sx, sy) {
+          return {
+            x: (sx / view.k) - view.tx,
+            y: (sy / view.k) - view.ty
+          };
+        }
+        function hitTest(wx, wy) {
+          for (var i = nodes.length - 1; i >= 0; i--) {
+            var n = nodes[i];
+            var dx = wx - n.x, dy = wy - n.y;
+            var hitR = (n.r + 4) / view.k * view.k; // pixel radius in world coords
+            // Use Euclidean distance in world space; node radius is in world units.
+            if (dx * dx + dy * dy <= (n.r + 4) * (n.r + 4)) {
+              return n;
+            }
+          }
+          return null;
+        }
+
+        // ---- Tooltip lifecycle (createElement + textContent only) ------ //
+        function showTooltip(node, clientX, clientY) {
+          if (!tooltipEl) {
+            tooltipEl = document.createElement("div");
+            tooltipEl.className = "graph-tooltip";
+            var lab = document.createElement("div");
+            lab.className = "tt-label";
+            var sub = document.createElement("div");
+            sub.className = "tt-sub";
+            tooltipEl.appendChild(lab);
+            tooltipEl.appendChild(sub);
+            document.body.appendChild(tooltipEl);
+          }
+          var lab2 = tooltipEl.querySelector(".tt-label");
+          var sub2 = tooltipEl.querySelector(".tt-sub");
+          lab2.textContent = node.label;
+          sub2.textContent = (node.member_ids || []).length + " members";
+          moveTooltip(clientX, clientY);
+          tooltipEl.style.display = "block";
+        }
+        function moveTooltip(clientX, clientY) {
+          if (!tooltipEl) return;
+          tooltipEl.style.left = (clientX + 12) + "px";
+          tooltipEl.style.top = (clientY + 12) + "px";
+        }
+        function hideTooltip() {
+          if (tooltipEl) tooltipEl.style.display = "none";
+        }
+
+        // ---- Pointer state machine ------------------------------------- //
+        canvas.addEventListener('pointerdown', function (evt) {
+          var sp = canvasPointer(evt);
+          var wp = screenToWorld(sp.x, sp.y);
+          var hit = hitTest(wp.x, wp.y);
+          lastPointerDown = { x: sp.x, y: sp.y, t: Date.now() };
+          draggingPointerId = evt.pointerId;
+          try { canvas.setPointerCapture(evt.pointerId); } catch (e) { /* ignore */ }
+          if (hit) {
+            dragNode = hit;
+            hit._pinned = true; // grabbing pins immediately so physics skips
+          } else {
+            pan = { startSx: sp.x, startSy: sp.y, startTx: view.tx, startTy: view.ty };
+          }
+          markDirty();
+        });
+
+        canvas.addEventListener("pointermove", function (evt) {
+          var sp = canvasPointer(evt);
+          if (dragNode && evt.pointerId === draggingPointerId) {
+            var wp = screenToWorld(sp.x, sp.y);
+            dragNode.x = wp.x;
+            dragNode.y = wp.y;
+            dragNode.vx = 0; dragNode.vy = 0;
+            markDirty();
+            return;
+          }
+          if (pan && evt.pointerId === draggingPointerId) {
+            view.tx = pan.startTx + (sp.x - pan.startSx) / view.k;
+            view.ty = pan.startTy + (sp.y - pan.startSy) / view.k;
+            markDirty();
+            return;
+          }
+          // Idle hover: hit-test, update tooltip
+          var wp2 = screenToWorld(sp.x, sp.y);
+          var hit = hitTest(wp2.x, wp2.y);
+          if (hit) {
+            if (hoverNode !== hit) {
+              hoverNode = hit;
+              showTooltip(hit, evt.clientX, evt.clientY);
+              markDirty();
+            } else {
+              moveTooltip(evt.clientX, evt.clientY);
+            }
+          } else if (hoverNode) {
+            hoverNode = null;
+            hideTooltip();
+            markDirty();
+          }
+        });
+
+        function endPointer(evt) {
+          if (evt.pointerId !== draggingPointerId) return;
+          var sp = canvasPointer(evt);
+          try { canvas.releasePointerCapture(evt.pointerId); } catch (e) { /* ignore */ }
+          if (dragNode) {
+            // Click-vs-drag arbitration
+            var dx = sp.x - (lastPointerDown ? lastPointerDown.x : sp.x);
+            var dy = sp.y - (lastPointerDown ? lastPointerDown.y : sp.y);
+            var dt = Date.now() - (lastPointerDown ? lastPointerDown.t : Date.now());
+            var moved = Math.sqrt(dx * dx + dy * dy);
+            if (moved < 4 && dt < 250) {
+              // Click: focus + cross-filter
+              focusedNode = dragNode;
+              applyCrossFilter(dragNode.member_ids || [], "domain " + dragNode.label);
+              // Note: showTab('memory') already invoked inside applyCrossFilter.
+            } else {
+              // Drag end: leave the node pinned where it was dropped.
+              dragNode._pinned = true;
+              dragNode.vx = 0; dragNode.vy = 0;
+            }
+            dragNode = null;
+          } else if (pan) {
+            // Pan end: if it was effectively a click on empty area, clear focus + tooltip.
+            var pdx = sp.x - (lastPointerDown ? lastPointerDown.x : sp.x);
+            var pdy = sp.y - (lastPointerDown ? lastPointerDown.y : sp.y);
+            var pdt = Date.now() - (lastPointerDown ? lastPointerDown.t : Date.now());
+            if (Math.sqrt(pdx * pdx + pdy * pdy) < 4 && pdt < 250) {
+              focusedNode = null;
+              hideTooltip();
+            }
+            pan = null;
+          }
+          draggingPointerId = null;
+          markDirty();
+        }
+        canvas.addEventListener("pointerup", endPointer);
+        canvas.addEventListener("pointercancel", endPointer);
+
+        canvas.addEventListener("pointerleave", function () {
+          if (hoverNode) { hoverNode = null; hideTooltip(); markDirty(); }
+        });
+
+        // Wheel zoom — cursor-anchored, clamped [ZOOM_MIN, ZOOM_MAX].
+        // Also handles macOS pinch via ctrlKey+wheel.
+        canvas.addEventListener('wheel', function (evt) {
+          evt.preventDefault();
+          var sp = canvasPointer(evt);
+          var wpBefore = screenToWorld(sp.x, sp.y);
+          var factor = Math.exp(-evt.deltaY * 0.001);
+          var nextK = view.k * factor;
+          if (nextK < ZOOM_MIN) nextK = ZOOM_MIN;
+          if (nextK > ZOOM_MAX) nextK = ZOOM_MAX;
+          view.k = nextK;
+          // Keep wpBefore under the cursor: solve for new tx/ty so that
+          //   wpBefore.x = sp.x / view.k - view.tx
+          view.tx = sp.x / view.k - wpBefore.x;
+          view.ty = sp.y / view.k - wpBefore.y;
+          markDirty();
+        }, { passive: false });
+
+        // Esc handling — window-level. If search input is focused, blur
+        // it. Otherwise clear focus, hide tooltip, clear filter, return to
+        // Graph tab, reset sidebar selection, and unpin every node so
+        // simulation resettles.
+        window.addEventListener("keydown", function (evt) {
+          if (evt.key !== "Escape") return;
+          if (document.activeElement === searchInput) {
+            searchInput.blur();
+            return;
+          }
+          focusedNode = null;
+          hoverNode = null;
+          hideTooltip();
+          clearFilter();
+          showTab("graph");
+          setSelectedDomainRow(pinnedAllRow);
+          nodes.forEach(function (n) { n._pinned = false; });
+          markDirty();
+        });
+
+        // ---- Physics + draw + self-stopping rAF loop ------------------- //
+        function physicsTick() {
           for (var i = 0; i < nodes.length; i++) {
             for (var j = i + 1; j < nodes.length; j++) {
               var dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
               var dist2 = dx * dx + dy * dy || 0.01;
               var rep = 1800 / dist2;
               var d = Math.sqrt(dist2);
-              nodes[i].vx += (dx / d) * rep; nodes[i].vy += (dy / d) * rep;
-              nodes[j].vx -= (dx / d) * rep; nodes[j].vy -= (dy / d) * rep;
+              if (!nodes[i]._pinned && nodes[i] !== dragNode) {
+                nodes[i].vx += (dx / d) * rep; nodes[i].vy += (dy / d) * rep;
+              }
+              if (!nodes[j]._pinned && nodes[j] !== dragNode) {
+                nodes[j].vx -= (dx / d) * rep; nodes[j].vy -= (dy / d) * rep;
+              }
             }
           }
           edges.forEach(function (e) {
             var dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
             var d = Math.sqrt(dx * dx + dy * dy) || 0.01;
             var force = (d - 120) * 0.01 * (0.3 + e.w);
-            e.a.vx += (dx / d) * force; e.a.vy += (dy / d) * force;
-            e.b.vx -= (dx / d) * force; e.b.vy -= (dy / d) * force;
+            if (!e.a._pinned && e.a !== dragNode) {
+              e.a.vx += (dx / d) * force; e.a.vy += (dy / d) * force;
+            }
+            if (!e.b._pinned && e.b !== dragNode) {
+              e.b.vx -= (dx / d) * force; e.b.vy -= (dy / d) * force;
+            }
           });
+          var maxV = 0;
           nodes.forEach(function (n) {
+            if (n._pinned || n === dragNode) { n.vx = 0; n.vy = 0; return; }
             n.vx += (canvas.width / 2 - n.x) * 0.0009;
             n.vy += (canvas.height / 2 - n.y) * 0.0009;
             n.x += n.vx; n.y += n.vy; n.vx *= 0.86; n.vy *= 0.86;
+            var v = Math.abs(n.vx) + Math.abs(n.vy);
+            if (v > maxV) maxV = v;
           });
-          draw();
-          frames++;
-          if (frames < 320) requestAnimationFrame(step);
+          return maxV;
         }
+
         function draw() {
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.strokeStyle = "#c9c9d4"; ctx.lineWidth = 1;
+          ctx.setTransform(view.k, 0, 0, view.k, view.tx * view.k, view.ty * view.k);
+
+          ctx.strokeStyle = "#c9c9d4"; ctx.lineWidth = 1 / view.k;
           edges.forEach(function (e) {
             ctx.globalAlpha = Math.min(1, 0.15 + e.w);
             ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke();
           });
           ctx.globalAlpha = 1;
           nodes.forEach(function (n) {
+            // Focus ring
+            if (n === focusedNode) {
+              ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 4 / view.k, 0, Math.PI * 2);
+              ctx.strokeStyle = "#3454d1"; ctx.lineWidth = 3 / view.k; ctx.stroke();
+            } else if (n === hoverNode) {
+              ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3 / view.k, 0, Math.PI * 2);
+              ctx.strokeStyle = "#7a8fdc"; ctx.lineWidth = 2 / view.k; ctx.stroke();
+            }
             ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
             ctx.fillStyle = "#3454d1"; ctx.fill();
-            ctx.fillStyle = "#1c1c22"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
-            ctx.fillText(n.label, n.x, n.y - n.r - 4);
+            ctx.fillStyle = "#1c1c22";
+            ctx.font = (12 / view.k) + "px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText(n.label, n.x, n.y - n.r - 4 / view.k);
           });
+          ctx.restore();
         }
-        canvas.addEventListener("click", function (evt) {
-          var rect = canvas.getBoundingClientRect();
-          var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-          var mx = (evt.clientX - rect.left) * sx, my = (evt.clientY - rect.top) * sy;
-          for (var i = 0; i < nodes.length; i++) {
-            var n = nodes[i], dx = mx - n.x, dy = my - n.y;
-            if (dx * dx + dy * dy <= (n.r + 4) * (n.r + 4)) {
-              applyCrossFilter(n.member_ids || [], "domain “" + n.label + "”");
-              return;
-            }
+
+        function tick() {
+          var maxV = physicsTick();
+          draw();
+          var idleMs = Date.now() - lastInteractionAt;
+          if (!dragNode && !pan && !dirty && maxV < 0.05 && idleMs > 200) {
+            loopRunning = false;
+            return; // self-stop
           }
-        });
-        requestAnimationFrame(step);
+          dirty = false;
+          requestAnimationFrame(tick);
+        }
+        function ensureRunning() {
+          if (loopRunning) return;
+          loopRunning = true;
+          requestAnimationFrame(tick);
+        }
+
+        ensureRunning();
       }
     })();
   </script>
