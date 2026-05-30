@@ -18,6 +18,26 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Substantive AI capture
+  ([#88](https://github.com/woogiekim/mnemos/issues/88)): invert
+  `core/transcript.py` `extract_insights` from a marker-WHITELIST gate to a
+  mechanics-BLACKLIST gate with paragraph chunking. Assistant text is split
+  on blank-line boundaries (internal whitespace collapsed) and each surviving
+  paragraph emits a `TranscriptInsight(kind="paragraph")` routed by
+  `_layer_for_content`. Four blacklist predicates skip fenced code
+  (bash/sh/shell/json/yaml/toml/...), function-call markers
+  (`<function_calls>`, `<invoke name=...`, `tool_use:`), short non-decision
+  paragraphs (< 80 chars without a decision word), and thinking-aloud stubs
+  (`let me check`, `looking at`, `확인하겠` ...). Markers still emit
+  `kind="marker"` insights unconditionally; `kind="durable-line"` is
+  unchanged; `kind="assistant-summary"` is removed (the `_summarize` helper
+  and `_SIGNAL_RE` constant along with it). `core/adapters/base.py`
+  `MNEMOS_BEHAVIOR_BLOCK` gains an `### End-of-turn capture obligation`
+  section with `Capture these` / `Do NOT capture` lists plus positive and
+  negative examples; both `ClaudeCodeAdapter` and `CursorAdapter` install
+  this verbatim. `backup.SCHEMA_VERSION` stays at `1` and
+  `gateway.capture()`'s signature, layer routing, and on-disk format are
+  unchanged.
 - Automatic distillation
   ([#87](https://github.com/woogiekim/mnemos/issues/87)): subscribe to the
   in-process `post-capture` event seam in `MemoryGateway.__init__` and run
