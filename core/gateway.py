@@ -51,37 +51,76 @@ def _capture_content_hash(content: str) -> str:
     return hashlib.sha256(_nfkc_normalise(content).encode("utf-8")).hexdigest()
 
 
+def _policy_candidates_for_root(root: Path) -> list[Path]:
+    """Return the ordered list of conventional policy.yaml locations for *root*.
+
+    This is the SAME candidate ordering used by :class:`MemoryGateway` when
+    resolving the policy file at construction time:
+
+    1. Install-root convention — ``root/wiki/policy.yaml``
+       (used by ``~/.mnemos`` after a regular ``install.sh`` run).
+    2. Dev/source-repo convention — ``root/repo/wiki/policy.yaml``
+       (used when ``MNEMOS_REPO_ROOT`` points at a checked-out mnemos
+       source tree, where the live policy lives at ``repo/wiki/policy.yaml``).
+
+    The :envvar:`MNEMOS_POLICY_PATH` override is **not** included here —
+    that override sits above this list in :class:`MemoryGateway`'s
+    resolution sequence and is independent of the chosen repo root.
+    """
+    return [
+        root / "wiki" / "policy.yaml",
+        root / "repo" / "wiki" / "policy.yaml",
+    ]
+
+
 def _resolve_repo_root() -> Path:
     """Locate the mnemos repo root by checking, in order:
 
-    1. The ``MNEMOS_REPO_ROOT`` environment variable (validated).
+    1. The ``MNEMOS_REPO_ROOT`` environment variable (validated against
+       both the install-root and dev/source-repo conventional layouts —
+       see :func:`_policy_candidates_for_root`).
     2. Walking up from the current working directory.
     3. Walking up from this source file's location.
+
+    The repo-root sanity check accepts either ``<root>/wiki/policy.yaml``
+    (install layout) OR ``<root>/repo/wiki/policy.yaml`` (dev/source-repo
+    layout), matching the candidate ordering applied later by
+    :class:`MemoryGateway` when it picks the actual policy file. This
+    ensures a dev checkout at ``/Users/wook/Developments/mnemos`` is
+    accepted as ``MNEMOS_REPO_ROOT`` even though it has no top-level
+    ``wiki/policy.yaml`` — the live file lives at
+    ``repo/wiki/policy.yaml`` under that root.
 
     Raises ``FileNotFoundError`` with a human-readable message if none of
     the strategies succeed.
     """
+    def _root_has_policy(p: Path) -> bool:
+        return any(c.is_file() for c in _policy_candidates_for_root(p))
+
     # 1. Check MNEMOS_REPO_ROOT env var
     env_val = os.environ.get("MNEMOS_REPO_ROOT")
     if env_val:
         p = Path(env_val).expanduser().resolve()
-        if (p / "wiki" / "policy.yaml").exists():
+        if _root_has_policy(p):
             return p
         # env var is set but does not point at a valid repo — fail immediately
+        tried = ", ".join(str(c) for c in _policy_candidates_for_root(p))
         raise FileNotFoundError(
-            f"MNEMOS_REPO_ROOT={env_val!r} does not contain wiki/policy.yaml"
+            f"MNEMOS_REPO_ROOT={env_val!r} does not contain policy.yaml "
+            f"in any of: {tried}. "
+            f"Set MNEMOS_POLICY_PATH to override the policy file location."
         )
 
     # 2. Walk up from CWD
     cwd = Path.cwd()
     for parent in [cwd, *cwd.parents]:
-        if (parent / "wiki" / "policy.yaml").exists():
+        if _root_has_policy(parent):
             return parent
 
     # 3. Walk up from __file__
     here = Path(__file__).resolve()
     for parent in here.parents:
-        if (parent / "wiki" / "policy.yaml").exists():
+        if _root_has_policy(parent):
             return parent
 
     raise FileNotFoundError(
@@ -109,7 +148,37 @@ class MemoryGateway:
 
     def __init__(self, repo_root: str | None = None) -> None:
         self._root = str(repo_root) if repo_root else str(_resolve_repo_root())
-        policy_path = str(Path(self._root) / "wiki" / "policy.yaml")
+
+        # Resolve policy.yaml using an ordered candidate search. The override
+        # is a *preference*, not a hard requirement: if MNEMOS_POLICY_PATH
+        # points at a non-existent file, fall through to the conventional
+        # locations rather than crash. This matches the principle "I gave
+        # a hint; if it's wrong, still try the defaults."
+        #
+        # Resolution order:
+        #   1. MNEMOS_POLICY_PATH env override (if it points at a real file)
+        #   2. Install-root convention      — ``<root>/wiki/policy.yaml``
+        #   3. Dev/source-repo convention   — ``<root>/repo/wiki/policy.yaml``
+        #
+        # The dev/source-repo fallback exists because a mnemos checkout used
+        # as MNEMOS_REPO_ROOT keeps the live policy under ``repo/wiki/`` (the
+        # ``~/.mnemos`` install layout has the file at the top-level ``wiki/``,
+        # but a source-tree checkout does not).
+        root_path = Path(self._root)
+        candidates: list[Path] = []
+        override = os.environ.get("MNEMOS_POLICY_PATH")
+        if override:
+            candidates.append(Path(override).expanduser())
+        candidates.extend(_policy_candidates_for_root(root_path))
+
+        policy_path = next((str(p) for p in candidates if p.is_file()), None)
+        if policy_path is None:
+            tried = ", ".join(str(p) for p in candidates)
+            raise FileNotFoundError(
+                f"policy.yaml not found in any of: {tried}. "
+                f"Set MNEMOS_POLICY_PATH to override."
+            )
+
         self._policy = PolicyEngine(policy_path=policy_path)
         self._logger = AuditLogger(repo_root=self._root)
         self._hooks = HookDispatcher(repo_root=self._root)

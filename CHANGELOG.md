@@ -206,6 +206,20 @@ restore` of an older archive is always a breaking change.
 
 ### Fixed
 
+- `MemoryGateway` no longer crashes with `FileNotFoundError` when
+  `MNEMOS_REPO_ROOT` points at a mnemos source-tree checkout
+  ([#96](https://github.com/woogiekim/mnemos/issues/96)). `core/gateway.py`
+  resolves `policy.yaml` via an ordered candidate search —
+  `MNEMOS_POLICY_PATH` override → `<root>/wiki/policy.yaml` (install
+  layout) → `<root>/repo/wiki/policy.yaml` (dev/source-repo layout) — and
+  `_resolve_repo_root` accepts either conventional layout when validating
+  the env var. The override is a *preference*: a missing override path
+  falls through to the conventional candidates rather than crashing. The
+  error message lists every tried path and points at `MNEMOS_POLICY_PATH`
+  as the escape hatch. Visible fix: Claude Code's Edit/Write tools stop
+  printing the `bg-check` Python traceback throttle line on dev-repo
+  setups. `backup.SCHEMA_VERSION` stays at `1`; no signature change to
+  `PolicyEngine`.
 - Short durable statements like `"user preference: always TDD for new core
   code."` are no longer dropped by the mechanics-blacklist's
   short-paragraph rule
