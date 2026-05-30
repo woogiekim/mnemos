@@ -201,6 +201,39 @@ class ObservabilityLogger:
         entry["layer"] = to_layer
         self._write_async(entry)
 
+    def log_auto_distill(
+        self,
+        *,
+        trigger: str,
+        success: bool,
+        interval: int = 0,
+        counter_before: int = 0,
+        domains_applied: int = 0,
+        policies_applied: int = 0,
+        error: str = "",
+        session_id: str = "",
+        agent: str = "mnemos",
+    ) -> None:
+        """Record an automatic distillation fire (issue #87).
+
+        ``trigger`` identifies the originating seam (``"post-capture"`` or
+        ``"consolidate"``). ``success`` is ``False`` when the orchestrator
+        caught an exception; in that case ``error`` carries ``str(exc)``.
+        ``counter_before`` is the value of ``captures_since_last_distill``
+        observed before the fire (useful for reconstructing why a fire
+        triggered). All counters default to ``0`` so the entry shape stays
+        stable even on the early-error path.
+        """
+        entry = self._base("auto_distill", agent=agent, session_id=session_id)
+        entry["trigger"] = trigger
+        entry["success"] = success
+        entry["interval"] = interval
+        entry["counter_before"] = counter_before
+        entry["domains_applied"] = domains_applied
+        entry["policies_applied"] = policies_applied
+        entry["error"] = error
+        self._write_async(entry)
+
     def log_hook_post_tool(
         self,
         tool_name: str = "",

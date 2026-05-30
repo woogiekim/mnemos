@@ -109,6 +109,30 @@ class SyncConfig:
 
 
 @dataclass
+class DistillationConfig:
+    """Resolved ``storage.distillation.*`` configuration (issue #87).
+
+    Controls the automatic distillation pipeline that subscribes to the
+    ``post-capture`` event seam and runs the domain + policy distill helpers
+    when the captures-since-last-distill counter crosses
+    :attr:`interval_captures`. Both fields have tolerant fall-back to
+    defaults when the ``mnemos.yml`` block is missing or invalid, so existing
+    projects pick up the feature automatically on upgrade.
+    """
+
+    #: Master switch.  When ``True`` (the default) the gateway registers a
+    #: post-capture subscriber and also fires distill at the end of
+    #: :meth:`MemoryGateway.consolidate`.  Set to ``False`` in
+    #: ``mnemos.yml`` to opt out entirely.
+    enabled: bool = True
+
+    #: Number of captures between automatic distill fires.  Must be a
+    #: positive integer; invalid (non-int, ``<= 0``) or missing values
+    #: fall back to the default of 25.
+    interval_captures: int = 25
+
+
+@dataclass
 class BackendConfig:
     """Resolved backend configuration."""
 
@@ -120,6 +144,10 @@ class BackendConfig:
 
     #: Sync configuration (always present; ``enabled=False`` by default).
     sync: SyncConfig = field(default_factory=SyncConfig)
+
+    #: Auto-distillation configuration (always present; ``enabled=True`` by
+    #: default — issue #87).
+    distillation: DistillationConfig = field(default_factory=DistillationConfig)
 
 
 def _load_yaml_config(repo_root: str | None = None) -> dict[str, Any]:
@@ -181,6 +209,39 @@ def _parse_sync_config(sync_raw: Any) -> SyncConfig:
     )
 
 
+def _parse_distillation_config(raw: Any) -> DistillationConfig:
+    """Parse the ``storage.distillation`` sub-dict into :class:`DistillationConfig`.
+
+    Tolerant of every kind of malformed input: a non-dict ``raw`` (None,
+    string, list, …) yields the defaults; a non-bool ``enabled`` falls back
+    to ``True``; a non-int / non-positive ``interval_captures`` falls back to
+    ``25``. Missing keys fall through to the dataclass defaults. This mirrors
+    :func:`_parse_sync_config` so the behaviour around invalid YAML is
+    identical between the two config blocks.
+    """
+    if not isinstance(raw, dict):
+        return DistillationConfig()
+
+    enabled_raw = raw.get("enabled", True)
+    if isinstance(enabled_raw, bool):
+        enabled = enabled_raw
+    else:
+        enabled = True
+
+    interval_raw = raw.get("interval_captures", 25)
+    if isinstance(interval_raw, bool):
+        # ``bool`` is a subclass of ``int`` in Python; treat True/False as
+        # invalid here so the user's intent ("how many captures") is not
+        # silently coerced to 1 or 0.
+        interval = 25
+    elif isinstance(interval_raw, int) and interval_raw > 0:
+        interval = interval_raw
+    else:
+        interval = 25
+
+    return DistillationConfig(enabled=enabled, interval_captures=interval)
+
+
 def get_backend_config(repo_root: str | None = None) -> BackendConfig:
     """Return the resolved :class:`BackendConfig` for the current environment.
 
@@ -227,4 +288,16 @@ def get_backend_config(repo_root: str | None = None) -> BackendConfig:
         # If "enabled" IS in sync_raw_dict, _parse_sync_config() already
         # applied the user's explicit value (True or False) — do not override.
 
-    return BackendConfig(backend=backend_name, vault_path=vault_path, sync=sync)
+    # Resolve auto-distillation config (issue #87). Always populated; defaults
+    # are ``enabled=True`` and ``interval_captures=25`` so existing projects
+    # pick up the feature automatically on upgrade. Set
+    # ``storage.distillation.enabled: false`` in ``mnemos.yml`` to opt out.
+    distillation_raw = storage_cfg.get("distillation")
+    distillation = _parse_distillation_config(distillation_raw)
+
+    return BackendConfig(
+        backend=backend_name,
+        vault_path=vault_path,
+        sync=sync,
+        distillation=distillation,
+    )

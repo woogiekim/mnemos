@@ -16,6 +16,26 @@ restore` of an older archive is always a breaking change.
 
 ## [Unreleased]
 
+### Added
+
+- Automatic distillation
+  ([#87](https://github.com/woogiekim/mnemos/issues/87)): subscribe to the
+  in-process `post-capture` event seam in `MemoryGateway.__init__` and run
+  `core.distill.compute_domain_plan` / `compute_policy_plan` in apply mode
+  every N captures (default 25); also run at the end of
+  `gateway.consolidate()`. Configurable via `mnemos.yml` under
+  `storage.distillation.enabled` (default `true`) and
+  `storage.distillation.interval_captures` (default `25`). The captures
+  counter is persisted at `~/.mnemos/.distill-state.json` with atomic
+  rewrite; the sidecar lives outside the wiki/backup tree and tolerates
+  missing or corrupt content. Errors are caught at every layer and logged
+  via `core/observability.py` (`event="auto_distill"` in
+  `.agent/observability.jsonl`); `gateway.capture()`'s signature, the
+  shell-hook fire (`core/gateway.py:543`), and the in-process event emit
+  (`core/gateway.py:544`) are unchanged, and `backup.SCHEMA_VERSION` stays
+  at `1`. See [`docs/final-memory-distillation.md`](docs/final-memory-distillation.md#automatic-distillation)
+  for the full operator guide.
+
 ### Fixed
 
 - `_derive_display_title` no longer surfaces horizontal-rule lines (`---`,

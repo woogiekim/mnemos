@@ -182,3 +182,136 @@ The new fields are additive YAML front-matter, so they ride through unchanged:
   into a fresh root. **`backup.SCHEMA_VERSION` is NOT bumped** (it stays `1`);
   per-item front-matter is additive, so no manifest change is required and older
   archives still restore.
+
+## Automatic distillation
+
+> Operator guide for issue
+> [#87](https://github.com/woogiekim/mnemos/issues/87) — automatic
+> distillation runs on the existing `post-capture` in-process event seam and
+> at the end of `mnemos consolidate`. It re-uses the same idempotent
+> `compute_*_plan` → `apply_*_plan` pipeline documented above, with the
+> single difference that auto-distill skips single-source plans (a one-member
+> domain or policy conveys no aggregation value).
+
+### When it fires
+
+- **Every N captures** (default `25`). The gateway maintains a
+  captures-since-last-distill counter in a small sidecar file (see below).
+  When `gateway.capture(...)` crosses the threshold, auto-distill fires
+  synchronously, the counter resets, and `last_distill_at` is stamped with
+  the current UTC ISO timestamp.
+- **End of `gateway.consolidate()`** — every `mnemos consolidate` run ends
+  with one automatic distill (independent of the counter), then resets the
+  counter so the next post-capture trigger lands exactly N captures later.
+
+Both paths catch and log every exception via `core.observability.log_auto_distill`
+(`event="auto_distill"` in `.agent/observability.jsonl`); `capture()` and
+`consolidate()` never break because of a distill failure.
+
+### Configuration
+
+```yaml
+storage:
+  distillation:
+    enabled: true            # default; set false to opt out entirely
+    interval_captures: 25    # default; positive integer required
+```
+
+Both keys are optional. A missing `storage.distillation:` block, or a
+missing key inside it, falls back to the defaults shown above. Invalid
+values are tolerant — `enabled` must be a YAML bool (anything else falls
+back to `true`), and `interval_captures` must be a positive non-bool
+integer (non-int, `<= 0`, or a YAML `true`/`false` falls back to `25`).
+
+**Default-on behavior on upgrade.** Projects that do not edit `mnemos.yml`
+pick up automatic distillation the first time the new gateway code runs.
+To opt out:
+
+```yaml
+storage:
+  distillation:
+    enabled: false
+```
+
+With `enabled: false`, neither the post-capture subscriber nor the
+end-of-`consolidate` distill fires, and the `~/.mnemos/.distill-state.json`
+sidecar is never written. The event-bus handler count for `post-capture`
+is unchanged from the pre-#87 baseline.
+
+### State file — `~/.mnemos/.distill-state.json`
+
+A tiny JSON sidecar tracks the threshold counter:
+
+```json
+{
+  "captures_since_last_distill": 7,
+  "last_distill_at": "2025-12-01T12:34:56.789012+00:00"
+}
+```
+
+- **Location.** Always under the user's HOME (`Path.home() / ".mnemos"`).
+  Resolution respects `Path.home()` overrides, so the pytest `isolate_home`
+  fixture redirects the sidecar to the test's tmp HOME automatically.
+- **Outside the wiki tree.** The sidecar lives under `~/.mnemos/`, not under
+  `wiki/` or `.agent/`, so it is never synced to a remote and never staged
+  in a backup archive. The on-disk memory format is unchanged.
+- **Atomic rewrite.** Writes use `tempfile.NamedTemporaryFile` in the same
+  directory plus `os.replace`, so a concurrent reader never observes a
+  partial write and a crashed writer never leaves the sidecar in a corrupt
+  state.
+- **Safe to delete.** If the file is missing, unreadable, contains non-JSON,
+  or carries an unexpected schema, the gateway treats it as zero state — the
+  next capture rebuilds the counter to `1`. You can safely delete the
+  sidecar at any time; the next event recreates it.
+
+### Idempotency guarantee
+
+Auto-distill re-uses the same skip-if-exists guard introduced in
+[#84](https://github.com/woogiekim/mnemos/issues/84): the artifact id is
+`uuid5(...)` over the sorted source set, so running 25 captures twice
+yields the same artifact id on both fires and the second `apply_*_plan`
+returns `applied=False` (counted under `skipped` in the report) instead of
+writing a duplicate. The same property holds for `distilled_into`
+back-pointers — they are append-only and de-duplicated.
+
+### Error swallow & observability
+
+Every auto-distill fire — whether triggered by the post-capture subscriber
+or by `consolidate()` — is wrapped in `try/except Exception`. On a
+captured exception:
+
+- The counter is **preserved**, not reset, so the next event retries the
+  fire. (The consolidate path is unconditional, so it does not need to
+  retry — the next sweep simply runs distill again.)
+- An observability entry is appended with `success=False` and
+  `error=str(exc)`. The capture call still returns the new memory id; the
+  consolidate call still returns its promoted count.
+
+Inspect the log with:
+
+```bash
+mnemos audit --events auto_distill
+# or
+grep '"event":"auto_distill"' .agent/observability.jsonl
+```
+
+Each entry carries:
+
+- `trigger`: `"post-capture"` or `"consolidate"`.
+- `success`: `true` or `false`.
+- `interval`: the configured `interval_captures` at fire time.
+- `counter_before`: the counter value observed before the fire (only set
+  for `post-capture` events).
+- `domains_applied` / `policies_applied`: how many new artifacts the fire
+  produced (zero on a quiet store or on the `success=false` path).
+- `error`: `str(exc)` when `success=false`, empty string otherwise.
+
+### What auto-distill skips
+
+Auto-distill **skips single-source plans** — both for domains and policies
+— so a quiet store with a single untagged item is not polluted with a
+1-member "untagged" domain artifact on the very first capture. The
+explicit `mnemos distill domains apply` / `mnemos distill policies apply`
+CLI is **unaffected**: when the operator runs it deliberately, every
+plan returned by `compute_*_plan` is still applied, including 1-source
+ones.
