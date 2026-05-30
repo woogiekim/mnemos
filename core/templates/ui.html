@@ -333,6 +333,27 @@
     .panel dd { margin: 0; word-break: break-word; font-size: 13px; color: var(--ink); }
     #dd-content { white-space: pre-wrap; padding: 12px 14px; font-size: 13px; color: var(--ink); }
 
+    /* #93 — Drill-down "Related" mini-graph. A small force-directed canvas
+       embedded inside the drill-down (under the Content panel) showing the
+       opened memory's local neighborhood: containing domains + sampled
+       sibling memories from each domain. Reuses the existing
+       applyCrossFilter + showDrilldown wiring; ~20 nodes max so the
+       per-tick cost is negligible. */
+    .related-panel canvas {
+      display: block;
+      width: 100%;
+      height: 200px;
+      background: var(--surface-elev);
+      border-radius: 0 0 10px 10px;
+      cursor: pointer;
+    }
+    .related-empty {
+      padding: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .related-wrap { position: relative; }
+
     /* Policy tab */
     #tab-policy { flex-direction: column; overflow: auto; background: var(--surface); }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
@@ -440,6 +461,10 @@
       <aside id="drilldown" hidden>
         <h2 id="drilldown-title">(memory)</h2>
         <div class="panel"><h3>Content</h3><div id="dd-content"></div></div>
+        <section class="panel related-panel" data-panel="related">
+          <h3>Related</h3>
+          <div class="related-wrap"><canvas id="dd-related-graph"></canvas><div id="dd-related-empty" class="related-empty" hidden>No related domain</div></div>
+        </section>
         <div class="panel" data-panel="trust">
           <h3>Trust</h3>
           <dl>
@@ -513,6 +538,16 @@
       var memories = memory.memories || [];
       var clusters = policy.clusters || [];
       var density = graph.edge_density || {};
+
+      // #93 — id -> memory map for the drill-down related-graph sibling
+      // resolver. Built once on payload load; used by buildRelatedGraph
+      // to map sampled member_ids back to their full memory objects so
+      // sibling-node clicks can re-render the drill-down for the chosen
+      // sibling memory.
+      var memoryById = {};
+      memories.forEach(function (m) {
+        if (m && m.id) memoryById[m.id] = m;
+      });
 
       document.getElementById("header-meta").textContent =
         domains.length + " domains · " + memories.length + " memories · " +
@@ -658,6 +693,221 @@
         setText("dd-next", mem.next_layer);
         setText("dd-archived", mem.archived);
         drilldown.hidden = false;
+        // #93 — render the small Related mini-graph (center memory +
+        // containing domains + sampled siblings). Always invoked, even
+        // when there are zero containing domains — buildRelatedGraph
+        // shows the empty placeholder in that case.
+        buildRelatedGraph(mem);
+      }
+
+      // #93 — Related mini-graph inside the drill-down ----------------- //
+      // Derives the opened memory's local neighborhood from the same
+      // payload the main graph uses: containing domains come from
+      // graph.domains[d].member_ids.includes(mem.id); siblings come from
+      // sampling up to RELATED_SIBLINGS_PER_DOMAIN ids from each
+      // containing domain (deterministic — first N in member_ids order
+      // excluding the center). Edges: center↔domain, domain↔sibling.
+      // The simulation reuses the same Verlet/spring primitives as the
+      // main graph but runs only ~120 ticks before rendering — the node
+      // count is bounded (~1 + D + D*8) so this is cheap.
+      var RELATED_SIBLINGS_PER_DOMAIN = 8;
+      var relatedCanvas = document.getElementById("dd-related-graph");
+      var relatedEmpty = document.getElementById("dd-related-empty");
+      var relatedClickHandler = null;
+      var RELATED_COLORS = {
+        edge: "rgba(11, 18, 32, 0.18)",
+        centerFill: "#06b6d4",
+        centerStroke: "#0e7490",
+        domainFill: "#2563eb",
+        domainStroke: "#1d4ed8",
+        siblingFill: "#ffffff",
+        siblingStroke: "#5b6478",
+        label: "#0b1220",
+        labelShadow: "rgba(255, 255, 255, 0.85)"
+      };
+
+      function buildRelatedGraph(centerMemory) {
+        // Resize the canvas to its CSS box so getImageData / hit-testing
+        // see the same coordinate space as the drawing pipeline. We do
+        // this on every open so the canvas stays correctly sized when
+        // the drill-down column is resized between opens.
+        var rect = relatedCanvas.getBoundingClientRect();
+        var w = Math.max(120, Math.floor(rect.width || 320));
+        var h = Math.max(120, Math.floor(rect.height || 200));
+        relatedCanvas.width = w;
+        relatedCanvas.height = h;
+        var rctx = relatedCanvas.getContext("2d");
+        rctx.clearRect(0, 0, w, h);
+
+        // Detach the previous click handler — every buildRelatedGraph
+        // call installs its own (closure captures the new nodes array).
+        if (relatedClickHandler) {
+          relatedCanvas.removeEventListener("click", relatedClickHandler);
+          relatedClickHandler = null;
+        }
+
+        var containing = (graph.domains || []).filter(function (d) {
+          return (d.member_ids || []).indexOf(centerMemory.id) !== -1;
+        });
+
+        if (!containing.length) {
+          relatedCanvas.hidden = true;
+          relatedEmpty.hidden = false;
+          return;
+        }
+        relatedCanvas.hidden = false;
+        relatedEmpty.hidden = true;
+
+        // Build the node + edge lists.
+        var rnodes = [];
+        var redges = [];
+        var center = {
+          kind: "center",
+          label: centerMemory.display_title || centerMemory.id || "(memory)",
+          mem: centerMemory,
+          x: w / 2, y: h / 2, vx: 0, vy: 0, r: 9
+        };
+        rnodes.push(center);
+
+        containing.forEach(function (d, di) {
+          var theta = (di / containing.length) * Math.PI * 2;
+          var dn = {
+            kind: "domain",
+            label: d.label || d.key || "(domain)",
+            domain: d,
+            x: w / 2 + Math.cos(theta) * 60,
+            y: h / 2 + Math.sin(theta) * 60,
+            vx: 0, vy: 0, r: 7
+          };
+          rnodes.push(dn);
+          redges.push({ a: center, b: dn });
+
+          var siblingIds = (d.member_ids || [])
+            .filter(function (mid) { return mid !== centerMemory.id; })
+            .slice(0, RELATED_SIBLINGS_PER_DOMAIN);
+          siblingIds.forEach(function (sid, si) {
+            var sm = memoryById[sid];
+            var slab = (sm && (sm.display_title || sm.id)) || sid;
+            var ang = theta + ((si - siblingIds.length / 2) * 0.25);
+            var sn = {
+              kind: "sibling",
+              label: slab,
+              mem: sm || { id: sid },
+              x: w / 2 + Math.cos(ang) * 110,
+              y: h / 2 + Math.sin(ang) * 110,
+              vx: 0, vy: 0, r: 4
+            };
+            rnodes.push(sn);
+            redges.push({ a: dn, b: sn });
+          });
+        });
+
+        // Tiny Verlet/spring physics — same shape as the main graph
+        // but with no pinning, no drag, no hover. The center node is
+        // gently anchored to the canvas center via a slightly stronger
+        // restoring force so it stays visually central.
+        for (var tick = 0; tick < 120; tick++) {
+          for (var i = 0; i < rnodes.length; i++) {
+            for (var j = i + 1; j < rnodes.length; j++) {
+              var dx = rnodes[i].x - rnodes[j].x;
+              var dy = rnodes[i].y - rnodes[j].y;
+              var dist2 = dx * dx + dy * dy || 0.01;
+              var rep = 700 / dist2;
+              var dd = Math.sqrt(dist2);
+              rnodes[i].vx += (dx / dd) * rep;
+              rnodes[i].vy += (dy / dd) * rep;
+              rnodes[j].vx -= (dx / dd) * rep;
+              rnodes[j].vy -= (dy / dd) * rep;
+            }
+          }
+          redges.forEach(function (e) {
+            var dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
+            var dd = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            var rest = (e.a.kind === "center" || e.b.kind === "center") ? 55 : 40;
+            var force = (dd - rest) * 0.05;
+            e.a.vx += (dx / dd) * force; e.a.vy += (dy / dd) * force;
+            e.b.vx -= (dx / dd) * force; e.b.vy -= (dy / dd) * force;
+          });
+          rnodes.forEach(function (n) {
+            var anchor = n.kind === "center" ? 0.05 : 0.01;
+            n.vx += (w / 2 - n.x) * anchor;
+            n.vy += (h / 2 - n.y) * anchor;
+            n.x += n.vx; n.y += n.vy;
+            n.vx *= 0.7; n.vy *= 0.7;
+            // Clamp inside canvas margins so labels don't clip.
+            if (n.x < 12) n.x = 12;
+            if (n.x > w - 12) n.x = w - 12;
+            if (n.y < 14) n.y = 14;
+            if (n.y > h - 10) n.y = h - 10;
+          });
+        }
+
+        // Draw — edges first, then nodes, then labels (small, capped
+        // length so a long display_title doesn't overflow the canvas).
+        rctx.strokeStyle = RELATED_COLORS.edge;
+        rctx.lineWidth = 1;
+        redges.forEach(function (e) {
+          rctx.beginPath();
+          rctx.moveTo(e.a.x, e.a.y);
+          rctx.lineTo(e.b.x, e.b.y);
+          rctx.stroke();
+        });
+        rnodes.forEach(function (n) {
+          var fill, stroke;
+          if (n.kind === "center") {
+            fill = RELATED_COLORS.centerFill; stroke = RELATED_COLORS.centerStroke;
+          } else if (n.kind === "domain") {
+            fill = RELATED_COLORS.domainFill; stroke = RELATED_COLORS.domainStroke;
+          } else {
+            fill = RELATED_COLORS.siblingFill; stroke = RELATED_COLORS.siblingStroke;
+          }
+          rctx.beginPath();
+          rctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+          rctx.fillStyle = fill; rctx.fill();
+          rctx.strokeStyle = stroke; rctx.lineWidth = 1.2; rctx.stroke();
+        });
+        rctx.font = "600 11px 'Inter', ui-sans-serif, system-ui, sans-serif";
+        rctx.textAlign = "center";
+        rctx.textBaseline = "middle";
+        rctx.shadowColor = RELATED_COLORS.labelShadow;
+        rctx.shadowBlur = 0;
+        rctx.shadowOffsetX = 1;
+        rctx.shadowOffsetY = 1;
+        rctx.fillStyle = RELATED_COLORS.label;
+        rnodes.forEach(function (n) {
+          if (n.kind === "sibling") return; // skip noisy sibling labels
+          var lab = String(n.label || "");
+          if (lab.length > 28) lab = lab.slice(0, 26) + "…";
+          rctx.fillText(lab, n.x, n.y - n.r - 6);
+        });
+        rctx.shadowColor = "transparent";
+        rctx.shadowOffsetX = 0;
+        rctx.shadowOffsetY = 0;
+
+        // Click → cross-filter (domain) or re-open drill-down (sibling).
+        relatedClickHandler = function (evt) {
+          var rcrect = relatedCanvas.getBoundingClientRect();
+          var sx = relatedCanvas.width / (rcrect.width || 1);
+          var sy = relatedCanvas.height / (rcrect.height || 1);
+          var cx = (evt.clientX - rcrect.left) * sx;
+          var cy = (evt.clientY - rcrect.top) * sy;
+          for (var i = rnodes.length - 1; i >= 0; i--) {
+            var n = rnodes[i];
+            var ddx = cx - n.x, ddy = cy - n.y;
+            if (ddx * ddx + ddy * ddy <= (n.r + 3) * (n.r + 3)) {
+              if (n.kind === "domain") {
+                applyCrossFilter(n.domain.member_ids,
+                                 "domain " + (n.domain.label || n.domain.key || ""));
+                showTab("memory");
+              } else if (n.kind === "sibling" && n.mem && n.mem.id) {
+                var full = memoryById[n.mem.id] || n.mem;
+                showDrilldown(full);
+              }
+              return;
+            }
+          }
+        };
+        relatedCanvas.addEventListener("click", relatedClickHandler);
       }
 
       function applyCrossFilter(ids, label) {

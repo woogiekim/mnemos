@@ -850,3 +850,147 @@ class TestUi92ContentReadability:
         # #90 — Memory tab is the first nav button + active on load.
         # Pinning the literal substring is the cheapest contract check.
         assert 'aria-selected="true"' in html
+
+
+# --------------------------------------------------------------------------- #
+# #93 — Drill-down Related mini-graph
+# --------------------------------------------------------------------------- #
+class TestUi93DrilldownRelatedGraph:
+    """Issue #93 — when a memory is opened in the drill-down (#86/#92),
+    a small "Related" graph appears inside the drill-down showing the
+    memory's local neighborhood (containing domains + sampled siblings).
+    Reuses the existing payload (graph.domains + member_ids); no new
+    payload field is added. Reuses the existing cross-filter wiring so
+    domain-node clicks behave identically to the main graph."""
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "alpha", tag="agent:backend")
+        _capture_one(runner, cli, "global", "beta", tag="agent:frontend")
+        _capture_one(runner, cli, "global", "gamma", tag="agent:backend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    # ---- New DOM hooks ----------------------------------------------------
+    def test_related_canvas_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The drill-down gains a NEW canvas with a dedicated id that must
+        # NOT clash with the load-bearing id="graph" packaging assertion.
+        assert '<canvas id="dd-related-graph"' in html
+
+    def test_related_panel_markup_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The Related panel wraps the new canvas + empty placeholder
+        # inside a .related-panel class so it picks up panel styling.
+        assert "related-panel" in html
+        assert 'data-panel="related"' in html
+        # Title is literal so the source grep stays stable.
+        assert "<h3>Related</h3>" in html
+
+    def test_related_empty_placeholder_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The placeholder shown when the opened memory has zero
+        # containing domains (e.g. a freshly captured untagged memory).
+        assert 'id="dd-related-empty"' in html
+        assert "No related domain" in html
+
+    # ---- JS function presence + wiring -----------------------------------
+    def test_build_related_graph_function_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The function name is the contract — assert as a substring so a
+        # stylistic rewrite that keeps the name still passes.
+        assert "buildRelatedGraph" in html
+        # And it MUST be invoked from showDrilldown (the open hook), so
+        # opening any memory fires the related-graph render.
+        assert "buildRelatedGraph(mem)" in html
+
+    def test_related_graph_reuses_cross_filter(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Domain-node clicks inside the related mini-graph must funnel
+        # through the SAME applyCrossFilter the main graph + sidebar +
+        # policy table all share. The literal substring is the wire.
+        assert "applyCrossFilter(n.domain.member_ids," in html
+
+    def test_related_graph_resolves_siblings_via_memory_by_id(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The {id -> memory} map is built once on payload load and
+        # used by buildRelatedGraph to resolve sampled sibling ids.
+        assert "memoryById" in html
+        # Sibling-node click re-opens the drill-down for the chosen
+        # sibling — the JS calls showDrilldown(full) with the resolved
+        # memory object.
+        assert "showDrilldown(full)" in html
+
+    # ---- CSS hooks (rendered HTML) ---------------------------------------
+    def test_related_panel_css_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The canvas inherits surface-elev tone + the bottom of the panel
+        # picks up the same 10px border-radius as the .panel container.
+        assert ".related-panel canvas" in html
+        assert ".related-empty" in html
+
+    # ---- Regression: load-bearing tokens must remain intact -------------
+    def test_placeholder_substitution_still_singleton(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The new canvas MUST NOT cause the __UI_DATA_JSON__ placeholder
+        # to leak into the rendered HTML (the #83 root-cause regression).
+        assert html.count("__UI_DATA_JSON__") == 0
+
+    def test_main_graph_canvas_still_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The new <canvas id="dd-related-graph"> MUST NOT clash with the
+        # load-bearing <canvas id="graph"> packaging assertion — they
+        # are different ids. Pin both substrings explicitly.
+        assert '<canvas id="graph"' in html
+        assert '<canvas id="dd-related-graph"' in html
+
+    def test_ui_data_tag_and_pill_still_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # #83/#85 — ui-data tag + mem-id-pill survive the #93 edit.
+        assert 'id="ui-data"' in html
+        assert "mem-id-pill" in html
+        assert "mem.display_title" in html
+
+    def test_no_innerhtml_sink_introduced(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """The Related mini-graph must build every DOM mutation via
+        createElement + textContent (or canvas drawing primitives) — no
+        innerHTML assignment sink introduced. #86 contract preserved."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "innerHTML" not in html
+
+    # ---- Template-source guards (no extra placeholder leak) -------------
+    def test_template_source_placeholder_singleton(self):
+        """#93 must not re-introduce the #83 root-cause regression
+        (placeholder mentioned more than once in the template source)."""
+        from importlib.resources import files
+        tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
+        assert tpl.count("__UI_DATA_JSON__") == 1
+        assert (
+            '<script id="ui-data" type="application/json">__UI_DATA_JSON__</script>'
+            in tpl
+        )
+
+    def test_template_source_has_related_canvas_id(self):
+        """The new drill-down canvas id must be present in the template
+        SOURCE (not only in the rendered HTML). Pinning both layers
+        makes the contract regression-detectable from either side."""
+        from importlib.resources import files
+        tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
+        assert 'id="dd-related-graph"' in tpl
+        assert "buildRelatedGraph" in tpl

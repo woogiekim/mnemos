@@ -18,6 +18,58 @@ restore` of an older archive is always a breaking change.
 
 ### Changed
 
+- Drill-down Related mini-graph for `mnemos ui`
+  ([#93](https://github.com/woogiekim/mnemos/issues/93)): the Memory-tab
+  drill-down ([#86](https://github.com/woogiekim/mnemos/issues/86) /
+  [#92](https://github.com/woogiekim/mnemos/issues/92)) gains a small
+  "Related" graph rendered into a NEW `<canvas id="dd-related-graph">`
+  embedded between the Content and Trust panels. When a memory is opened,
+  `buildRelatedGraph(mem)` derives the local neighborhood from the
+  existing payload — no new payload field is added — by scanning
+  `graph.domains` for entries whose `member_ids` include `mem.id`
+  (containing domains) and sampling up to 8 sibling memory ids from each
+  containing domain (deterministic — first 8 in `member_ids` order,
+  excluding the center). Siblings are resolved back to full memory
+  objects via a new in-IIFE `memoryById` map. The mini-graph runs a
+  bounded ~120-tick Verlet/spring simulation (capped at ~20 nodes) and
+  renders the center node (cyan), containing-domain nodes (blue), and
+  sampled sibling nodes (white) with edges center↔domain and
+  domain↔sibling. Domain-node clicks reuse the existing
+  `applyCrossFilter(member_ids, "domain " + label)` + `showTab("memory")`
+  funnel (the SAME path the main graph, sidebar, and policy table
+  already share); sibling-node clicks re-open the drill-down for the
+  chosen sibling via `showDrilldown(full)`. When the opened memory has
+  zero containing domains the canvas hides and a small
+  `#dd-related-empty` placeholder ("No related domain") shows instead.
+  Vanilla JS only — no new dependency, no CDN, no `innerHTML` sink.
+  The new `<canvas id="dd-related-graph">` is a different id from the
+  load-bearing `<canvas id="graph">` packaging token so the
+  [#83](https://github.com/woogiekim/mnemos/issues/83) placeholder
+  singleton (`__UI_DATA_JSON__` count == 1 in source, count == 0 in
+  rendered HTML), the [#83](https://github.com/woogiekim/mnemos/issues/83) /
+  [#85](https://github.com/woogiekim/mnemos/issues/85) `id="ui-data"` +
+  `mem-id-pill` + `mem.display_title` bindings, the
+  [#86](https://github.com/woogiekim/mnemos/issues/86) cross-filter
+  wiring + `createElement`-only DOM mutation contract, the
+  [#90](https://github.com/woogiekim/mnemos/issues/90) Memory-first tab
+  order, the [#91](https://github.com/woogiekim/mnemos/issues/91)
+  futuristic white theme tokens, and the
+  [#92](https://github.com/woogiekim/mnemos/issues/92) readability
+  primitives are all preserved verbatim. `tests/test_cli_ui.py` gains a
+  `TestUi93DrilldownRelatedGraph` class that pins the new canvas id,
+  the `.related-panel` markup, the `buildRelatedGraph` function name,
+  the `dd-related-empty` placeholder, the `applyCrossFilter(n.domain.member_ids,`
+  wire, the `memoryById` resolver, the `showDrilldown(full)` sibling
+  reopen, the `.related-panel canvas` + `.related-empty` CSS hooks, the
+  `__UI_DATA_JSON__` singleton (both source and rendered), the
+  load-bearing `<canvas id="graph">` regression guard, and the
+  no-`innerHTML` invariant. Verified end-to-end with a Chrome headless
+  probe that clicks the first `#result-list li`, evaluates
+  `document.getElementById("dd-related-graph")` (exists),
+  `getBoundingClientRect()` (`width=389.75`, `height=200`), inspects
+  intrinsic `canvas.width=389` + `canvas.height=200`, and confirms the
+  2D context has been drawn to (>50 non-zero alpha pixels via
+  `getImageData`).
 - Content readability in `mnemos ui`
   ([#92](https://github.com/woogiekim/mnemos/issues/92)): stop the
   aggressive `...` truncation experience. The drill-down `#dd-content`
