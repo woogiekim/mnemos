@@ -103,6 +103,91 @@ def _persisted_item(
 # --------------------------------------------------------------------------- #
 # Schema + structural invariants
 # --------------------------------------------------------------------------- #
+class TestDeriveDisplayTitle:
+    """Pure-helper tests for ``_derive_display_title`` (issue #85).
+
+    The derivation rule is the single source of truth surfaced to the operator
+    in both ``mnemos inspect`` (#80) and ``mnemos ui`` (#83), so every branch
+    must be pinned independently of the surrounding payload assembly.
+    """
+
+    def test_english_first_line(self):
+        assert inspectview._derive_display_title("Hello world\nrest", "id-1") == "Hello world"
+
+    def test_korean_first_line_preserved(self):
+        # Korean syllables count as 1 visible char each.
+        title = inspectview._derive_display_title("안녕하세요 세계\n둘째줄", "id-1")
+        assert title == "안녕하세요 세계"
+
+    def test_strips_leading_markdown_heading_marker(self):
+        assert inspectview._derive_display_title("# Heading text", "id-1") == "Heading text"
+        assert inspectview._derive_display_title("### deeper", "id-1") == "deeper"
+        # Mid-string hashes are NOT stripped.
+        assert inspectview._derive_display_title("not # a heading", "id-1") == "not # a heading"
+
+    def test_takes_first_non_empty_line(self):
+        # Leading blank lines and a markdown heading marker on line 3.
+        content = "\n\n## real first line\nbody line\n"
+        assert inspectview._derive_display_title(content, "id-1") == "real first line"
+
+    def test_leading_whitespace_stripped(self):
+        assert inspectview._derive_display_title("   indented title  ", "id-1") == "indented title"
+
+    def test_internal_whitespace_collapsed(self):
+        title = inspectview._derive_display_title("a\t\tb   c", "id-1")
+        assert title == "a b c"
+
+    def test_truncates_long_title_with_ellipsis(self):
+        long = "x" * 200
+        title = inspectview._derive_display_title(long, "id-1")
+        # 80 visible code points + "..."
+        assert title == "x" * 80 + "..."
+
+    def test_unicode_safe_truncation_korean(self):
+        # 100 Korean syllables — must truncate by code point, not byte.
+        long_ko = "가" * 100
+        title = inspectview._derive_display_title(long_ko, "id-1")
+        assert title == "가" * 80 + "..."
+        # 80 visible code points before the ellipsis.
+        assert len(title.replace("...", "")) == 80
+
+    def test_unicode_safe_truncation_emoji(self):
+        emoji = "🎉" * 100
+        title = inspectview._derive_display_title(emoji, "id-1")
+        assert title.endswith("...")
+        # The pre-ellipsis prefix is 80 emoji code points.
+        prefix = title[:-3]
+        assert len(prefix) == 80
+        assert all(ch == "🎉" for ch in prefix)
+
+    def test_empty_content_falls_back_to_slug_id(self):
+        assert inspectview._derive_display_title("", "feat-display-title-85") == "feat-display-title-85"
+
+    def test_whitespace_only_content_falls_back_to_id(self):
+        assert inspectview._derive_display_title("   \n\t  \n", "feat-foo") == "feat-foo"
+
+    def test_heading_only_marker_falls_back_to_id(self):
+        # Line is only ``#`` markers + whitespace — after stripping there's
+        # nothing left, so the helper falls back to the id.
+        assert inspectview._derive_display_title("### \n", "feat-foo") == "feat-foo"
+
+    def test_uuid_id_returned_verbatim_on_empty_content(self):
+        uuid = "9e6f1234-a5b1-4c2d-9e8f-0123456789ab"
+        # Hyphenated but UUID-shaped → NOT treated as slug; returned verbatim.
+        assert inspectview._derive_display_title("", uuid) == uuid
+
+    def test_token_id_without_hyphen_returned_verbatim(self):
+        assert inspectview._derive_display_title("", "tokenid") == "tokenid"
+
+    def test_empty_content_and_empty_id_returns_empty_string(self):
+        assert inspectview._derive_display_title("", "") == ""
+
+    def test_none_content_treated_as_empty(self):
+        # The payload assembly passes the raw stored ``content`` which may be
+        # ``None``; the helper must tolerate it without raising.
+        assert inspectview._derive_display_title(None, "feat-x") == "feat-x"  # type: ignore[arg-type]
+
+
 class TestPayloadShape:
     def test_schema_version_pinned_to_one(self, engine):
         payload = inspectview.build_inspect_payload([], engine)
@@ -149,6 +234,9 @@ class TestItemProjection:
         assert mem["id"] == "m1"
         assert mem["content"] == "hello"
         assert mem["tags"] == ["arch"]
+        # #85 — every memory carries the derived display_title (here the
+        # single-line content "hello" round-trips verbatim).
+        assert mem["display_title"] == "hello"
         # AC2 (viewer): content + preview_truncated flag
         assert mem["preview_truncated"] is False
         # AC3 (lifecycle/layer filter): layer + stage
@@ -175,9 +263,12 @@ class TestItemProjection:
         b = _persisted_item(item_id="b", layer="global", stage="archived")
         payload = inspectview.build_inspect_payload([a, b], engine)
         assert list(payload["memories"][0].keys()) == list(payload["memories"][1].keys())
-        # Spot-check the canonical order.
-        assert list(payload["memories"][0].keys())[:5] == [
+        # Spot-check the canonical order. ``display_title`` (issue #85)
+        # comes right after ``id`` — the two together form the heading +
+        # secondary-label pair for every list row.
+        assert list(payload["memories"][0].keys())[:6] == [
             "id",
+            "display_title",
             "layer",
             "stage",
             "tags",
@@ -206,6 +297,29 @@ class TestItemProjection:
         item = _persisted_item(tags=["good", 42, None, "ok"])
         payload = inspectview.build_inspect_payload([item], engine)
         assert payload["memories"][0]["tags"] == ["good", "ok"]
+
+    def test_every_memory_carries_display_title(self, engine):
+        # Two items with very different shapes: heading-style markdown +
+        # multi-line, and empty content driving the slug-id fallback.
+        a = _persisted_item(item_id="m-a", content="# Architecture decision\nbody")
+        b = _persisted_item(item_id="feat-foo-85", content="")
+        payload = inspectview.build_inspect_payload([a, b], engine)
+        titles = [m["display_title"] for m in payload["memories"]]
+        assert titles == ["Architecture decision", "feat-foo-85"]
+
+    def test_display_title_uses_raw_content_not_truncated_preview(self, engine):
+        """The heading is derived from the FULL content even when the
+        preview is truncated — the operator's stable label for a memory
+        should not change with the --preview-width flag."""
+        long = "First meaningful heading goes here\n" + "x" * 500
+        item = _persisted_item(content=long)
+        payload = inspectview.build_inspect_payload([item], engine, preview_width=5)
+        mem = payload["memories"][0]
+        # Preview is truncated…
+        assert mem["preview_truncated"] is True
+        assert mem["content"] == "First" + "..."
+        # …but the heading is still the (full, first-line) derivation.
+        assert mem["display_title"] == "First meaningful heading goes here"
 
 
 # --------------------------------------------------------------------------- #

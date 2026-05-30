@@ -282,6 +282,30 @@ class TestPreviewBranches:
 # --------------------------------------------------------------------------- #
 # Cross-filter shared-id invariant
 # --------------------------------------------------------------------------- #
+class TestUnifiedDisplayTitlePropagation:
+    """#85 — ``display_title`` is emitted by ``build_inspect_payload`` and
+    must round-trip into the unified payload's memory section unchanged."""
+
+    def test_display_title_present_on_every_memory(self, items, engine):
+        payload = unifiedview.build_unified_payload(items, engine)
+        memories = payload["memory"]["memories"]
+        assert memories, "fixture expected to produce at least one memory"
+        for mem in memories:
+            assert "display_title" in mem
+            assert isinstance(mem["display_title"], str)
+
+    def test_display_title_derives_from_first_content_line(self, engine):
+        item = _item(
+            "m1",
+            layer="global",
+            content="# Recurring theme: ports-and-adapters\n\nbody",
+            tags=["agent:backend"],
+        )
+        payload = unifiedview.build_unified_payload([item], engine)
+        first = payload["memory"]["memories"][0]
+        assert first["display_title"] == "Recurring theme: ports-and-adapters"
+
+
 class TestCrossFilterIdSpace:
     def test_graph_member_ids_overlap_memory_ids(self, items, engine):
         payload = unifiedview.build_unified_payload(items, engine)
