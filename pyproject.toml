@@ -23,6 +23,7 @@ dependencies = [
 vector = ["qdrant-client>=1.7", "chromadb>=0.4"]
 search = ["opensearch-py>=2.4"]
 ui = ["pywebview>=5.0"]
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 mnemos = "core.cli:cli"
@@ -35,8 +36,13 @@ addopts = [
     "--cov=agents",
     "--cov-report=term-missing:skip-covered",
     "--cov-fail-under=100",
+    "-m",
+    "not app_build",
 ]
 filterwarnings = ["error"]
+markers = [
+    "app_build: heavy macOS .app build smoke (opt-in via pytest -m app_build)",
+]
 
 [tool.coverage.run]
 branch = false
