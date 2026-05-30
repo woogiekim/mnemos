@@ -1079,3 +1079,186 @@ class TestCrossProcessCaptureDedup:
             "After cross-process dedup warms the in-process cache, "
             "subsequent same-process calls must return None (silent no-op)"
         )
+
+
+class TestPolicyPathResolution:
+    """Tests for ``MemoryGateway`` policy.yaml path resolution (#96).
+
+    The gateway looks up ``policy.yaml`` in three locations, in order:
+
+    1. ``MNEMOS_POLICY_PATH`` env override (preference only — falls
+       through to the conventional candidates if the override points at
+       a non-existent file).
+    2. Install-root convention — ``<repo_root>/wiki/policy.yaml``
+       (used by ``~/.mnemos`` after ``install.sh``).
+    3. Dev/source-repo convention — ``<repo_root>/repo/wiki/policy.yaml``
+       (used when ``MNEMOS_REPO_ROOT`` points at a checked-out mnemos
+       source tree, where the live policy lives at ``repo/wiki/`` rather
+       than the top-level ``wiki/``).
+
+    These tests exercise every branch so the resolution semantics are
+    locked in as the contract.
+    """
+
+    @staticmethod
+    def _minimal_policy_dict() -> dict:
+        """Return a minimal policy dict accepted by ``PolicyEngine``."""
+        return {
+            "layers": {
+                "global": {
+                    "path_template": "wiki/global/",
+                    "promotes_to": None,
+                    "promotion": {
+                        "age_hours": 0.0,
+                        "access_count": 0,
+                        "quality_score": 0.0,
+                    },
+                },
+            },
+            "forget": {"requires_archived": True},
+            "archive": {
+                "allowed_stages": ["stored", "retrieved", "used", "validated"]
+            },
+        }
+
+    def test_policy_path_resolves_install_convention(self, tmp_path, monkeypatch):
+        """Install layout — ``<root>/wiki/policy.yaml`` exists → load it.
+
+        This is the pre-existing behavior and MUST be preserved. The
+        gateway picks the install-root candidate before falling through
+        to the dev/source-repo candidate.
+        """
+        monkeypatch.delenv("MNEMOS_POLICY_PATH", raising=False)
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "wiki" / "policy.yaml").write_text(
+            yaml.dump(self._minimal_policy_dict())
+        )
+
+        from core.gateway import MemoryGateway
+
+        gw = MemoryGateway(repo_root=str(tmp_path))
+
+        # The gateway must have selected the install-convention candidate.
+        assert gw._policy._policy_path == str(tmp_path / "wiki" / "policy.yaml")
+
+    def test_policy_path_resolves_dev_repo_convention(self, tmp_path, monkeypatch):
+        """Dev/source-repo layout — ``<root>/repo/wiki/policy.yaml`` exists.
+
+        Reproduces the #96 defect setup: ``MNEMOS_REPO_ROOT`` points at a
+        mnemos source-tree checkout where the live policy lives under
+        ``repo/wiki/policy.yaml``, NOT the top-level ``wiki/``. Before
+        the fix this raised ``FileNotFoundError``; after the fix the
+        gateway falls through to the second candidate and loads cleanly.
+        """
+        monkeypatch.delenv("MNEMOS_POLICY_PATH", raising=False)
+        (tmp_path / "repo" / "wiki").mkdir(parents=True)
+        (tmp_path / "repo" / "wiki" / "policy.yaml").write_text(
+            yaml.dump(self._minimal_policy_dict())
+        )
+        # Explicitly assert the install-convention candidate does NOT exist
+        # so any future refactor that silently falls back to creating it
+        # is caught.
+        assert not (tmp_path / "wiki" / "policy.yaml").exists()
+
+        from core.gateway import MemoryGateway
+
+        gw = MemoryGateway(repo_root=str(tmp_path))
+
+        assert gw._policy._policy_path == str(
+            tmp_path / "repo" / "wiki" / "policy.yaml"
+        )
+
+    def test_policy_path_env_override_wins(self, tmp_path, monkeypatch):
+        """``MNEMOS_POLICY_PATH`` is preferred over install/dev candidates.
+
+        When the override points at an existing file, the gateway must
+        load policy from that exact path — ignoring both the
+        install-root and dev/source-repo conventional locations even
+        when those also exist.
+        """
+        # Create ALL three potential candidates with distinct contents so
+        # the gateway's choice is unambiguous and assertable.
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "wiki" / "policy.yaml").write_text(
+            yaml.dump(self._minimal_policy_dict())
+        )
+        (tmp_path / "repo" / "wiki").mkdir(parents=True)
+        (tmp_path / "repo" / "wiki" / "policy.yaml").write_text(
+            yaml.dump(self._minimal_policy_dict())
+        )
+        (tmp_path / "custom").mkdir()
+        custom_path = tmp_path / "custom" / "policy.yaml"
+        custom_path.write_text(yaml.dump(self._minimal_policy_dict()))
+
+        monkeypatch.setenv("MNEMOS_POLICY_PATH", str(custom_path))
+
+        from core.gateway import MemoryGateway
+
+        gw = MemoryGateway(repo_root=str(tmp_path))
+
+        assert gw._policy._policy_path == str(custom_path), (
+            "MNEMOS_POLICY_PATH override must take priority over "
+            "install-root and dev/source-repo candidates"
+        )
+
+    def test_policy_path_missing_raises_with_all_candidates_listed(
+        self, tmp_path, monkeypatch
+    ):
+        """No candidate exists → ``FileNotFoundError`` listing tried paths.
+
+        The error message must enumerate all attempted locations AND
+        mention ``MNEMOS_POLICY_PATH`` so an operator can diagnose the
+        failure without grepping source.
+        """
+        # No wiki/, no repo/wiki/, no override
+        missing_override = tmp_path / "nowhere" / "policy.yaml"
+        monkeypatch.setenv("MNEMOS_POLICY_PATH", str(missing_override))
+
+        from core.gateway import MemoryGateway
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            MemoryGateway(repo_root=str(tmp_path))
+
+        msg = str(excinfo.value)
+        # All three candidates must appear in the error message.
+        assert str(missing_override) in msg, (
+            "missing MNEMOS_POLICY_PATH candidate must be listed"
+        )
+        assert str(tmp_path / "wiki" / "policy.yaml") in msg, (
+            "install-root candidate must be listed"
+        )
+        assert str(tmp_path / "repo" / "wiki" / "policy.yaml") in msg, (
+            "dev/source-repo candidate must be listed"
+        )
+        assert "MNEMOS_POLICY_PATH" in msg, (
+            "error must mention the MNEMOS_POLICY_PATH override mechanism"
+        )
+
+    def test_policy_path_override_missing_still_falls_through_to_install_root(
+        self, tmp_path, monkeypatch
+    ):
+        """``MNEMOS_POLICY_PATH`` is a preference, not a hard requirement.
+
+        Semantic: when the override points at a non-existent file but a
+        conventional candidate exists, the gateway falls through to the
+        next candidate. This matches the user expectation "I gave a
+        hint; if it's wrong, still try the defaults" and is the least
+        surprising semantic for a hint-style env var. Documented in
+        :class:`MemoryGateway.__init__`.
+        """
+        # Install-root candidate exists; override path does NOT exist
+        (tmp_path / "wiki").mkdir()
+        (tmp_path / "wiki" / "policy.yaml").write_text(
+            yaml.dump(self._minimal_policy_dict())
+        )
+        missing_override = tmp_path / "nowhere" / "policy.yaml"
+        assert not missing_override.exists()
+        monkeypatch.setenv("MNEMOS_POLICY_PATH", str(missing_override))
+
+        from core.gateway import MemoryGateway
+
+        # Must succeed — the override is a preference; install-root is the
+        # fallback.
+        gw = MemoryGateway(repo_root=str(tmp_path))
+
+        assert gw._policy._policy_path == str(tmp_path / "wiki" / "policy.yaml")

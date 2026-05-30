@@ -148,6 +148,41 @@ and `TestRollback_AC4` of `tests/test_install_lifecycle_74.py`.
 
 ---
 
+## Policy file location
+
+`MemoryGateway` resolves `policy.yaml` using the following ordered
+candidate search (issue
+[#96](https://github.com/woogiekim/mnemos/issues/96)). The first existing
+path wins; missing candidates are silently skipped.
+
+1. **`MNEMOS_POLICY_PATH` env override** — explicit hint, preferred when
+   it points at a real file. If set but the file does not exist, the
+   gateway falls through to the next candidate (the override is a
+   *preference*, not a hard requirement). Set this to override the policy
+   file location entirely — for example, when running mnemos against an
+   alternate policy for a single command.
+2. **Install-root convention** — `<repo_root>/wiki/policy.yaml`.
+   This is the layout `install.sh` produces under `~/.mnemos`: the live
+   policy and the rest of the memory store both sit at the top level.
+3. **Dev/source-repo convention** — `<repo_root>/repo/wiki/policy.yaml`.
+   This is the layout produced by a mnemos source-tree checkout (the
+   GitHub clone). The repository keeps the *template* `policy.yaml` at
+   `repo/wiki/policy.yaml` so it can be installed into `~/.mnemos/wiki/`
+   without polluting the repo root.
+
+When `MNEMOS_REPO_ROOT` points at the **install root** (`~/.mnemos`), the
+install-convention candidate wins. When `MNEMOS_REPO_ROOT` points at a
+**mnemos source checkout** (e.g. `~/Developments/mnemos`), the
+install-convention candidate is absent and the gateway falls through to
+the dev/source-repo candidate. Both layouts now work without
+configuration; before the #96 fix, only the install layout did.
+
+If none of the candidates exist, the gateway raises `FileNotFoundError`
+listing every path it tried and pointing the operator at
+`MNEMOS_POLICY_PATH` as the explicit escape hatch.
+
+---
+
 ## Known limitations
 
 These are documented contractual limits — they are explicit design
