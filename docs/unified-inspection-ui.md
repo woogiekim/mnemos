@@ -143,6 +143,80 @@ payload is embedded as a `<script type="application/json">` block and parsed
 client-side, so the same file works identically inside the pywebview window and
 when opened directly from disk (no `file://` CORS surprises).
 
+## Domain sidebar (Memory tab)
+
+Operator guide for [issue #86](https://github.com/woogiekim/mnemos/issues/86)
+— a left-hand sidebar inside the Memory tab that lists every domain plus a
+pinned "All memories" row.
+
+The sidebar is a sibling of the existing list + drill-down columns, so the
+three columns coexist inside the Memory tab on a 1280×860 window:
+
+| Column | Width budget |
+|---|---|
+| `#domain-sidebar` | fixed `220px` (~17.2%) |
+| `#memory-list-col` | flex `1 1 60%` (~49.7%) |
+| `#drilldown` | flex `1 1 40%` (~33.1%) |
+
+All three columns set `min-width: 0` so the row stays scrollable inside the
+absolute-positioned `.tab` box (the [#83](https://github.com/woogiekim/mnemos/issues/83)
+layout chain — `body{height:100vh}` + `main{height:0}` + `.tab{position:absolute; inset:0}`
+— is preserved verbatim and untouched by this change).
+
+Row shape:
+
+| Row | Source | Effect |
+|---|---|---|
+| Pinned "All memories" (`data-domain-row="__all__"`) | always present | clicking clears the active cross-filter via the existing `clearFilter()` |
+| One row per `d` in `graph.domains` | alphabetized by `d.label.toLowerCase()` | clicking calls the existing `applyCrossFilter(d.member_ids, "domain …")` — the SAME function the [Graph node click](#cross-filtering-pure-client-side) and the [Policy cluster click](#cross-filtering-pure-client-side) already funnel through |
+
+Each row is a real `<button>` with `role="listitem"` and `tabindex="0"`. The
+sidebar honors keyboard navigation:
+
+| Key | Effect |
+|---|---|
+| `Tab` / `Shift+Tab` | default browser order — across the nav, the sidebar, the search input, and the result list |
+| `ArrowUp` / `ArrowDown` | move focus across sidebar rows |
+| `Enter` / `Space` | activate the focused row |
+
+Selection (`aria-selected="true"`) is a **visual hint** only — the
+authoritative filter state remains `activeFilterIds`, the same state the
+existing graph + policy cross-filter sets. The sidebar therefore does NOT
+change the search match function, the row rendering, or any persisted
+field; it is pure presentation.
+
+The sidebar is implemented entirely inside the existing IIFE in
+`core/templates/ui.html` — no Python change, no payload change, no schema
+bump.
+
+## Interactive graph (Graph tab)
+
+Operator guide for [issue #86](https://github.com/woogiekim/mnemos/issues/86)
+— an Obsidian-style pointer state machine on the Graph canvas. Replaces the
+previous single-purpose `canvas.click` handler.
+
+| Gesture | Effect |
+|---|---|
+| **Drag a node** | The node follows the cursor and stays where it is dropped (`n._pinned = true; vx = vy = 0`). The simulation skips physics for pinned and currently-dragging nodes, so the drop position is stable. |
+| **Drag an empty area** | Pans the view (`view.tx` / `view.ty`). |
+| **Wheel / two-finger scroll / pinch (macOS, via `ctrlKey+wheel`)** | Zooms about the cursor — the world point under the cursor stays under the cursor across zoom. The scale `view.k` is clamped to `[ZOOM_MIN=0.2, ZOOM_MAX=5.0]`. |
+| **Hover a node** | Shows a tooltip with the node's display label and member count. The tooltip element is built with `createElement` + `textContent` only — no unsafe DOM-assignment sinks, no `eval`. Tooltip is `position:fixed; pointer-events:none; z-index:9999` so it never inherits a transform / scroll context. |
+| **Click a node** (moved <4px AND held <250ms after `pointerdown`) | Focuses the node (persistent ring) and applies the existing `applyCrossFilter` to the Memory tab, scoped to that domain's `member_ids` — the SAME function the [domain sidebar row click](#domain-sidebar-memory-tab) uses. |
+| **Click an empty area** | Clears the focus ring and hides the tooltip. |
+| **Esc** | If the Memory search input is focused, blur it. Otherwise: clear focus + hover, hide the tooltip, clear the active cross-filter via `clearFilter()`, return to the Graph tab, reset the sidebar selection to the pinned "All memories" row, and unpin every node so the simulation re-settles. |
+
+The simulation loop uses `requestAnimationFrame` + a `dirty` flag. The
+`ensureRunning()` / `markDirty()` pair is the only entry point — every
+interaction (pointer, wheel, Esc, sidebar click) calls `markDirty()` to wake
+the loop. The loop self-stops when `!dragging && !panning && !dirty &&
+maxVelocity < 0.05` after `>200ms` idle, so a graph at rest costs zero
+animation frames.
+
+> The graph subsystem is implemented entirely inside the existing IIFE in
+> `core/templates/ui.html`. The 49-node / capped-edge data path, the
+> `build_graph_payload` reuse (#68), and the edge-density banner are
+> unchanged.
+
 ## Packaging
 
 The template ships in the wheel via the existing

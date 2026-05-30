@@ -34,6 +34,46 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Memory-tab domain sidebar in `mnemos ui`
+  ([#86](https://github.com/woogiekim/mnemos/issues/86)):
+  `core/templates/ui.html` gains an `<aside id="domain-sidebar" role="list">`
+  as the first child of `#tab-memory`, listing one row per `graph.domains`
+  entry (alphabetized by `d.label`) plus a pinned "All memories" row
+  (`data-domain-row="__all__"`). Each row is a real `<button>` with
+  `role="listitem"` + `tabindex="0"`; click and `Enter`/`Space` call the
+  existing `applyCrossFilter(d.member_ids, …)`, the pinned row calls
+  `clearFilter()`, and `ArrowUp`/`ArrowDown` move focus across rows. The
+  sidebar is presentation only — no Python / payload / schema / on-disk
+  change, no new dependency. The [#83](https://github.com/woogiekim/mnemos/issues/83)
+  layout chain and the [#85](https://github.com/woogiekim/mnemos/issues/85)
+  `display_title` contract are preserved verbatim. See
+  [docs/unified-inspection-ui.md § Domain sidebar (Memory tab)](docs/unified-inspection-ui.md#domain-sidebar-memory-tab);
+  cross-linked from
+  [docs/domain-graph-view.md](docs/domain-graph-view.md) and
+  [docs/memory-inspection.md](docs/memory-inspection.md).
+
+- Obsidian-style interactive graph in `mnemos ui`
+  ([#86](https://github.com/woogiekim/mnemos/issues/86)):
+  `core/templates/ui.html` replaces the single-purpose `canvas.click`
+  handler with a full pointer state machine — drag a node to reposition
+  and pin it (`n._pinned = true`); drag an empty area to pan; wheel /
+  pinch (macOS `ctrlKey+wheel`) zooms about the cursor, clamped to
+  `[ZOOM_MIN=0.2, ZOOM_MAX=5.0]`; hover a node to show a tooltip built
+  with `createElement` + `textContent` only (no unsafe DOM-assignment
+  sinks, no `eval`); click a node (moved <4px AND <250ms) focuses it and
+  cross-filters the Memory tab via the existing `applyCrossFilter`;
+  `Esc` clears focus + filter, returns to the Graph tab, and resets the
+  sidebar to the pinned "All memories" row. The simulation runs on a
+  `requestAnimationFrame` + dirty-flag loop (`ensureRunning()` /
+  `markDirty()`) that self-stops after >200ms idle with `maxVelocity <
+  0.05`, so a graph at rest costs zero animation frames. Presentation
+  only — no Python / payload / schema / on-disk change, no new
+  dependency. See
+  [docs/unified-inspection-ui.md § Interactive graph (Graph tab)](docs/unified-inspection-ui.md#interactive-graph-graph-tab);
+  cross-linked from
+  [docs/domain-graph-view.md](docs/domain-graph-view.md) and
+  [docs/memory-inspection.md](docs/memory-inspection.md).
+
 - Human-readable memory titles in `mnemos inspect` + `mnemos ui`
   ([#85](https://github.com/woogiekim/mnemos/issues/85)):
   - `core/inspectview.py` — new pure helper `_derive_display_title(content, id_)`

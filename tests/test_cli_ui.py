@@ -323,3 +323,172 @@ class TestUiAdditiveOnly:
         out = tmp_path / "g.html"
         result = runner.invoke(cli_with_repo, ["graph", "--output", str(out)])
         assert result.exit_code == 0, result.output
+
+
+# --------------------------------------------------------------------------- #
+# #86 — Memory-tab Domain sidebar
+# --------------------------------------------------------------------------- #
+class TestUiDomainSidebar:
+    """The Memory tab gains a left-hand sidebar that lists every domain
+    plus a pinned "All memories" row. The sidebar reuses the existing
+    cross-filter function (no new mechanism)."""
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "alpha", tag="agent:backend")
+        _capture_one(runner, cli, "global", "beta", tag="agent:frontend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    def test_sidebar_aside_and_role_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert 'id="domain-sidebar"' in html
+        assert 'role="list"' in html
+
+    def test_pinned_all_memories_row_attribute(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Pinned row carries data-domain-row="__all__" as the stable
+        # marker the UI uses (and tests/probes look for).
+        assert 'data-domain-row="__all__"' in html
+
+    def test_sidebar_funnels_through_existing_cross_filter(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The sidebar row click calls applyCrossFilter(d.member_ids, …)
+        # — the SAME function the existing graph node click + policy
+        # cluster click both funnel through. Pinning the literal
+        # substring makes the contract regression-detectable.
+        assert "applyCrossFilter(d.member_ids," in html
+        # And clearFilter() is still wired (pinned-row "All memories"
+        # uses it).
+        assert "clearFilter()" in html
+
+    def test_sidebar_does_not_break_existing_columns(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # All three Memory-tab columns must keep min-width: 0 so the
+        # flex row stays scrollable inside the #83 absolute-positioned
+        # .tab box.
+        assert "#memory-list-col" in html
+        assert "#drilldown" in html
+        # The sidebar fixes width via flex: 0 0 220px.
+        assert "220px" in html
+
+
+# --------------------------------------------------------------------------- #
+# #86 — Obsidian-style interactive Graph tab
+# --------------------------------------------------------------------------- #
+class TestUiInteractiveGraph:
+    """The Graph canvas gains a pointer state machine (pan / drag-pin /
+    wheel zoom / hover tooltip / Esc), backed by a rAF + dirty-flag
+    loop. All DOM mutations go through createElement + textContent —
+    the rendered HTML must not contain any unsafe DOM-assignment sink."""
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "alpha", tag="agent:backend")
+        _capture_one(runner, cli, "global", "beta", tag="agent:frontend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    def test_screen_to_world_helper_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "screenToWorld" in html
+
+    def test_zoom_clamp_constants_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The clamp is exposed via named constants AND their literal
+        # values; assert both forms so a stylistic rewrite of one form
+        # still keeps the contract pinned.
+        assert "ZOOM_MIN" in html
+        assert "ZOOM_MAX" in html
+        assert "0.2" in html
+        assert "5.0" in html
+
+    def test_pointer_capture_used(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # setPointerCapture is the contract for drag continuity even
+        # when the cursor leaves the canvas mid-drag.
+        assert "setPointerCapture" in html
+
+    def test_pointer_and_wheel_handlers_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # The listener strings are stable substrings the test pins so
+        # a regression that removes the pointer state machine is
+        # caught immediately.
+        assert "'pointerdown'" in html
+        assert "'wheel'" in html
+
+    def test_tooltip_built_via_create_element_and_text_content(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Tooltip must be a <div> created with createElement and
+        # populated via textContent only. Assert the literal
+        # createElement('div') seed AND textContent presence.
+        assert "createElement('div')" in html or 'createElement("div")' in html
+        assert "textContent" in html
+
+    def test_escape_key_handled(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        # Esc clears focus + filter (or blurs search input). Pin the
+        # literal "Escape" key string so the contract is regression-
+        # detectable.
+        assert "Escape" in html
+
+    def test_inner_html_assignment_sink_is_absent(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        """The rendered HTML must not contain any unsafe DOM-mutation
+        sink. The tooltip and the result-list reset both go through
+        createElement / removeChild instead."""
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "innerHTML" not in html
+
+
+# --------------------------------------------------------------------------- #
+# #86 — Regression guards re-asserted in the same module
+# --------------------------------------------------------------------------- #
+class TestUi86RegressionGuards:
+    """The #83 layout fix, the #85 display_title contract, and the
+    template-source __UI_DATA_JSON__ singleton must remain green after
+    the #86 changes."""
+
+    def _render(self, runner, cli, out_path):
+        _capture_one(runner, cli, "global", "x", tag="agent:backend")
+        result = runner.invoke(cli, ["ui", "--output", str(out_path)])
+        assert result.exit_code == 0, result.output
+        return out_path.read_text(encoding="utf-8")
+
+    def test_canvas_graph_tag_still_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert '<canvas id="graph"' in html
+
+    def test_ui_data_id_still_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert 'id="ui-data"' in html
+
+    def test_mem_id_pill_still_present(self, runner, cli_with_repo, tmp_path):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "mem-id-pill" in html
+
+    def test_display_title_binding_still_present(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        html = self._render(runner, cli_with_repo, tmp_path / "ui.html")
+        assert "mem.display_title" in html
+
+    def test_template_source_placeholder_singleton(self):
+        """The template SOURCE must mention __UI_DATA_JSON__ exactly once
+        (the load-bearing script tag). The #83 regression was caused by
+        a second mention re-firing the substitution; pinning the count
+        in #86 re-asserts that lesson."""
+        from importlib.resources import files
+        tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
+        assert tpl.count("__UI_DATA_JSON__") == 1
+        assert (
+            '<script id="ui-data" type="application/json">__UI_DATA_JSON__</script>'
+            in tpl
+        )
