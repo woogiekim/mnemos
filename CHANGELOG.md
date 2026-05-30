@@ -18,6 +18,27 @@ restore` of an older archive is always a breaking change.
 
 ### Added
 
+- Human-readable memory titles in `mnemos inspect` + `mnemos ui`
+  ([#85](https://github.com/woogiekim/mnemos/issues/85)):
+  - `core/inspectview.py` — new pure helper `_derive_display_title(content, id_)`
+    returns the first non-empty content line, stripped of leading Markdown
+    heading markers, with internal whitespace collapsed and truncated at 80
+    visible code points (Unicode-safe for Korean and emoji). Falls back to a
+    slug-shaped id when content is empty, or to the raw id when neither yields
+    anything meaningful. `build_inspect_payload` emits an additive
+    `display_title` field on every memory; the payload's `schema_version`
+    stays at `1` (presentation-only — no store / schema / API / on-disk
+    change). `build_unified_payload` inherits the field automatically since it
+    reuses `build_inspect_payload`.
+  - `core/templates/inspect.html` + `core/templates/ui.html` — render
+    `display_title` as the primary list-row heading and drill-down title; the
+    persisted id is demoted to a small, muted secondary label (`.mem-sub`
+    line on inspect, `.mem-id-pill` on the unified UI). The search match
+    function in both surfaces now also matches `display_title`
+    case-insensitively. The load-bearing `__UI_DATA_JSON__` placeholder still
+    appears exactly once in `ui.html` (the #83 lesson is preserved by a new
+    template-source assertion).
+
 - Final-memory distillation — persist derived domains + aggregated policies as
   managed, durable artifacts ([#84](https://github.com/woogiekim/mnemos/issues/84)):
   - `core/distill.py` — the persistence/management layer that #67's read-only
