@@ -118,7 +118,52 @@ When [mnemos] /compact detected appears in context:
 - Immediately run `mnemos capture` for each significant insight, decision,
   or piece of context from the current session that has not already been captured
 - Do this BEFORE the compact summary is generated
-- Be thorough: this is the last chance to preserve session knowledge"""
+- Be thorough: this is the last chance to preserve session knowledge
+
+### End-of-turn capture obligation
+At the end of every turn — before the assistant relinquishes control to the
+user — you MUST call `mnemos capture` once per substantive insight produced
+during that turn. Capture is per-paragraph: each substantive paragraph of
+prose is its own capture (do not concatenate multiple paragraphs into one
+capture, and do not paste raw tool output).
+
+Capture these (`mnemos capture <text>`):
+- The substantive answer or conclusion you gave the user (one paragraph per
+  capture; paraphrase rather than quoting the full reply verbatim).
+- Any non-obvious insight obtained from reading files, documents, or tool
+  output (one paragraph per insight, paraphrased — do NOT paste raw file
+  content or tool transcripts).
+- Architecture decisions, constraints, root causes, and user preferences
+  surfaced or confirmed during the turn.
+
+Do NOT capture:
+- Shell commands you executed or function call signatures such as
+  `<function_calls>`, `<invoke name=...`, or `tool_use:` blobs — the host's
+  audit log already records them.
+- Code you wrote — git already has it; capture the design rationale instead
+  of the diff.
+- Raw tool output or file content — paraphrase the insight instead of pasting
+  the bytes.
+- Single-sentence acknowledgements ("ok", "done", "got it", "확인했습니다").
+- Thinking-aloud stubs ("let me check", "looking at the file", "잠시만요").
+
+Examples:
+
+Positive — capture (Architecture decision paragraph):
+```
+mnemos capture --content "Architecture decision: gateway capture writes through MemoryStore so retrieval and capture see the same on-disk state without a separate sync step. The wiki/ tree only stores what gateway.capture's layer routing puts there; .agent/ stays local." --layer project
+```
+
+Negative — do NOT capture (raw tool-call dump):
+```
+<function_calls>
+<invoke name="Read">
+<parameter name="file_path">/tmp/foo</parameter>
+</invoke>
+</function_calls>
+```
+The host already preserves this in its audit log. Capturing it adds noise and
+leaks token-bearing prose into the persisted store."""
 
 
 class HostAdapter(ABC):

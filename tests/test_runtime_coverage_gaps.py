@@ -269,7 +269,6 @@ def test_transcript_loading_extraction_and_capture_edges(tmp_path: Path) -> None
         _layer_for_content,
         _looks_internal,
         _message_text,
-        _summarize,
         capture_transcript,
         extract_insights,
         load_transcript,
@@ -303,7 +302,6 @@ def test_transcript_loading_extraction_and_capture_edges(tmp_path: Path) -> None
     assert _is_trivial("ok") is True
     long_lines = [f"line {i} implemented verification workflow continuity rationale" for i in range(10)]
     assert len(" ".join(long_lines)) > len(" ".join(long_lines[:5]))
-    assert "line 5" not in _summarize(long_lines)
     assert _layer_for_content("global convention preference: use this everywhere") == "global"
 
     messages = [
@@ -315,7 +313,7 @@ def test_transcript_loading_extraction_and_capture_edges(tmp_path: Path) -> None
         {"role": "assistant", "content": "TASK_ID: 1\nhandoff pipeline status"},
     ]
     insights = extract_insights(messages)
-    assert {insight.kind for insight in insights} >= {"marker", "durable-line", "assistant-summary"}
+    assert {insight.kind for insight in insights} >= {"marker", "durable-line", "paragraph"}
 
     class FakeGateway:
         def __init__(self) -> None:
