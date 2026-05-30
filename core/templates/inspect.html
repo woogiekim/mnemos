@@ -51,6 +51,14 @@
     section.list-pane li.item:hover { background: #f6f8fa; }
     section.list-pane li.item.selected { background: #e8f0fe; }
     .mid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); font-size: 12px; }
+    /*
+      #85 — display_title becomes the primary list-row heading + drill-down
+      title; the persisted id is demoted to a small, muted secondary label
+      shown beneath the heading. .mem-title is the heading style; .mem-sub
+      is reused for the id pill.
+    */
+    .mem-title { font-size: 13px; font-weight: 600; color: var(--fg); word-break: break-word; }
+    .mem-sub { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); font-size: 11px; margin-top: 2px; }
     .badge {
       display: inline-block; padding: 1px 6px; border-radius: 3px;
       background: var(--badge-bg); color: var(--muted);
@@ -140,6 +148,7 @@
       </header>
       <section class="panel" data-panel="content">
         <h3>Content</h3>
+        <div class="mem-sub" id="dd-id" style="margin-bottom:6px;"></div>
         <pre class="content" id="dd-content"></pre>
         <div class="mid" id="dd-truncated" style="margin-top:6px; color: var(--muted);"></div>
       </section>
@@ -259,6 +268,8 @@
         var q = query.toLowerCase();
         if ((mem.content || '').toLowerCase().indexOf(q) !== -1) return true;
         if ((mem.id || '').toLowerCase().indexOf(q) !== -1) return true;
+        // #85 — search also matches the derived display_title.
+        if ((mem.display_title || '').toLowerCase().indexOf(q) !== -1) return true;
         var tags = mem.tags || [];
         for (var t = 0; t < tags.length; t++) {
           if (String(tags[t]).toLowerCase().indexOf(q) !== -1) return true;
@@ -271,8 +282,15 @@
         li.className = 'item';
         li.dataset.id = mem.id || '';
 
+        // #85 — primary heading is the derived display_title; id moves to
+        // a small, muted secondary line below.
+        var titleLine = document.createElement('div');
+        titleLine.className = 'mem-title';
+        titleLine.textContent = mem.display_title || mem.id || '(no id)';
+        li.appendChild(titleLine);
+
         var idLine = document.createElement('div');
-        idLine.className = 'mid';
+        idLine.className = 'mem-sub';
         idLine.textContent = mem.id || '(no id)';
         li.appendChild(idLine);
 
@@ -323,7 +341,13 @@
 
       function showDrilldown(mem) {
         drilldown.hidden = false;
-        document.getElementById('drilldown-title').textContent = mem.id || '(memory)';
+        // #85 — drill-down title uses the derived display_title; id is
+        // surfaced below in the existing provenance panel.
+        document.getElementById('drilldown-title').textContent =
+          mem.display_title || mem.id || '(memory)';
+        // #85 — id is now a muted secondary label inside the content panel.
+        document.getElementById('dd-id').textContent =
+          'id: ' + (mem.id || '(no id)');
         document.getElementById('dd-content').textContent = String(mem.content || '');
         document.getElementById('dd-truncated').textContent =
           mem.preview_truncated ? '(content truncated — re-run with --full)' : '';

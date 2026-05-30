@@ -92,8 +92,18 @@
     #result-list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1 1 auto; }
     #result-list li { padding: 8px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
     #result-list li:hover { background: var(--accent-soft); }
-    .mem-id { font-weight: 600; }
+    /*
+      #85 — display_title becomes the primary list-row heading + drill-down
+      title; the persisted id is demoted to a small muted pill rendered via
+      the existing .mem-sub style.
+    */
+    .mem-id { font-weight: 600; word-break: break-word; }
     .mem-sub { color: var(--muted); font-size: 12px; }
+    .mem-id-pill {
+      display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--muted); background: var(--bg);
+      border: 1px solid var(--line); border-radius: 10px; padding: 0 6px; margin-right: 6px;
+    }
     #memory-empty { padding: 20px; color: var(--muted); }
     #drilldown { flex: 1 1 40%; min-width: 0; overflow: auto; padding: 14px; background: var(--panel); }
     #drilldown[hidden] { display: none; }
@@ -166,6 +176,7 @@
         <div class="panel" data-panel="provenance">
           <h3>Provenance</h3>
           <dl>
+            <dt>Id</dt><dd id="dd-id"></dd>
             <dt>Run id</dt><dd id="dd-run"></dd>
             <dt>Session id</dt><dd id="dd-session"></dd>
             <dt>Created at</dt><dd id="dd-created"></dd>
@@ -264,6 +275,8 @@
         if (!q) return true;
         q = q.toLowerCase();
         if ((mem.id || "").toLowerCase().indexOf(q) !== -1) return true;
+        // #85 — search also matches the derived display_title.
+        if ((mem.display_title || "").toLowerCase().indexOf(q) !== -1) return true;
         if ((mem.content || "").toLowerCase().indexOf(q) !== -1) return true;
         if ((mem.layer || "").toLowerCase().indexOf(q) !== -1) return true;
         return (mem.tags || []).some(function (t) { return String(t).toLowerCase().indexOf(q) !== -1; });
@@ -279,13 +292,21 @@
         resultList.innerHTML = "";
         rows.forEach(function (mem) {
           var li = document.createElement("li");
-          var idEl = document.createElement("div");
-          idEl.className = "mem-id";
-          idEl.textContent = mem.id || "(memory)";
+          // #85 — primary heading is the derived display_title; id is shown
+          // as a small muted pill on the secondary sub-line.
+          var titleEl = document.createElement("div");
+          titleEl.className = "mem-id";
+          titleEl.textContent = mem.display_title || mem.id || "(memory)";
           var sub = document.createElement("div");
           sub.className = "mem-sub";
-          sub.textContent = (mem.layer || "?") + " · " + (mem.tags || []).join(", ");
-          li.appendChild(idEl);
+          var idPill = document.createElement("span");
+          idPill.className = "mem-id-pill";
+          idPill.textContent = mem.id || "(no id)";
+          sub.appendChild(idPill);
+          sub.appendChild(document.createTextNode(
+            (mem.layer || "?") + " · " + (mem.tags || []).join(", ")
+          ));
+          li.appendChild(titleEl);
           li.appendChild(sub);
           li.addEventListener("click", function () { showDrilldown(mem); });
           resultList.appendChild(li);
@@ -300,8 +321,14 @@
         document.getElementById(id).textContent = (value === null || value === undefined) ? "—" : String(value);
       }
       function showDrilldown(mem) {
-        document.getElementById("drilldown-title").textContent = mem.id || "(memory)";
+        // #85 — drill-down heading uses display_title; the id remains visible
+        // as the existing provenance-panel "Path" sibling label via setText.
+        document.getElementById("drilldown-title").textContent =
+          mem.display_title || mem.id || "(memory)";
         document.getElementById("dd-content").textContent = String(mem.content || "");
+        // #85 — explicit id row in the provenance panel (display_title is the
+        // primary heading, so id has to live somewhere visible in the drill-down).
+        setText("dd-id", mem.id);
         setText("dd-layer", mem.layer);
         setText("dd-quality", mem.quality_score);
         setText("dd-access", mem.access_count);
