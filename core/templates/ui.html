@@ -209,24 +209,16 @@
     <h1>mnemos unified inspection UI</h1>
     <span id="header-meta"></span>
     <nav role="tablist">
-      <button id="btn-graph" role="tab" aria-selected="true" aria-controls="tab-graph">Graph</button>
-      <button id="btn-memory" role="tab" aria-selected="false" aria-controls="tab-memory">Memory</button>
+      <button id="btn-memory" role="tab" aria-selected="true" aria-controls="tab-memory">Memory</button>
+      <button id="btn-graph" role="tab" aria-selected="false" aria-controls="tab-graph">Graph</button>
       <button id="btn-policy" role="tab" aria-selected="false" aria-controls="tab-policy">Policy Cohesion</button>
     </nav>
   </header>
 
   <main>
-    <!-- Graph tab -->
-    <section id="tab-graph" class="tab active" role="tabpanel">
-      <div id="edge-density-banner"></div>
-      <div id="graph-wrap">
-        <canvas id="graph" width="1200" height="700"></canvas>
-        <p id="graph-empty" hidden>No domains to display.</p>
-      </div>
-    </section>
-
-    <!-- Memory tab — #86 sidebar is FIRST child of #tab-memory. -->
-    <section id="tab-memory" class="tab" role="tabpanel">
+    <!-- Memory tab — #86 sidebar is FIRST child of #tab-memory.
+         Memory is the default-active tab (#90) so the domain sidebar shows on load. -->
+    <section id="tab-memory" class="tab active" role="tabpanel">
       <aside id="domain-sidebar" role="list" aria-label="Domains"></aside>
       <div id="memory-list-col">
         <div class="controls">
@@ -273,6 +265,15 @@
           </dl>
         </div>
       </aside>
+    </section>
+
+    <!-- Graph tab -->
+    <section id="tab-graph" class="tab" role="tabpanel">
+      <div id="edge-density-banner"></div>
+      <div id="graph-wrap">
+        <canvas id="graph" width="1200" height="700"></canvas>
+        <p id="graph-empty" hidden>No domains to display.</p>
+      </div>
     </section>
 
     <!-- Policy Cohesion tab -->
