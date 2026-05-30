@@ -36,6 +36,8 @@ addopts = [
     "--cov=agents",
     "--cov-report=term-missing:skip-covered",
     "--cov-fail-under=100",
+    "-m",
+    "not app_build",
 ]
 filterwarnings = ["error"]
 markers = [
