@@ -255,6 +255,51 @@
       padding: 1px 6px;
       margin-right: 6px;
     }
+    /*
+      #92 — Replace the previous single-line ellipsis preview with a 2-line
+      clamped block + bottom mask. ``-webkit-line-clamp`` is supported in
+      both WKWebView (macOS pywebview host) and Chromium (headless probe).
+      ``mask-image`` adds the soft bottom fade when content overflows.
+    */
+    .mem-content-preview {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      mask-image: linear-gradient(to bottom, #000 70%, transparent 100%);
+      -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent 100%);
+      color: var(--ink-2);
+      font-size: 12.5px;
+      line-height: 1.5;
+      margin-top: 4px;
+      word-break: break-word;
+    }
+    .mem-expand-btn {
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+      margin-left: 6px;
+    }
+    .mem-expand-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .mem-content-full {
+      display: none;
+      white-space: pre-wrap;
+      font-size: 12.5px;
+      color: var(--ink);
+      margin-top: 6px;
+      padding: 8px 10px;
+      background: var(--surface-elev);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      max-height: 320px;
+      overflow: auto;
+      word-break: break-word;
+    }
+    .mem-content-full.shown { display: block; }
     #memory-empty { padding: 20px; color: var(--muted); }
     #drilldown {
       flex: 1 1 40%;
@@ -545,8 +590,36 @@
           sub.appendChild(document.createTextNode(
             (mem.layer || "?") + " · " + (mem.tags || []).join(", ")
           ));
+          // #92 — per-row "Show more" toggle. The expand button toggles a
+          // sibling ``.mem-content-full`` block with the untruncated content
+          // (``mem.content_full`` always present since #92; ``mem.content``
+          // is the 2-line preview-truncated fallback).
+          var expandBtn = document.createElement("button");
+          expandBtn.className = "mem-expand-btn";
+          expandBtn.type = "button";
+          expandBtn.textContent = "▾";
+          expandBtn.setAttribute("aria-expanded", "false");
+          expandBtn.setAttribute("aria-label", "Toggle full content");
+          sub.appendChild(expandBtn);
           li.appendChild(titleEl);
           li.appendChild(sub);
+          // #92 — 2-line clamped preview replaces the previous single-line
+          // ellipsis. The CSS handles the visual fade + line-clamp.
+          var previewEl = document.createElement("div");
+          previewEl.className = "mem-content-preview";
+          previewEl.textContent = String(mem.content || "");
+          li.appendChild(previewEl);
+          // The full-content block is appended once and toggled via .shown.
+          var fullEl = document.createElement("div");
+          fullEl.className = "mem-content-full";
+          fullEl.textContent = String(mem.content_full || mem.content || "");
+          li.appendChild(fullEl);
+          expandBtn.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            var shown = fullEl.classList.toggle("shown");
+            expandBtn.textContent = shown ? "▴" : "▾";
+            expandBtn.setAttribute("aria-expanded", shown ? "true" : "false");
+          });
           li.addEventListener("click", function () { showDrilldown(mem); });
           resultList.appendChild(li);
         });
@@ -564,7 +637,11 @@
         // as the existing provenance-panel "Path" sibling label via setText.
         document.getElementById("drilldown-title").textContent =
           mem.display_title || mem.id || "(memory)";
-        document.getElementById("dd-content").textContent = String(mem.content || "");
+        // #92 — drill-down always renders the untruncated content. The
+        // ``content_full`` field is always present (issue #92, additive);
+        // legacy payloads without it fall back to ``content``.
+        document.getElementById("dd-content").textContent =
+          String(mem.content_full || mem.content || "");
         // #85 — explicit id row in the provenance panel (display_title is the
         // primary heading, so id has to live somewhere visible in the drill-down).
         setText("dd-id", mem.id);

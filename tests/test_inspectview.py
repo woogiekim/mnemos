@@ -722,3 +722,93 @@ class TestWriteInspectHtml:
         out = tmp_path / "out.html"
         written = inspectview.write_inspect_html([], out, engine)
         assert written == out.resolve()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #92 — ``content_full`` is always emitted (drill-down full content)
+# --------------------------------------------------------------------------- #
+class TestContentFullField92:
+    """The drill-down panel needs the original untruncated content even when
+    the list rows render a preview-truncated string. Issue #92 promotes
+    ``content_full`` to a first-class always-present field so the template
+    can read it unconditionally — no ``--full`` toggle required."""
+
+    def test_content_full_always_present_when_truncated(self, engine):
+        # Long ASCII content + a tiny preview_width forces truncation.
+        long = "x" * 500
+        item = _persisted_item(content=long)
+        payload = inspectview.build_inspect_payload(
+            [item], engine, preview_width=10
+        )
+        mem = payload["memories"][0]
+        # The list-preview field is the truncated string …
+        assert mem["content"] == "x" * 10 + "..."
+        assert mem["preview_truncated"] is True
+        # … but ``content_full`` carries the verbatim raw content.
+        assert mem["content_full"] == long
+        assert "content_full" in mem
+
+    def test_content_full_always_present_when_short(self, engine):
+        # Short content fits in the preview — the two fields should be
+        # equal but ``content_full`` must STILL be present as a separate key.
+        item = _persisted_item(content="abc")
+        payload = inspectview.build_inspect_payload(
+            [item], engine, preview_width=240
+        )
+        mem = payload["memories"][0]
+        assert mem["content"] == "abc"
+        assert mem["content_full"] == "abc"
+        assert mem["preview_truncated"] is False
+
+    def test_content_full_equals_content_in_full_mode(self, engine):
+        long = "x" * 500
+        item = _persisted_item(content=long)
+        payload = inspectview.build_inspect_payload(
+            [item], engine, preview_width=10, full=True
+        )
+        mem = payload["memories"][0]
+        # ``--full`` bypasses truncation on ``content`` — both fields equal.
+        assert mem["content"] == long
+        assert mem["content_full"] == long
+        assert mem["preview_truncated"] is False
+
+    def test_content_full_unicode_korean_round_trip(self, engine):
+        # Korean content with a single very long line. The preview is
+        # bounded by Unicode codepoints (not bytes); ``content_full``
+        # must equal the original verbatim.
+        ko_long = "가" * 300  # 300 Korean syllables, one logical line
+        item = _persisted_item(content=ko_long)
+        payload = inspectview.build_inspect_payload(
+            [item], engine, preview_width=50
+        )
+        mem = payload["memories"][0]
+        # Preview is capped at 50 codepoints + ellipsis marker.
+        assert mem["preview_truncated"] is True
+        # The preview is built by character-slice; assert codepoint count.
+        prefix = mem["content"][: -len("...")] if mem["content"].endswith("...") else mem["content"]
+        assert len(prefix) <= 50
+        # The full content survives verbatim.
+        assert mem["content_full"] == ko_long
+        assert len(mem["content_full"]) == 300
+
+    def test_content_full_present_for_every_memory(self, engine):
+        a = _persisted_item(item_id="a", content="alpha")
+        b = _persisted_item(item_id="b", content="beta " * 100)
+        payload = inspectview.build_inspect_payload(
+            [a, b], engine, preview_width=20
+        )
+        for mem in payload["memories"]:
+            assert "content_full" in mem
+            assert isinstance(mem["content_full"], str)
+
+    def test_content_full_position_after_content_in_field_order(self, engine):
+        """``content_full`` is added immediately after ``content`` so the
+        emitted JSON stays grouped + deterministic across runs."""
+        item = _persisted_item(content="hello")
+        payload = inspectview.build_inspect_payload([item], engine)
+        keys = list(payload["memories"][0].keys())
+        i_content = keys.index("content")
+        i_full = keys.index("content_full")
+        assert i_full == i_content + 1
+        # And ``preview_truncated`` still immediately follows ``content_full``.
+        assert keys[i_full + 1] == "preview_truncated"
