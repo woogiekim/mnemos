@@ -81,59 +81,123 @@ _UUID_RE: re.Pattern[str] = re.compile(
 )
 
 
+# Horizontal-rule line detector (issue #85 follow-up). A "rule" line is the
+# stripped line being non-empty, length >= 3, and consisting ONLY of the rule
+# characters ``-``, ``=``, ``*``, ``_`` plus optional internal whitespace.
+# Matches: ``---``, ``===``, ``***``, ``----``, ``___``, ``- - -``.
+# Does NOT match: ``--`` (length 2), ``-x-`` (non-rule char), ``-- foo``
+# (trailing non-rule run after the first whitespace).
+_RULE_LINE_RE: re.Pattern[str] = re.compile(r"^[-=*_](?:[\s\-=*_]*[-=*_])?$")
+
+# YAML-style ``key: value`` extractor for the small set of front-matter-ish
+# keys memory authors commonly write at the top of a content block. The match
+# is case-insensitive and anchored at the start of the stripped line. The
+# captured value retains its trailing whitespace (callers strip + dequote it).
+_KEY_VALUE_RE: re.Pattern[str] = re.compile(
+    r"^(?:name|title|summary|description|theme)\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+
+
+def _is_rule_line(stripped: str) -> bool:
+    """Return ``True`` when *stripped* is a pure horizontal-rule line.
+
+    See :data:`_RULE_LINE_RE` for the exact shape. The length precondition is
+    enforced here rather than in the regex so callers can reason about the
+    branch in isolation: ``--`` (length 2) is explicitly NOT a rule even
+    though it matches the character class.
+    """
+    if len(stripped) < 3:
+        return False
+    return _RULE_LINE_RE.match(stripped) is not None
+
+
+def _strip_one_matching_quote(value: str) -> str:
+    """Strip ONE layer of matching ASCII quotes from *value* if present.
+
+    ``"foo bar"`` -> ``foo bar``; ``'foo bar'`` -> ``foo bar``; ``foo`` and
+    ``"foo`` (unmatched) are returned verbatim. Only handles ASCII quotes —
+    Unicode smart quotes are preserved as-is so they survive into the title.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+        return value[1:-1]
+    return value
+
+
 def _derive_display_title(content: str, id_: str) -> str:
     """Return a short, human-readable label for a memory item.
 
-    Derivation rule (issue #85):
+    Derivation rule (issue #85, refined):
 
-    1. Take the FIRST non-empty line of *content*.
-    2. Strip leading Markdown heading markers (``#``/``##``/...) and any
-       surrounding whitespace.
-    3. Collapse internal runs of whitespace to a single space.
-    4. Truncate at :data:`_DISPLAY_TITLE_MAX_CHARS` *visible* characters
-       (Unicode code points, NOT bytes — works for Korean and emoji).
-    5. If *content* yields no meaningful first line, fall back to *id_*:
-       use it as-is when it looks like a slug (contains a hyphen and is NOT
-       a UUID by shape), otherwise return the raw *id_* string. Always a
-       :class:`str` (empty when both inputs are empty).
+    1. Iterate non-empty lines of *content*.
+    2. Skip pure horizontal-rule lines (``---``, ``===``, ``***`` …) — see
+       :func:`_is_rule_line`. This prevents YAML-fence-style content whose
+       first nonempty line is ``---`` from surfacing the delimiter as the
+       title.
+    3. For each remaining line, attempt YAML-style ``key: value`` extraction
+       against the keys ``name``, ``title``, ``summary``, ``description``,
+       ``theme`` (case-insensitive). If the captured value (after stripping
+       surrounding whitespace and one layer of matching ASCII quotes) is
+       non-empty, use it as the candidate. If the value is EMPTY, continue
+       to the next line (do NOT fall back to the literal ``key:`` text).
+    4. Lines that are neither rule nor key:value become the candidate after
+       leading-``#`` strip + whitespace collapse (preserves the prior heading
+       behaviour).
+    5. Apply the Unicode-safe truncation at
+       :data:`_DISPLAY_TITLE_MAX_CHARS` code points to the candidate.
+    6. If NO line yielded a candidate, fall back to *id_*: use it as-is when
+       it looks like a slug (contains a hyphen and is NOT a UUID by shape),
+       otherwise return the raw *id_*. Always a :class:`str` (empty when
+       both inputs are empty).
 
     Pure function. No I/O, no policy lookups, trivially testable in isolation.
     """
-    # ---- step 1: first non-empty line of content -----------------------
     text = content or ""
-    first_line = ""
+    candidate: str | None = None
+
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
-        if stripped:
-            first_line = stripped
+        if not stripped:
+            continue
+
+        # ---- step 2: skip pure horizontal-rule lines -------------------
+        if _is_rule_line(stripped):
+            continue
+
+        # ---- step 3: KEY:VALUE extraction (name/title/…) ---------------
+        kv = _KEY_VALUE_RE.match(stripped)
+        if kv is not None:
+            value = _strip_one_matching_quote(kv.group(1).strip())
+            if value:
+                candidate = value
+                break
+            # Empty value — fall through to the next line without using
+            # the literal ``key:`` text. Do NOT treat the line as a plain
+            # title candidate.
+            continue
+
+        # ---- step 4: plain line — strip leading heading markers --------
+        cleaned = re.sub(r"^#+\s*", "", stripped).strip()
+        if cleaned:
+            candidate = cleaned
             break
 
-    if first_line:
-        # ---- step 2: strip leading Markdown heading markers ------------
-        # ``#``, ``##``, ``###`` ... followed by optional whitespace. Only
-        # leading hash runs count as heading syntax — a hash mid-string is
-        # left alone.
-        cleaned = re.sub(r"^#+\s*", "", first_line).strip()
-        if cleaned:
-            # ---- step 3: collapse internal whitespace ------------------
-            collapsed = re.sub(r"\s+", " ", cleaned)
-            # ---- step 4: Unicode-safe truncation -----------------------
-            # Slicing a ``str`` is by code point in Python 3, so a simple
-            # length compare + slice gives correct visible-character math
-            # for Korean syllables and BMP emoji alike.
-            if len(collapsed) > _DISPLAY_TITLE_MAX_CHARS:
-                return collapsed[:_DISPLAY_TITLE_MAX_CHARS] + "..."
-            return collapsed
+    if candidate is not None:
+        # ---- collapse internal whitespace + Unicode-safe truncation ----
+        collapsed = re.sub(r"\s+", " ", candidate)
+        if len(collapsed) > _DISPLAY_TITLE_MAX_CHARS:
+            return collapsed[:_DISPLAY_TITLE_MAX_CHARS] + "..."
+        return collapsed
 
-    # ---- step 5: id-based fallback -------------------------------------
-    candidate = (id_ or "").strip()
-    if not candidate:
+    # ---- step 6: id-based fallback -------------------------------------
+    fallback = (id_ or "").strip()
+    if not fallback:
         return ""
-    if "-" in candidate and not _UUID_RE.match(candidate):
+    if "-" in fallback and not _UUID_RE.match(fallback):
         # Slug-shaped id (``feat-foo-85``) — readable enough as a label.
-        return candidate
+        return fallback
     # Raw id (UUID, or single token with no hyphen). No prettier option.
-    return candidate
+    return fallback
 
 
 def _truncate_preview(content: str, width: int, full: bool) -> tuple[str, bool]:

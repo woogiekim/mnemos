@@ -16,6 +16,22 @@ restore` of an older archive is always a breaking change.
 
 ## [Unreleased]
 
+### Fixed
+
+- `_derive_display_title` no longer surfaces horizontal-rule lines (`---`,
+  `===`, `***`, `___`, `- - -`) as memory titles
+  ([#85](https://github.com/woogiekim/mnemos/issues/85) follow-up). On a real
+  388-memory store this dropped the offender count from 38 (~10%) to 0:
+  memories whose content begins with a YAML-style block now surface the inner
+  `name` / `title` / `summary` / `description` / `theme` value instead of the
+  literal fence. `core/inspectview.py` adds two module-level constants
+  (`_RULE_LINE_RE`, `_KEY_VALUE_RE`) and two pure helpers (`_is_rule_line`,
+  `_strip_one_matching_quote`); the helper still returns a `str` with the same
+  `(content, id_) -> str` signature and the wire-format `schema_version` stays
+  at `1`. Empty key values fall through to the next line rather than yielding
+  the literal `key:` text, and lines like `--` (length 2) or `-x-` (non-rule
+  char) are correctly preserved as plain titles.
+
 ### Added
 
 - Human-readable memory titles in `mnemos inspect` + `mnemos ui`
