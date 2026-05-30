@@ -334,6 +334,46 @@ class TestInspectTemplateSafety:
 
 
 # --------------------------------------------------------------------------- #
+# #85 — display_title is emitted and surfaced as the primary row heading
+# --------------------------------------------------------------------------- #
+class TestInspectDisplayTitle:
+    def test_payload_emits_display_title_for_every_memory(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        _capture_one(
+            runner, cli_with_repo, "global", "Architecture decision: use SQLite",
+            tag="agent:backend",
+        )
+        out = tmp_path / "i.html"
+        result = runner.invoke(cli_with_repo, ["inspect", "--output", str(out)])
+        assert result.exit_code == 0, result.output
+        payload = _read_payload(out)
+        assert payload["memories"], "expected at least one memory"
+        titles = [m["display_title"] for m in payload["memories"]]
+        assert all(isinstance(t, str) for t in titles)
+        # The captured content's first line is the title.
+        assert any(t == "Architecture decision: use SQLite" for t in titles)
+
+    def test_rendered_html_renders_display_title_as_primary_heading(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        _capture_one(
+            runner, cli_with_repo, "global", "Architecture decision: use SQLite",
+            tag="agent:backend",
+        )
+        out = tmp_path / "i.html"
+        result = runner.invoke(cli_with_repo, ["inspect", "--output", str(out)])
+        assert result.exit_code == 0, result.output
+        html = out.read_text(encoding="utf-8")
+        # The template carries a .mem-title heading and a .mem-sub id row.
+        assert "mem-title" in html, "primary heading class missing"
+        assert "mem-sub" in html, "secondary id class missing"
+        # The renderer reads mem.display_title (the new field) for both the
+        # list-row heading and the drill-down title.
+        assert "mem.display_title" in html
+
+
+# --------------------------------------------------------------------------- #
 # Additive only — existing commands still respond
 # --------------------------------------------------------------------------- #
 class TestInspectAdditiveOnly:

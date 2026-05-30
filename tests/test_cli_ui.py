@@ -255,6 +255,62 @@ class TestUiEmptyStore:
 
 
 # --------------------------------------------------------------------------- #
+# #85 — display_title propagates to the unified Memory tab
+# --------------------------------------------------------------------------- #
+class TestUiDisplayTitle:
+    def test_payload_emits_display_title_for_every_memory(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        _capture_one(
+            runner, cli_with_repo, "global", "Recurring theme: ports-and-adapters",
+            tag="agent:backend",
+        )
+        out = tmp_path / "ui.html"
+        result = runner.invoke(cli_with_repo, ["ui", "--output", str(out)])
+        assert result.exit_code == 0, result.output
+        payload = _read_payload(out)
+        memories = payload["memory"]["memories"]
+        assert memories, "expected at least one memory"
+        titles = [m["display_title"] for m in memories]
+        assert all(isinstance(t, str) for t in titles)
+        assert any(t == "Recurring theme: ports-and-adapters" for t in titles)
+
+    def test_rendered_html_binds_display_title_as_primary_heading(
+        self, runner, cli_with_repo, tmp_path
+    ):
+        _capture_one(
+            runner, cli_with_repo, "global", "Recurring theme: ports-and-adapters",
+            tag="agent:backend",
+        )
+        out = tmp_path / "ui.html"
+        result = runner.invoke(cli_with_repo, ["ui", "--output", str(out)])
+        assert result.exit_code == 0, result.output
+        html = out.read_text(encoding="utf-8")
+        # mem-id heading is now bound to mem.display_title; id has a pill.
+        assert "mem-id-pill" in html, "secondary id pill class missing"
+        assert "mem.display_title" in html, "display_title not referenced"
+        # The #83 lesson: __UI_DATA_JSON__ MUST appear only once (the
+        # load-bearing script tag) — never reintroduced in a comment.
+        assert html.count("__UI_DATA_JSON__") == 0, (
+            "placeholder leaked into rendered HTML — substitution went wrong"
+        )
+
+    def test_ui_template_only_contains_placeholder_in_load_bearing_tag(self):
+        """The template SOURCE must mention __UI_DATA_JSON__ exactly once,
+        inside the load-bearing ``<script id="ui-data" …>`` tag. The #83
+        regression was caused by a second mention inside a comment that
+        re-fired the substitution; this test pins the lesson."""
+        from importlib.resources import files
+        tpl = files("core.templates").joinpath("ui.html").read_text("utf-8")
+        assert tpl.count("__UI_DATA_JSON__") == 1
+        # And it lives inside the load-bearing script tag.
+        assert (
+            '<script id="ui-data" type="application/json">__UI_DATA_JSON__</script>'
+            in tpl
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Additive only — existing commands still respond
 # --------------------------------------------------------------------------- #
 class TestUiAdditiveOnly:

@@ -33,6 +33,7 @@ Design constraints (mirrors ``core.graphview`` § module docstring):
 from __future__ import annotations
 
 import datetime
+import re
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,76 @@ _CANONICAL_LAYERS: list[str] = [
     "project",
     "global",
 ]
+
+
+# Visible-character cap on the derived ``display_title``. Unicode code points
+# (not bytes) are counted so Korean syllables and emoji each count as 1 — a
+# user-facing "~80 visible characters" rather than a UTF-8 byte budget.
+_DISPLAY_TITLE_MAX_CHARS: int = 80
+
+
+# Canonical 8-4-4-4-12 UUID shape. Used by the display-title fallback to tell
+# slug-shaped ids (``feat-display-title-85``) from opaque UUID ids
+# (``9e6f…-a5b1-…``) — only the former is human-meaningful as a fallback label.
+_UUID_RE: re.Pattern[str] = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _derive_display_title(content: str, id_: str) -> str:
+    """Return a short, human-readable label for a memory item.
+
+    Derivation rule (issue #85):
+
+    1. Take the FIRST non-empty line of *content*.
+    2. Strip leading Markdown heading markers (``#``/``##``/...) and any
+       surrounding whitespace.
+    3. Collapse internal runs of whitespace to a single space.
+    4. Truncate at :data:`_DISPLAY_TITLE_MAX_CHARS` *visible* characters
+       (Unicode code points, NOT bytes — works for Korean and emoji).
+    5. If *content* yields no meaningful first line, fall back to *id_*:
+       use it as-is when it looks like a slug (contains a hyphen and is NOT
+       a UUID by shape), otherwise return the raw *id_* string. Always a
+       :class:`str` (empty when both inputs are empty).
+
+    Pure function. No I/O, no policy lookups, trivially testable in isolation.
+    """
+    # ---- step 1: first non-empty line of content -----------------------
+    text = content or ""
+    first_line = ""
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped:
+            first_line = stripped
+            break
+
+    if first_line:
+        # ---- step 2: strip leading Markdown heading markers ------------
+        # ``#``, ``##``, ``###`` ... followed by optional whitespace. Only
+        # leading hash runs count as heading syntax — a hash mid-string is
+        # left alone.
+        cleaned = re.sub(r"^#+\s*", "", first_line).strip()
+        if cleaned:
+            # ---- step 3: collapse internal whitespace ------------------
+            collapsed = re.sub(r"\s+", " ", cleaned)
+            # ---- step 4: Unicode-safe truncation -----------------------
+            # Slicing a ``str`` is by code point in Python 3, so a simple
+            # length compare + slice gives correct visible-character math
+            # for Korean syllables and BMP emoji alike.
+            if len(collapsed) > _DISPLAY_TITLE_MAX_CHARS:
+                return collapsed[:_DISPLAY_TITLE_MAX_CHARS] + "..."
+            return collapsed
+
+    # ---- step 5: id-based fallback -------------------------------------
+    candidate = (id_ or "").strip()
+    if not candidate:
+        return ""
+    if "-" in candidate and not _UUID_RE.match(candidate):
+        # Slug-shaped id (``feat-foo-85``) — readable enough as a label.
+        return candidate
+    # Raw id (UUID, or single token with no hyphen). No prettier option.
+    return candidate
 
 
 def _truncate_preview(content: str, width: int, full: bool) -> tuple[str, bool]:
@@ -115,8 +186,13 @@ def _project_item(
         if raw_path:
             item_id = Path(raw_path).stem
 
+    # display_title is derived from the RAW content (not the truncated
+    # preview) so the heading remains stable regardless of preview_width.
+    display_title = _derive_display_title(raw_content, item_id)
+
     return {
         "id": item_id,
+        "display_title": display_title,
         "layer": layer,
         "stage": stage,
         "tags": tags,
