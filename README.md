@@ -1,9 +1,21 @@
-# mnemos — LLM Wiki Memory OS
+# mnemos — local Memory OS for AI coding agents
 
-mnemos is a Global Memory Operating System (MemoryOS) that controls the complete
-memory lifecycle for AI agents. It provides a single Memory Gateway entry point,
-a Policy Engine that enforces lifecycle transitions, memory layers, and CLI tools
-that agents use instead of accessing the filesystem directly.
+mnemos is a local, host-installable memory layer for AI coding agents. It gives
+Claude Code, Cursor, and other CLI/provider-contract hosts a durable way to
+capture decisions, retrieve them later, manage lifecycle policy, inspect what
+was stored, and move memory across machines without agents reading private
+storage internals directly.
+
+In practical terms: install mnemos in a repo, capture project or global
+decisions through the `mnemos` CLI, and let supported hosts call the stable
+JSON/provider commands for search, read, context injection, lifecycle checks,
+backup, restore, and sync. "Memory OS" here means the memory store has a
+gateway, policy layer, lifecycle stages, inspection surfaces, and host adapters
+instead of being a loose folder of notes.
+
+mnemos is for developers who want AI coding sessions to remember durable
+project facts without turning those facts into prompt boilerplate, ad hoc
+Markdown scraping, or hidden vendor state.
 
 ## Foundational Direction
 
@@ -65,6 +77,102 @@ mnemos promote <item-id>
 mnemos archive <item-id>
 mnemos forget <item-id>
 ```
+
+## Three killer demos
+
+### 1. Capture, search, and read through the provider contract
+
+Use this flow when a host, script, or agent needs stable machine-readable memory
+operations instead of filesystem access:
+
+```bash
+mnemos capture --json --layer project --tag decision \
+  --content "Use SQLite FTS5 as the first search stage; vector search is optional."
+
+mnemos search --fast --json --limit 5 "SQLite FTS5 search stage"
+
+mnemos read --json <item-id>
+```
+
+Expected result: each command returns provider-contract JSON. Search results
+include stable fields such as `id`, `content`, `summary`, `layer`, `tags`,
+`provenance`, `recency`, optional normalized `score`, and `metadata`; missing
+items and degraded search paths return structured status/error fields rather
+than forcing callers to parse human text.
+
+### 2. Install host memory behavior for Claude Code and Cursor
+
+Use this flow when a coding host should discover mnemos behavior from its own
+configuration files:
+
+```bash
+mnemos install .
+mnemos capabilities --json
+mnemos context --render --host claude-code --prompt "What search contract did we choose?"
+```
+
+Expected result: `mnemos install` scaffolds the repo and, when host config
+files are present, writes managed mnemos blocks for Claude Code and Cursor.
+Claude Code has the strongest local adapter: a managed `CLAUDE.md` block plus
+`settings.json` hooks for `PostToolUse`, `UserPromptSubmit`, and `Stop`.
+Cursor support is a managed rules block in `~/.cursor/rules` or
+`~/.cursor/rules.md`; Cursor hook registration is not claimed because the local
+adapter documents no equivalent hooks API. `mnemos context --render` emits a
+bounded `<mnemos-context>` block that hosts can inject without reading storage
+paths.
+
+### 3. Produce operational evidence and inspect the store offline
+
+Use this flow when you need evidence that the memory layer behaves consistently
+over time, plus a human-readable view of stored memories:
+
+```bash
+mnemos beta-run --days 14 --seed 42 --output beta-report.json --json
+mnemos inspect --output memory-inspect.html
+mnemos graph --output domain-graph.html
+```
+
+Expected result: `beta-run` runs a deterministic simulated multi-day workflow
+against an isolated real mnemos store; `inspect` writes a static offline HTML
+inventory with search/filter/drill-down; `graph` writes a static offline HTML
+domain relationship graph. No server or network is required for the generated
+HTML files.
+
+## Evidence-oriented comparison
+
+The table below compares mnemos by local, repo-verifiable capabilities. It is
+not a performance benchmark against external tools.
+
+| Dimension | mnemos local evidence | What to verify |
+|---|---|---|
+| Local-first memory store | Markdown/YAML memory items under `wiki/` and `.agent/`, plus SQLite FTS runtime state | `mnemos install .`, [wiki repo structure](#wiki-repo-structure) |
+| Stable host/provider contract | JSON commands for capture, search, context, read, GC, capabilities, and version | `mnemos capabilities --json`, [Stable Provider Contract](#stable-provider-contract) |
+| Host adapters | Built-in `ClaudeCodeAdapter` and `CursorAdapter`; host status includes Claude, Claude Code, Cursor, and Codex | `core/adapters/`, `core/provider.py` |
+| Lifecycle policy | Policy-managed layers and stages from transient/session/project/global through archive/forget | [Memory Lifecycle](#memory-lifecycle) |
+| Deterministic evidence harness | `mnemos beta-run --days 14 --seed 42` sample: 46 captures, continuity recall `1.0`, relevance stability `1.0`, lifecycle violations `0`, degradation detected and recovered | [Beta Validation Harness](docs/beta-validation.md) |
+| Offline inspection | Static `mnemos inspect` and `mnemos graph` HTML outputs; `mnemos ui` desktop view with optional extras | [Memory Inspection UI](docs/memory-inspection.md), [Domain-Relationship Graph View](docs/domain-graph-view.md), [Unified Inspection UI](docs/unified-inspection-ui.md) |
+| Backup, restore, and sync | Portable backup/restore commands plus git-backed remote sync | [Backup & Restore](docs/backup-restore.md), [Remote Sync](docs/remote-sync.md) |
+
+The documented beta-run numbers are a deterministic harness sample, not a
+universal claim that mnemos is faster, more accurate, or production-grade for
+every repository. Re-run the harness and inspect the JSON report for your own
+acceptance criteria.
+
+## How mnemos differs from llmwiki and codegraph-style tools
+
+External projects change, so compare current versions directly before making a
+tooling decision. Based on mnemos' local architecture, the difference is intent:
+
+- llmwiki-like tools are usually centered on wiki or knowledge organization.
+- codegraph-like tools are usually centered on code structure and relationship
+  analysis.
+- mnemos is centered on host-installable memory lifecycle: a CLI/provider JSON
+  contract, policy-managed memory layers, host instructions/hooks where the host
+  supports them, offline inspection/evidence surfaces, and backup/sync.
+
+This README does not claim mnemos is a superset or replacement for those
+categories. It claims mnemos owns a different boundary: durable operational
+memory for AI coding agents.
 
 ## Directory Structure
 
@@ -212,6 +320,19 @@ available hosts and writes mnemos-managed marker blocks:
 The managed blocks describe capture, search, read, and GC behavior independently
 of agent-crew. When a host lacks hook support or expected config files, install
 skips that host-specific surface without failing the repo scaffold.
+
+Host capability status is exposed by `mnemos capabilities --json`:
+
+| Host | Locally supported surface |
+|---|---|
+| Claude / Claude Code | Autonomous capture, context injection, and daemon runtime are marked `supported`; the built-in Claude Code adapter manages `CLAUDE.md` and `settings.json` hooks when safe host files exist. |
+| Cursor | Daemon runtime is marked `supported`; autonomous capture is `unsupported`; context injection is `unknown`; the built-in Cursor adapter manages rules files only. |
+| Codex | Daemon runtime is marked `supported`; autonomous capture is `unsupported`; context injection is `unknown`; this repository exposes provider-contract compatibility but does not ship a built-in Codex adapter. |
+
+MCP-style integrations should treat mnemos as a stable subprocess/provider
+contract: call `mnemos capture/search/context/read/... --json`, inspect
+`mnemos capabilities --json`, and avoid direct reads from `.agent/`, `wiki/`,
+or SQLite internals. This repository does not claim to ship an MCP server.
 
 ## Memory Lifecycle
 
