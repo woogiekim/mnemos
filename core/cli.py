@@ -2393,6 +2393,403 @@ def memory_ingest_claude_md(
                 )
 
 
+def _echo_source_ingest_report(label: str, report: object, *, dry_run: bool) -> None:
+    """Print a human-readable source-adapter ingestion report."""
+    created = list(getattr(report, "created", []))
+    updated = list(getattr(report, "updated", []))
+    skipped = list(getattr(report, "skipped", []))
+
+    if dry_run:
+        for source_file in created:
+            click.echo(f"[dry-run] would ingest {label}: {source_file}")
+        for source_file in updated:
+            click.echo(f"[dry-run] would update {label}: {source_file}")
+        for source_file in skipped:
+            click.echo(f"[dry-run] would skip {label} (unchanged): {source_file}")
+        click.echo(
+            f"[dry-run] {label}: {len(created)} new, "
+            f"{len(updated)} updated, {len(skipped)} skipped"
+        )
+        return
+
+    for item_id in created:
+        click.echo(f"{label} created: {item_id}")
+    for item_id in updated:
+        click.echo(f"{label} updated: {item_id}")
+    for item_id in skipped:
+        click.echo(f"{label} skipped (unchanged): {item_id}")
+    click.echo(
+        f"{label}: {len(created)} created, "
+        f"{len(updated)} updated, {len(skipped)} skipped "
+        f"({len(created) + len(updated) + len(skipped)} file(s) processed)"
+    )
+
+
+@cli.command("ingest-docs")
+@click.argument(
+    "source_dir",
+    type=click.Path(file_okay=False, dir_okay=True, exists=True),
+)
+@click.option("--layer", default="project", help="Target memory layer (default: project).")
+@click.option("--run-id", "run_id", default="docs-folder-ingest", help="Run ID for layer scoping.")
+@click.option(
+    "--no-recursive",
+    "no_recursive",
+    is_flag=True,
+    default=False,
+    help="Only scan files directly inside SOURCE_DIR.",
+)
+@click.option(
+    "--limit",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Maximum number of discovered files to ingest.",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Preview what would be ingested without writing to the memory store.",
+)
+def memory_ingest_docs(
+    source_dir: str,
+    layer: str,
+    run_id: str,
+    no_recursive: bool,
+    limit: int | None,
+    dry_run: bool,
+) -> None:
+    """Turn a folder of documents into source-backed memory items."""
+    from agents.source_adapters import DocumentFolderScanner, SourceMemoryIngestor
+
+    scanner = DocumentFolderScanner(
+        source_dir,
+        layer=layer,
+        recursive=not no_recursive,
+    )
+    candidates = scanner.discover()
+    if limit is not None:
+        candidates = candidates[:limit]
+    if not candidates:
+        click.echo("no supported document files found")
+        return
+
+    try:
+        report = SourceMemoryIngestor(_get_gateway()).ingest(
+            candidates,
+            run_id=run_id,
+            dry_run=dry_run,
+        )
+    except PolicyViolationError as exc:
+        click.echo(f"error: policy violation — {exc}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    _echo_source_ingest_report("docs", report, dry_run=dry_run)
+
+
+@cli.command("scan-code")
+@click.argument(
+    "source_dir",
+    type=click.Path(file_okay=False, dir_okay=True, exists=True),
+)
+@click.option("--layer", default="project", help="Target memory layer (default: project).")
+@click.option("--run-id", "run_id", default="codebase-scan", help="Run ID for layer scoping.")
+@click.option(
+    "--no-recursive",
+    "no_recursive",
+    is_flag=True,
+    default=False,
+    help="Only scan files directly inside SOURCE_DIR.",
+)
+@click.option(
+    "--limit",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Maximum number of discovered files to ingest.",
+)
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    default=False,
+    help="Preview what would be ingested without writing to the memory store.",
+)
+def memory_scan_code(
+    source_dir: str,
+    layer: str,
+    run_id: str,
+    no_recursive: bool,
+    limit: int | None,
+    dry_run: bool,
+) -> None:
+    """Create lightweight code-structure memory from a source tree."""
+    from agents.source_adapters import CodebaseScanner, SourceMemoryIngestor
+
+    scanner = CodebaseScanner(
+        source_dir,
+        layer=layer,
+        recursive=not no_recursive,
+    )
+    candidates = scanner.discover()
+    if limit is not None:
+        candidates = candidates[:limit]
+    if not candidates:
+        click.echo("no supported code files found")
+        return
+
+    try:
+        report = SourceMemoryIngestor(_get_gateway()).ingest(
+            candidates,
+            run_id=run_id,
+            dry_run=dry_run,
+        )
+    except PolicyViolationError as exc:
+        click.echo(f"error: policy violation — {exc}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    _echo_source_ingest_report("code", report, dry_run=dry_run)
+
+
+@cli.group("project-context")
+def project_context_group() -> None:
+    """Index and recall durable markdown project-context sections."""
+
+
+@project_context_group.command("capture")
+@click.argument(
+    "source",
+    type=click.Path(file_okay=True, dir_okay=True, exists=True),
+)
+@click.option("--project-id", required=True, help="Stable project identifier.")
+@click.option(
+    "--project-root",
+    default=".",
+    type=click.Path(file_okay=False, dir_okay=True, exists=True),
+    help="Project root used for root-hash identity and relative source paths.",
+)
+@click.option("--kind", default="context", help="Default section kind when file name has no known kind.")
+@click.option("--layer", default="project", help="Target memory layer (default: project).")
+@click.option("--run-id", default="project-context", help="Run ID for layer scoping.")
+@click.option("--tag", "tags", multiple=True, help="Additional tags to attach (repeatable).")
+@click.option("--source-revision", default=None, help="Optional source revision/git SHA.")
+@click.option(
+    "--no-recursive",
+    "no_recursive",
+    is_flag=True,
+    default=False,
+    help="Only scan markdown files directly inside SOURCE.",
+)
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Preview without writing.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output structured JSON.")
+def project_context_capture(
+    source: str,
+    project_id: str,
+    project_root: str,
+    kind: str,
+    layer: str,
+    run_id: str,
+    tags: tuple[str, ...],
+    source_revision: str | None,
+    no_recursive: bool,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Capture or update markdown project-context sections."""
+    from agents.source_adapters import ProjectContextIngestor, ProjectContextScanner
+
+    scanner = ProjectContextScanner(
+        source,
+        project_id=project_id,
+        project_root=project_root,
+        kind=kind,
+        recursive=not no_recursive,
+        tags=tags,
+        source_revision=source_revision,
+    )
+    sections = scanner.discover()
+    if not sections:
+        payload = {"status": "ok", "created": [], "updated": [], "skipped": [], "section_count": 0}
+        if as_json:
+            _echo_json(payload)
+        else:
+            click.echo("no markdown project-context sections found")
+        return
+
+    try:
+        report = ProjectContextIngestor(_get_gateway()).ingest(
+            sections,
+            layer=layer,
+            run_id=run_id,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        payload = {
+            "status": "degraded",
+            "created": [],
+            "updated": [],
+            "skipped": [],
+            "section_count": len(sections),
+            "degraded_reasons": [str(exc)],
+        }
+        if as_json:
+            _echo_json(payload)
+            return
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(1)
+
+    payload = {
+        "status": "ok",
+        "section_count": len(sections),
+        "created": report.created,
+        "updated": report.updated,
+        "skipped": report.skipped,
+    }
+    if as_json:
+        _echo_json(payload)
+        return
+
+    _echo_source_ingest_report("project-context", report, dry_run=dry_run)
+
+
+@project_context_group.command("recall")
+@click.argument("query")
+@click.option("--project-id", default=None, help="Filter by stable project identifier.")
+@click.option("--project-root-hash", default=None, help="Filter by project root hash.")
+@click.option(
+    "--project-root",
+    default=None,
+    type=click.Path(file_okay=False, dir_okay=True, exists=True),
+    help="Compute and filter by this project root hash.",
+)
+@click.option("--kind", default=None, help="Filter by project-context kind.")
+@click.option("--tag", "tags", multiple=True, help="Additional required tag filter (repeatable).")
+@click.option("--active-file", "active_files", multiple=True, help="Active file hint for query enrichment.")
+@click.option("--agent-role", default=None, help="Agent role hint for query enrichment.")
+@click.option("--context-tag", "context_tags", multiple=True, help="Context tag hint for query enrichment.")
+@click.option("--layers", "--layer", "layers", default="project,global", help="Comma-separated layers.")
+@click.option("--limit", default=10, type=click.IntRange(min=1), help="Maximum recall results.")
+@click.option("--trace-json", "trace_json", is_flag=True, default=False, help="Include recall trace JSON.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output structured JSON.")
+def project_context_recall(
+    query: str,
+    project_id: str | None,
+    project_root_hash: str | None,
+    project_root: str | None,
+    kind: str | None,
+    tags: tuple[str, ...],
+    active_files: tuple[str, ...],
+    agent_role: str | None,
+    context_tags: tuple[str, ...],
+    layers: str,
+    limit: int,
+    trace_json: bool,
+    as_json: bool,
+) -> None:
+    """Recall durable project-context sections as structured records."""
+    from agents.source_adapters import ProjectContextRecaller, project_root_hash as hash_project_root
+
+    root_hash = project_root_hash
+    if project_root:
+        root_hash = hash_project_root(project_root)
+    layer_list = [layer.strip() for layer in layers.split(",") if layer.strip()]
+
+    report = ProjectContextRecaller(_get_gateway()).recall(
+        query,
+        project_id=project_id,
+        project_root_hash_value=root_hash,
+        kind=kind,
+        tags=tags,
+        active_files=active_files,
+        agent_role=agent_role,
+        context_tags=context_tags,
+        layers=layer_list,
+        limit=limit,
+    )
+
+    if as_json or trace_json:
+        payload = report.to_dict()
+        if not trace_json:
+            payload.pop("trace", None)
+        _echo_json(payload)
+        return
+
+    if not report.results:
+        click.echo("no project-context results found")
+        return
+
+    for result in report.results:
+        preview = _truncate_content(result.content, width=120)
+        click.echo(f"{result.memory_id} {result.source_path}#{result.source_section}: {preview}")
+
+
+@project_context_group.command("audit")
+@click.argument(
+    "source",
+    type=click.Path(file_okay=True, dir_okay=True, exists=True),
+)
+@click.option("--project-id", required=True, help="Stable project identifier.")
+@click.option(
+    "--project-root",
+    default=".",
+    type=click.Path(file_okay=False, dir_okay=True, exists=True),
+    help="Project root used for root-hash identity and relative source paths.",
+)
+@click.option("--kind", default="context", help="Default section kind when file name has no known kind.")
+@click.option("--layer", default="project", help="Memory layer to audit.")
+@click.option("--tag", "tags", multiple=True, help="Additional context tags (repeatable).")
+@click.option("--source-revision", default=None, help="Optional expected source revision/git SHA.")
+@click.option(
+    "--no-recursive",
+    "no_recursive",
+    is_flag=True,
+    default=False,
+    help="Only scan markdown files directly inside SOURCE.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output structured JSON.")
+def project_context_audit(
+    source: str,
+    project_id: str,
+    project_root: str,
+    kind: str,
+    layer: str,
+    tags: tuple[str, ...],
+    source_revision: str | None,
+    no_recursive: bool,
+    as_json: bool,
+) -> None:
+    """Report stale, missing, and not-yet-indexed project-context sections."""
+    from agents.source_adapters import ProjectContextAuditor, ProjectContextScanner
+
+    sections = ProjectContextScanner(
+        source,
+        project_id=project_id,
+        project_root=project_root,
+        kind=kind,
+        recursive=not no_recursive,
+        tags=tags,
+        source_revision=source_revision,
+    ).discover()
+    report = ProjectContextAuditor(_get_gateway()).audit(sections, layer=layer)
+    payload = report.to_dict()
+
+    if as_json:
+        _echo_json(payload)
+        return
+
+    click.echo(
+        "project-context audit: "
+        f"{payload['fresh_count']} fresh, {payload['stale_count']} stale, "
+        f"{payload['missing_count']} missing, {payload['not_indexed_count']} not indexed"
+    )
+
+
 @cli.group("sync")
 def sync_group() -> None:
     """Multi-host Obsidian vault git sync commands.
