@@ -39,6 +39,11 @@ CAPABILITIES: dict[str, bool | str] = {
     "retrieval_backend_health": "supported",
     "retrieval_degradation_evidence": "supported",
     "memory_os_readiness_audit": "supported",
+    "source_document_ingestion": "supported",
+    "source_code_scan": "supported",
+    "project_context_section_capture": "supported",
+    "project_context_recall": "supported",
+    "project_context_freshness_audit": "supported",
 }
 
 
@@ -89,6 +94,11 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "retrieval_backend_health": "mnemos memory-backends reports FTS, vector, and fallback retrieval health.",
     "retrieval_degradation_evidence": "Search and Memory OS evidence expose backend degradation, vector availability, and fallback use.",
     "memory_os_readiness_audit": "mnemos memory-readiness aggregates metrics, validation, backend health, evidence freshness, and remediation gaps.",
+    "source_document_ingestion": "mnemos ingest-docs captures document folders as source-backed memory items.",
+    "source_code_scan": "mnemos scan-code captures lightweight code-structure memory from source files.",
+    "project_context_section_capture": "mnemos project-context capture indexes durable markdown sections with stable source metadata.",
+    "project_context_recall": "mnemos project-context recall returns structured project-scoped section recall records and traces.",
+    "project_context_freshness_audit": "mnemos project-context audit reports stale or missing indexed sections relative to markdown sources.",
 }
 
 HOST_CAPABILITY_STATUS: dict[str, dict[str, str]] = {

@@ -64,6 +64,14 @@ mnemos capture --layer global --content "The capital of France is Paris." --tag 
 # Ingest CLAUDE.md files (global and project-scoped)
 mnemos ingest-claude-md --project-root .
 
+# Turn docs and code structure into memory sources
+mnemos ingest-docs ./docs
+mnemos scan-code ./core
+
+# Index durable markdown project-context sections
+mnemos project-context capture ./project-context --project-id mnemos --json
+mnemos project-context recall "architecture map" --project-id mnemos --trace-json
+
 # Search memories
 mnemos search "capital France"
 
@@ -78,7 +86,7 @@ mnemos archive <item-id>
 mnemos forget <item-id>
 ```
 
-## Three killer demos
+## Five practical demos
 
 ### 1. Capture, search, and read through the provider contract
 
@@ -121,7 +129,55 @@ adapter documents no equivalent hooks API. `mnemos context --render` emits a
 bounded `<mnemos-context>` block that hosts can inject without reading storage
 paths.
 
-### 3. Produce operational evidence and inspect the store offline
+### 3. Treat docs and code structure as memory sources
+
+Use this flow when a repo already has useful documentation or when an agent
+needs a quick structural map of a codebase before a coding session:
+
+```bash
+mnemos ingest-docs ./docs
+mnemos scan-code ./core
+mnemos search "source docs architecture"
+```
+
+Expected result: `ingest-docs` captures supported document files as
+source-backed project memories, and `scan-code` captures lightweight structural
+summaries of code files, including detected symbols and imports. These commands
+position document folders and code structure as inputs to mnemos' memory
+lifecycle. They are not full replacements for dedicated wiki generators or
+language-aware codegraph engines. See [Source Adapters](docs/source-adapters.md).
+
+### 4. Recall durable project-context sections
+
+Use this flow when a project keeps its canonical agent context in reviewed
+markdown files such as `project-map.md`, `architecture.md`, `decisions.md`,
+`workflows.md`, `domain-glossary.md`, and `open-risks.md`:
+
+```bash
+mnemos project-context capture ./project-context \
+  --project-id mnemos \
+  --tag agent-crew \
+  --source-revision "$(git rev-parse HEAD)" \
+  --json
+
+mnemos project-context recall "How should backend agents handle search fallback?" \
+  --project-id mnemos \
+  --kind architecture \
+  --active-file core/search.py \
+  --agent-role backend \
+  --trace-json
+
+mnemos project-context audit ./project-context --project-id mnemos --json
+```
+
+Expected result: durable markdown remains the source of truth, while mnemos
+indexes each heading section with stable IDs and source metadata. Recall JSON
+returns `memory_id`, `score`, `content`, `source_path`, `source_section`,
+`tags`, `updated_at`, and optional `source_revision`, plus a trace that
+orchestrators can store with task audit logs. Audit JSON reports stale,
+missing, and not-yet-indexed sections.
+
+### 5. Produce operational evidence and inspect the store offline
 
 Use this flow when you need evidence that the memory layer behaves consistently
 over time, plus a human-readable view of stored memories:
@@ -149,6 +205,7 @@ not a performance benchmark against external tools.
 | Stable host/provider contract | JSON commands for capture, search, context, read, GC, capabilities, and version | `mnemos capabilities --json`, [Stable Provider Contract](#stable-provider-contract) |
 | Host adapters | Built-in `ClaudeCodeAdapter` and `CursorAdapter`; host status includes Claude, Claude Code, Cursor, and Codex | `core/adapters/`, `core/provider.py` |
 | Lifecycle policy | Policy-managed layers and stages from transient/session/project/global through archive/forget | [Memory Lifecycle](#memory-lifecycle) |
+| Source adapters | `mnemos ingest-docs`, `mnemos scan-code`, and `mnemos project-context` turn documents, code structure, and durable markdown context sections into source-backed memory items | [Source Adapters](docs/source-adapters.md) |
 | Deterministic evidence harness | `mnemos beta-run --days 14 --seed 42` sample: 46 captures, continuity recall `1.0`, relevance stability `1.0`, lifecycle violations `0`, degradation detected and recovered | [Beta Validation Harness](docs/beta-validation.md) |
 | Offline inspection | Static `mnemos inspect` and `mnemos graph` HTML outputs; `mnemos ui` desktop view with optional extras | [Memory Inspection UI](docs/memory-inspection.md), [Domain-Relationship Graph View](docs/domain-graph-view.md), [Unified Inspection UI](docs/unified-inspection-ui.md) |
 | Backup, restore, and sync | Portable backup/restore commands plus git-backed remote sync | [Backup & Restore](docs/backup-restore.md), [Remote Sync](docs/remote-sync.md) |
@@ -169,6 +226,12 @@ tooling decision. Based on mnemos' local architecture, the difference is intent:
 - mnemos is centered on host-installable memory lifecycle: a CLI/provider JSON
   contract, policy-managed memory layers, host instructions/hooks where the host
   supports them, offline inspection/evidence surfaces, and backup/sync.
+- `mnemos ingest-docs` and `mnemos scan-code` intentionally treat docs and code
+  structure as memory sources. The product strategy is to remember and retrieve
+  those inputs inside agent workflows, not to compete head-on as a prettier
+  public wiki renderer or a full language-server codegraph.
+- `mnemos project-context` intentionally keeps markdown files canonical and
+  uses mnemos as the retrieval/index layer for section-level agent context.
 
 This README does not claim mnemos is a superset or replacement for those
 categories. It claims mnemos owns a different boundary: durable operational
@@ -215,6 +278,7 @@ mnemos/
 |---|---|
 | `agents/scanner.py` | ClaudeMdScanner — discovers `~/.claude/CLAUDE.md` and `<project>/CLAUDE.md` for ingestion |
 | `agents/ingest.py` | IngestAgent — reads raw/sources/ (or explicit file list) and captures each document into memory |
+| `agents/source_adapters.py` | Source adapters — turn document folders and code files into source-backed memory candidates |
 | `agents/writer.py` | WriterAgent — generates or rewrites wiki entries from captured memories |
 | `agents/linker.py` | LinkerAgent — detects `[[wikilink]]` cross-references and adds backlinks |
 | `agents/contradiction.py` | ContradictionAgent — detects conflicting claims in `wiki/claims/`, writes `.agent/reports/contradictions.md` |
@@ -240,6 +304,11 @@ mnemos/
 | `mnemos capabilities --json` | Print stable machine-readable provider features |
 | `mnemos version --json` | Print version and compatibility metadata |
 | `mnemos ingest-claude-md` | Discover and ingest CLAUDE.md files into memory |
+| `mnemos ingest-docs SOURCE_DIR` | Ingest supported document files as source-backed memories |
+| `mnemos scan-code SOURCE_DIR` | Capture lightweight code-structure memories from source files |
+| `mnemos project-context capture SOURCE` | Capture or update markdown project-context sections with stable source metadata |
+| `mnemos project-context recall QUERY` | Return structured project-scoped recall results and trace JSON |
+| `mnemos project-context audit SOURCE` | Report stale, missing, and not-yet-indexed project-context section captures |
 
 ## Stable Provider Contract
 
@@ -249,6 +318,7 @@ mnemos storage paths, SQLite FTS tables, or Markdown filenames directly.
 ```bash
 mnemos capture --json --content "Architecture decision..." --layer project
 mnemos search --fast --json --limit 5 "architecture decision"
+mnemos project-context recall "architecture decision" --project-id my-project --trace-json
 mnemos read --json <item-id>
 mnemos gc --json --dry-run
 mnemos capabilities --json
@@ -283,6 +353,13 @@ Host callers should run provider commands with their own subprocess timeout and
 treat timeout expiration as an unknown result, not as evidence of no memory.
 Provider JSON never requires prompts or direct reads of `.agent/`, `wiki/`, or
 SQLite internals.
+
+`mnemos project-context recall --trace-json` is the stable structured recall
+surface for agent-workflow project context. Each result includes `memory_id`,
+`score`, `content`, `source_path`, `source_section`, `tags`, `updated_at`, and
+optional `source_revision`. The trace lists the memory IDs and source sections
+used so an orchestrator can cite the original markdown and reload it when
+needed.
 
 Capability names are part of the stable provider contract for compatibility
 checks:
