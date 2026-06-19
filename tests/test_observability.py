@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import datetime
 import time
 from pathlib import Path
 
@@ -219,18 +220,24 @@ class TestAggregateStats:
     def _seed_stats(self, obs_root) -> None:
         """Write known entries for stats aggregation testing."""
         log_path = obs_root / ".agent" / "observability.jsonl"
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        def days_ago(days: int, time_part: str) -> str:
+            day = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+            return f"{day}T{time_part}Z"
+
         entries = [
-            {"ts": "2026-05-14T10:00:00Z", "event": "capture", "agent": "claude",
+            {"ts": days_ago(2, "10:00:00"), "event": "capture", "agent": "claude",
              "session_id": "s1", "layer": "project", "memory_id": "m1", "tags": []},
-            {"ts": "2026-05-14T10:01:00Z", "event": "capture", "agent": "claude",
+            {"ts": days_ago(2, "10:01:00"), "event": "capture", "agent": "claude",
              "session_id": "s1", "layer": "global", "memory_id": "m2", "tags": []},
-            {"ts": "2026-05-14T10:02:00Z", "event": "hook_search", "agent": "claude",
+            {"ts": days_ago(2, "10:02:00"), "event": "hook_search", "agent": "claude",
              "session_id": "s1", "keywords": ["mnemos", "memory"],
              "results": [{"id": "m1", "score": 0.9}], "result_count": 1},
-            {"ts": "2026-05-15T11:00:00Z", "event": "hook_search", "agent": "claude",
+            {"ts": days_ago(1, "11:00:00"), "event": "hook_search", "agent": "claude",
              "session_id": "s2", "keywords": ["mnemos"],
              "results": [{"id": "m1", "score": 0.8}, {"id": "m2", "score": 0.6}], "result_count": 2},
-            {"ts": "2026-05-10T08:00:00Z", "event": "gc", "agent": "unknown",
+            {"ts": days_ago(5, "08:00:00"), "event": "gc", "agent": "unknown",
              "session_id": "", "archived_count": 3, "dry_run": False, "layers": []},
         ]
         for e in entries:

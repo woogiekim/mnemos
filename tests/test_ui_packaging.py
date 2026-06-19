@@ -35,16 +35,37 @@ TEMPLATE_REL_PATH = "core/templates/ui.html"
 SAMPLE_REPO_ROOT = PROJECT_ROOT / "repo"
 
 
+def _build_env() -> dict[str, str]:
+    """Return an env where build subprocesses can see pytest's site packages."""
+    env = os.environ.copy()
+    import_paths = [p for p in sys.path if p and "site-packages" in p]
+    existing = env.get("PYTHONPATH", "")
+    if existing:
+        import_paths.append(existing)
+    if import_paths:
+        env["PYTHONPATH"] = os.pathsep.join(import_paths)
+    return env
+
+
 def _build_wheel(tmp_path: Path) -> Path:
     """Build a wheel from PROJECT_ROOT into tmp_path; return the .whl path."""
     outdir = tmp_path / "dist"
     outdir.mkdir()
 
     subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(outdir)],
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
+            str(outdir),
+        ],
         check=True,
         cwd=str(PROJECT_ROOT),
         capture_output=True,
+        env=_build_env(),
     )
 
     wheels = sorted(outdir.glob("*.whl"))

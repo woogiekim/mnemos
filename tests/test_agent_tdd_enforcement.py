@@ -291,11 +291,19 @@ class TestBackendSkillPaths:
             "The old (broken) path `~/.agent-crew/agents/skills/tdd.md` no longer exists — "
             "the correct path is `~/.agent-crew/system/agents/skills/tdd.md`"
         )
+        concrete_skill_paths = [
+            path for path in abs_skill_paths if "<" not in path and ">" not in path
+        ]
+        assert concrete_skill_paths, (
+            "backend.md must reference at least one concrete absolute skill file "
+            "path in addition to any documented placeholder templates."
+        )
+
         # Expand ~ against the developer's REAL home (the autouse HOME-isolation
         # fixture redirects Path.home() to a temp dir; this test checks real
         # on-disk asset reachability, not CLI home resolution). Issue #70.
         real_home, _ = real_home_snapshot
-        for raw_path in abs_skill_paths:
+        for raw_path in concrete_skill_paths:
             expanded = Path(raw_path.replace("~", str(real_home)))
             assert expanded.exists(), (
                 f"Skill file referenced in backend.md does not exist: {raw_path}\n"

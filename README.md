@@ -203,7 +203,7 @@ not a performance benchmark against external tools.
 |---|---|---|
 | Local-first memory store | Markdown/YAML memory items under `wiki/` and `.agent/`, plus SQLite FTS runtime state | `mnemos install .`, [wiki repo structure](#wiki-repo-structure) |
 | Stable host/provider contract | JSON commands for capture, search, context, read, GC, capabilities, and version | `mnemos capabilities --json`, [Stable Provider Contract](#stable-provider-contract) |
-| Host adapters | Built-in `ClaudeCodeAdapter` and `CursorAdapter`; host status includes Claude, Claude Code, Cursor, and Codex | `core/adapters/`, `core/provider.py` |
+| Host adapters | Built-in `ClaudeCodeAdapter`, `CursorAdapter`, and `CodexAdapter`; host status includes Claude, Claude Code, Cursor, and Codex | `core/adapters/`, `core/provider.py` |
 | Lifecycle policy | Policy-managed layers and stages from transient/session/project/global through archive/forget | [Memory Lifecycle](#memory-lifecycle) |
 | Source adapters | `mnemos ingest-docs`, `mnemos scan-code`, and `mnemos project-context` turn documents, code structure, and durable markdown context sections into source-backed memory items | [Source Adapters](docs/source-adapters.md) |
 | Deterministic evidence harness | `mnemos beta-run --days 14 --seed 42` sample: 46 captures, continuity recall `1.0`, relevance stability `1.0`, lifecycle violations `0`, degradation detected and recovered | [Beta Validation Harness](docs/beta-validation.md) |
@@ -393,6 +393,7 @@ available hosts and writes mnemos-managed marker blocks:
 - Claude Code: `~/.claude/CLAUDE.md` plus `~/.claude/settings.json` hooks when
   those files exist.
 - Cursor: `~/.cursor/rules` or `~/.cursor/rules.md` when present.
+- Codex: `~/.codex/AGENTS.md` when present.
 
 The managed blocks describe capture, search, read, and GC behavior independently
 of agent-crew. When a host lacks hook support or expected config files, install
@@ -404,7 +405,7 @@ Host capability status is exposed by `mnemos capabilities --json`:
 |---|---|
 | Claude / Claude Code | Autonomous capture, context injection, and daemon runtime are marked `supported`; the built-in Claude Code adapter manages `CLAUDE.md` and `settings.json` hooks when safe host files exist. |
 | Cursor | Daemon runtime is marked `supported`; autonomous capture is `unsupported`; context injection is `unknown`; the built-in Cursor adapter manages rules files only. |
-| Codex | Daemon runtime is marked `supported`; autonomous capture is `unsupported`; context injection is `unknown`; this repository exposes provider-contract compatibility but does not ship a built-in Codex adapter. |
+| Codex | Daemon runtime is marked `supported`; autonomous capture is `unsupported`; context injection is `unknown`; the built-in Codex adapter manages `AGENTS.md` behavior instructions but does not claim hook-based context injection. |
 
 MCP-style integrations should treat mnemos as a stable subprocess/provider
 contract: call `mnemos capture/search/context/read/... --json`, inspect

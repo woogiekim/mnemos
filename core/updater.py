@@ -411,7 +411,7 @@ def run_update(
     home: Optional[Path] = None,
 ) -> int:
     """Run the full update sequence.  Returns exit code (0 = success)."""
-    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+    from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
 
     if home is None:
         home = Path.home()
@@ -481,7 +481,7 @@ def run_update(
     # -- 3. Replace managed blocks via adapters (run ALL — not filtered by is_present) --
     print("\n── updating managed config blocks ───────────────────────────────")
 
-    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter(), CodexAdapter()]
     for adapter in adapter_list:
         try:
             messages = adapter.update(home)

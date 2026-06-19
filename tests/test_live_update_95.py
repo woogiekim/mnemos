@@ -104,6 +104,27 @@ def test_start_noop_when_paths_empty() -> None:
     watcher.stop()  # idempotent
 
 
+def test_start_noop_when_watchdog_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing optional watchdog dependency disables live updates without crash."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name.startswith("watchdog"):
+            raise ModuleNotFoundError("No module named 'watchdog'", name="watchdog")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    watcher = LiveWatcher(paths=[tmp_path], debounce_ms=100, on_rebuild=lambda: None)
+    watcher.start()
+
+    assert watcher._observer is None
+
+
 def test_stop_is_idempotent(tmp_path: Path) -> None:
     """stop() before start() and double-stop both safe."""
     watcher = LiveWatcher(paths=[tmp_path], debounce_ms=100, on_rebuild=lambda: None)

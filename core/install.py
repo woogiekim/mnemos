@@ -120,7 +120,7 @@ def install(path: Path, home: Optional[Path] = None) -> None:
               Adapters are only run when their host is detected via
               ``adapter.is_present(home)``.
     """
-    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+    from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
 
     path = path.resolve()
     if home is None:
@@ -161,7 +161,7 @@ def install(path: Path, home: Optional[Path] = None) -> None:
     _install_zshrc(home, repo_root=str(path))
 
     # -- Host adapters (only run if host is present) ----------------------
-    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter(), CodexAdapter()]
     for adapter in adapter_list:
         if adapter.is_present(home):
             messages = adapter.install(home)

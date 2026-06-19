@@ -5,7 +5,8 @@ Removal targets:
                                  containing mnemos commands (PostToolUse, UserPromptSubmit)
   2. ~/.claude/CLAUDE.md      — <!-- mnemos-start --> … <!-- mnemos-end --> block
   3. ~/.cursor/rules or rules.md — <!-- mnemos:start --> … <!-- mnemos:end --> block
-  4. ~/.zshrc                 — export MNEMOS_REPO_ROOT=... line (+ optional comment)
+  4. ~/.codex/AGENTS.md       — <!-- mnemos:start --> ... <!-- mnemos:end --> block
+  5. ~/.zshrc                 — export MNEMOS_REPO_ROOT=... line (+ optional comment)
 
 Safety: only managed sections are touched; surrounding content is preserved.
 """
@@ -168,7 +169,36 @@ def remove_cursor_rules_block(cursor_dir: Path) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# 4. ~/.zshrc
+# 4. ~/.codex/AGENTS.md
+# ---------------------------------------------------------------------------
+
+def remove_codex_agents_block(codex_dir: Path) -> tuple[bool, str]:
+    """Remove the <!-- mnemos:start --> ... <!-- mnemos:end --> block.
+
+    Returns (changed, diff_text).
+    """
+    agents_path = codex_dir / "AGENTS.md"
+    if not agents_path.exists():
+        return False, ""
+
+    original = agents_path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"\n?<!-- mnemos:start -->.*?<!-- mnemos:end -->\n?",
+        re.DOTALL,
+    )
+    updated = pattern.sub("", original)
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+
+    if updated == original:
+        return False, ""
+
+    diff = _unified_diff(str(agents_path), original, updated)
+    agents_path.write_text(updated, encoding="utf-8")
+    return True, diff
+
+
+# ---------------------------------------------------------------------------
+# 5. ~/.zshrc
 # ---------------------------------------------------------------------------
 
 def remove_zshrc_line(zshrc_path: Path) -> tuple[bool, str]:
@@ -330,7 +360,7 @@ def run_uninstall(
 
     Returns exit code (0 = success, 1 = aborted or error).
     """
-    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+    from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
 
     if home is None:
         home = Path.home()
@@ -344,6 +374,7 @@ def run_uninstall(
         home / ".claude" / "settings.json",
         home / ".claude" / "CLAUDE.md",
         home / ".cursor",
+        home / ".codex",
         zshrc_path,
     )
 
@@ -374,7 +405,7 @@ def run_uninstall(
     # Apply changes via adapters (run ALL — not filtered by is_present)
     print("\n── applying changes ──────────────────────────────────────────────")
 
-    adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]
+    adapter_list = [ClaudeCodeAdapter(), CursorAdapter(), CodexAdapter()]
     for adapter in adapter_list:
         try:
             messages = adapter.uninstall(home)
@@ -505,6 +536,24 @@ def _preview_cursor_rules(cursor_dir: Path) -> str:
     return _unified_diff(str(rules_path), original, updated)
 
 
+def _preview_codex_agents(codex_dir: Path) -> str:
+    """Return diff of what would be removed from Codex AGENTS.md (read-only)."""
+    agents_path = codex_dir / "AGENTS.md"
+    if not agents_path.exists():
+        return ""
+
+    original = agents_path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"\n?<!-- mnemos:start -->.*?<!-- mnemos:end -->\n?",
+        re.DOTALL,
+    )
+    updated = pattern.sub("", original)
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+    if updated == original:
+        return ""
+    return _unified_diff(str(agents_path), original, updated)
+
+
 def _preview_zshrc(zshrc_path: Path) -> str:
     """Return diff of what would be removed from .zshrc (read-only)."""
     if not zshrc_path.exists():
@@ -534,6 +583,7 @@ def _collect_diffs_preview(
     settings_path: Path,
     claude_md_path: Path,
     cursor_dir: Path,
+    codex_dir: Path,
     zshrc_path: Path,
 ) -> list[tuple[str, str]]:
     """Collect read-only diffs for all targets."""
@@ -544,6 +594,9 @@ def _collect_diffs_preview(
     rules_path = _find_cursor_rules(cursor_dir)
     cursor_label = str(rules_path) if rules_path else str(cursor_dir / "rules")
     results.append((cursor_label, _preview_cursor_rules(cursor_dir)))
+
+    codex_agents_path = codex_dir / "AGENTS.md"
+    results.append((str(codex_agents_path), _preview_codex_agents(codex_dir)))
 
     results.append((str(zshrc_path), _preview_zshrc(zshrc_path)))
     return results

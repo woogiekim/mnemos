@@ -736,7 +736,7 @@ def memory_delete(item_id: str) -> None:
 def doctor_cmd() -> None:
     """Check all detected host adapters for missing hooks and auto-repair them.
 
-    Scans each known host adapter (Claude Code, Cursor) using is_present() to
+    Scans each known host adapter (Claude Code, Cursor, Codex) using is_present() to
     detect whether the host is active. For every detected adapter, verifies that
     all expected hooks and managed config blocks are registered. Missing hooks
     are automatically re-registered without requiring any flags.
@@ -749,11 +749,11 @@ def doctor_cmd() -> None:
     """
     import os
 
-    from core.adapters import ClaudeCodeAdapter, CursorAdapter
+    from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
     from core.adapters.claude import is_unsafe_repo_root
 
     home = Path.home()
-    adapters = [ClaudeCodeAdapter(), CursorAdapter()]
+    adapters = [ClaudeCodeAdapter(), CursorAdapter(), CodexAdapter()]
 
     all_ok = True
     for adapter in adapters:

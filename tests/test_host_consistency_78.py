@@ -11,7 +11,7 @@ Four acceptance criteria are covered:
   HostAdapter contract + a registry-parity guard against the triplicated
   ``adapter_list``).
 - AC2: context-injection consistency across hosts (``retrieve_context`` /
-  ``render_context_block`` are host-string-agnostic; both adapters install a
+  ``render_context_block`` are host-string-agnostic; adapters install a
   byte-identical behavioral payload).
 - AC3: host-independent memory lifecycle (``MemoryGateway`` capture→search→
   read→promote never branches on host/adapter).
@@ -20,11 +20,11 @@ Four acceptance criteria are covered:
   remote). Reuses the #69 sync helpers from ``tests.test_store_sync`` rather
   than re-implementing bare-repo plumbing.
 
-Documented gaps (not invented): the issue text names a "codex" host, but
-``core/adapters/`` ships only claude + cursor + base — there is NO mnemos codex
-adapter. AC2 validates that ``retrieve_context`` accepts an arbitrary host
-string (including "codex") without requiring an adapter to exist, which is the
-correct host-agnostic behavior. The triplicated ``adapter_list`` registry
+Documented gap (not invented): Codex has a managed behavior-instruction adapter,
+but no autonomous capture or pre-prompt context-injection hook path. AC2
+validates that ``retrieve_context`` accepts host strings without requiring
+hook support, which is the correct host-agnostic behavior. The triplicated
+``adapter_list`` registry
 (install.py / updater.py / uninstaller.py) is a latent drift risk; AC1's
 parity test guards it, and a single-source-registry refactor is recommended as
 a follow-up issue.
@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from core.adapters import ClaudeCodeAdapter, CursorAdapter
+from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
 from core.adapters.base import HostAdapter, MNEMOS_BEHAVIOR_BLOCK
 from core.context import render_context_block, retrieve_context
 from core.gateway import MemoryGateway
@@ -67,13 +67,12 @@ from tests.test_sync_e2e import (
 )
 
 
-# Every supported, concrete host adapter. "base" is the abstract contract; the
-# two concrete adapters below are the full supported set today.
-SUPPORTED_ADAPTERS = [ClaudeCodeAdapter, CursorAdapter]
+# Every supported, concrete host adapter. "base" is the abstract contract.
+SUPPORTED_ADAPTERS = [ClaudeCodeAdapter, CursorAdapter, CodexAdapter]
 
-# Arbitrary host strings exercised by the context-injection ACs. "codex" is the
-# documented-gap host (named in the issue, no adapter ships); "x-arbitrary" is a
-# host that could never have an adapter — both must be accepted host-agnostically.
+# Arbitrary host strings exercised by the context-injection ACs. "codex" has a
+# behavior-instruction adapter but no hook injection path; "x-arbitrary" is a
+# host that could never have an adapter. Both must be accepted host-agnostically.
 HOST_STRINGS = ["claude", "cursor", "codex", "x-arbitrary"]
 
 
@@ -224,6 +223,7 @@ def test_install_is_idempotent_for_each_adapter(tmp_path):
         home = tmp_path / f"home_idem_{sut.name.replace(' ', '_')}"
         (home / ".claude").mkdir(parents=True)
         (home / ".cursor").mkdir(parents=True)
+        (home / ".codex").mkdir(parents=True)
 
         # when installed twice
         sut.install(home)
@@ -244,6 +244,10 @@ _ADAPTER_MARKERS = {
         Path(".cursor") / "rules",
         ("<!-- mnemos:start -->", "<!-- mnemos:end -->"),
     ),
+    "Codex": (
+        Path(".codex") / "AGENTS.md",
+        ("<!-- mnemos:start -->", "<!-- mnemos:end -->"),
+    ),
 }
 
 
@@ -260,6 +264,7 @@ def test_uninstall_removes_the_managed_block_for_each_adapter(tmp_path):
         home = tmp_path / f"home_uninstall_{sut.name.replace(' ', '_')}"
         (home / ".claude").mkdir(parents=True)
         (home / ".cursor").mkdir(parents=True)
+        (home / ".codex").mkdir(parents=True)
 
         managed_file, (start_marker, end_marker) = _ADAPTER_MARKERS[sut.name]
         target = home / managed_file
@@ -279,7 +284,7 @@ def test_adapter_registry_is_identical_across_install_update_uninstall():
     """Guard the triplicated ``adapter_list`` against future drift (latent risk).
 
     install.install(), updater.run_update(), and uninstaller.run_uninstall()
-    each build ``adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]``
+    each build the same adapter_list independently
     independently with no single-source registry. The adapter classes are
     imported INSIDE each function (not module-level), so the parity guard reads
     each function's SOURCE and compares the ``adapter_list`` construction line.
@@ -303,7 +308,7 @@ def test_adapter_registry_is_identical_across_install_update_uninstall():
 
     # then the adapter registry construction is byte-identical at all three sites
     assert install_expr == update_expr == uninstall_expr
-    assert install_expr == "adapter_list = [ClaudeCodeAdapter(), CursorAdapter()]"
+    assert install_expr == "adapter_list = [ClaudeCodeAdapter(), CursorAdapter(), CodexAdapter()]"
 
 
 # ===========================================================================
@@ -381,23 +386,27 @@ def test_render_context_block_emits_identical_memory_lines_across_hosts(tmp_path
     assert normalized_claude == normalized_cursor
 
 
-def test_both_adapters_install_a_byte_identical_behavioral_payload(tmp_path):
+def test_adapters_install_a_byte_identical_behavioral_payload(tmp_path):
     """install() writes the same MNEMOS_BEHAVIOR_BLOCK on disk, modulo delimiter comments."""
     # given a fake home for each adapter with its host config dir present
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".cursor").mkdir(parents=True)
+    (home / ".codex").mkdir(parents=True)
 
-    # when both adapters install their managed block
+    # when adapters install their managed block
     ClaudeCodeAdapter().install(home)
     CursorAdapter().install(home)
+    CodexAdapter().install(home)
 
     claude_md = (home / ".claude" / "CLAUDE.md").read_text()
     cursor_rules = (home / ".cursor" / "rules").read_text()
+    codex_agents = (home / ".codex" / "AGENTS.md").read_text()
 
     # then the payload between the delimiters is byte-identical and equals the
     # canonical shared block — only the delimiter comments differ by adapter.
     assert _strip_delimiters(claude_md) == _strip_delimiters(cursor_rules)
+    assert _strip_delimiters(claude_md) == _strip_delimiters(codex_agents)
     assert _strip_delimiters(claude_md) == MNEMOS_BEHAVIOR_BLOCK.strip()
 
 

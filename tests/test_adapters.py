@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from core.adapters import ClaudeCodeAdapter, CursorAdapter, HostAdapter
+from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter, HostAdapter
 from core.adapters.base import MNEMOS_BEHAVIOR_BLOCK
 from core.adapters.claude import CLAUDE_MD_BLOCK
+from core.adapters.codex import CODEX_AGENTS_BLOCK
 from core.adapters.cursor import CURSOR_RULES_BLOCK
 
 
@@ -57,6 +58,9 @@ class TestHostAdapterInterface:
 
     def test_cursor_adapter_is_host_adapter(self):
         assert isinstance(CursorAdapter(), HostAdapter)
+
+    def test_codex_adapter_is_host_adapter(self):
+        assert isinstance(CodexAdapter(), HostAdapter)
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +616,9 @@ class TestAdapterNames:
     def test_cursor_adapter_name(self):
         assert CursorAdapter().name == "Cursor"
 
+    def test_codex_adapter_name(self):
+        assert CodexAdapter().name == "Codex"
+
 
 # ---------------------------------------------------------------------------
 # Behavioral block parity across adapters
@@ -628,21 +635,37 @@ class TestMnemosBehaviorBlockParity:
         """CURSOR_RULES_BLOCK must embed MNEMOS_BEHAVIOR_BLOCK verbatim."""
         assert MNEMOS_BEHAVIOR_BLOCK in CURSOR_RULES_BLOCK
 
-    def test_both_blocks_contain_capture_rules(self):
-        """Both adapter blocks must include capture instructions."""
-        for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
+    def test_codex_agents_block_contains_behavior_block(self):
+        """CODEX_AGENTS_BLOCK must embed MNEMOS_BEHAVIOR_BLOCK verbatim."""
+        assert MNEMOS_BEHAVIOR_BLOCK in CODEX_AGENTS_BLOCK
+
+    def test_adapter_blocks_contain_capture_rules(self):
+        """Adapter blocks must include capture instructions."""
+        for block, label in [
+            (CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"),
+            (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK"),
+            (CODEX_AGENTS_BLOCK, "CODEX_AGENTS_BLOCK"),
+        ]:
             assert "mnemos capture" in block, f"{label} missing capture instruction"
             assert "Stable project decisions" in block, f"{label} missing capture examples"
             assert "Do NOT capture" in block, f"{label} missing negative capture examples"
 
-    def test_both_blocks_contain_search_rules(self):
-        """Both adapter blocks must include search instructions."""
-        for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
+    def test_adapter_blocks_contain_search_rules(self):
+        """Adapter blocks must include search instructions."""
+        for block, label in [
+            (CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"),
+            (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK"),
+            (CODEX_AGENTS_BLOCK, "CODEX_AGENTS_BLOCK"),
+        ]:
             assert "mnemos search" in block, f"{label} missing search instruction"
 
-    def test_both_blocks_contain_promotion_rules(self):
-        """Both adapter blocks must include layer promotion/selection explanation."""
-        for block, label in [(CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"), (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK")]:
+    def test_adapter_blocks_contain_promotion_rules(self):
+        """Adapter blocks must include layer promotion/selection explanation."""
+        for block, label in [
+            (CLAUDE_MD_BLOCK, "CLAUDE_MD_BLOCK"),
+            (CURSOR_RULES_BLOCK, "CURSOR_RULES_BLOCK"),
+            (CODEX_AGENTS_BLOCK, "CODEX_AGENTS_BLOCK"),
+        ]:
             # Must reference all three user-facing layers
             assert "session" in block, f"{label} missing session layer reference"
             assert "project" in block, f"{label} missing project layer reference"
@@ -674,6 +697,8 @@ class TestMnemosBehaviorBlockParity:
         assert CLAUDE_MD_BLOCK.endswith("<!-- mnemos-end -->")
         assert CURSOR_RULES_BLOCK.startswith("<!-- mnemos:start -->")
         assert CURSOR_RULES_BLOCK.endswith("<!-- mnemos:end -->")
+        assert CODEX_AGENTS_BLOCK.startswith("<!-- mnemos:start -->")
+        assert CODEX_AGENTS_BLOCK.endswith("<!-- mnemos:end -->")
 
     def test_cursor_install_includes_full_capture_rules(self, tmp_path):
         """Cursor install must write the full behavioral block including capture rules."""

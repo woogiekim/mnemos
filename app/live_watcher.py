@@ -85,9 +85,16 @@ class LiveWatcher:
             return
 
         # Lazy import — keeps non-live test paths (e.g. config tests)
-        # importable without the ``[ui]`` extra installed.
-        from watchdog.events import FileSystemEventHandler
-        from watchdog.observers import Observer
+        # importable without the ``[ui]`` extra installed. If watchdog is not
+        # installed, live updates degrade to a no-op instead of crashing app
+        # launch.
+        try:
+            from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
+        except ModuleNotFoundError as exc:
+            if exc.name == "watchdog":
+                return
+            raise
 
         watcher = self  # captured for the inner class
 
