@@ -49,6 +49,7 @@ without any reader-side change.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
 import os
 import tempfile
@@ -117,6 +118,16 @@ class DistillResult:
     sources: tuple[str, ...]
     layer: str
     applied: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class DueAutoDistillResult:
+    """Outcome of draining a due automatic distillation cycle."""
+
+    ran: bool
+    counter_before: int
+    report: dict[str, dict[str, int]] | None = None
+    error: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -514,6 +525,126 @@ def _write_distill_state(path: Path, state: dict[str, Any]) -> None:
             except OSError:
                 pass
         raise
+
+
+def _gateway_distill_interval(gateway: _GatewayLike) -> int:
+    raw_interval = getattr(gateway, "_distill_interval", 25)
+    if isinstance(raw_interval, bool) or not isinstance(raw_interval, int):
+        return 25
+    if raw_interval <= 0:
+        return 25
+    return raw_interval
+
+
+def _log_due_auto_distill(
+    gateway: _GatewayLike,
+    *,
+    trigger: str,
+    success: bool,
+    interval: int,
+    counter_before: int,
+    report: dict[str, dict[str, int]] | None = None,
+    error: str = "",
+) -> None:
+    obs = getattr(gateway, "_obs", None)
+    if obs is None:
+        return
+
+    domains_applied = 0
+    policies_applied = 0
+    if report:
+        domains_applied = report.get("domains", {}).get("applied", 0)
+        policies_applied = report.get("policies", {}).get("applied", 0)
+
+    try:
+        obs.log_auto_distill(
+            success=success,
+            error=error,
+            trigger=trigger,
+            interval=interval,
+            counter_before=counter_before,
+            domains_applied=domains_applied,
+            policies_applied=policies_applied,
+        )
+    except Exception:  # pragma: no cover - observability is best-effort
+        pass
+
+
+def run_due_auto_distill(
+    gateway: _GatewayLike,
+    *,
+    trigger: str = "background",
+) -> DueAutoDistillResult:
+    """Run auto-distill only when the durable capture counter is due.
+
+    ``capture()`` owns only the cheap counter bump. This maintenance seam drains
+    the expensive planner/apply work later and resets the sidecar only after a
+    successful run. Failures are swallowed and leave the due counter intact so a
+    later background check can retry.
+    """
+    state_path = _state_path()
+    state = _read_distill_state(state_path)
+    counter_before = int(state.get("captures_since_last_distill", 0))
+    interval = _gateway_distill_interval(gateway)
+
+    if not getattr(gateway, "_distill_enabled", True):
+        return DueAutoDistillResult(ran=False, counter_before=counter_before)
+    if counter_before < interval:
+        return DueAutoDistillResult(ran=False, counter_before=counter_before)
+    if getattr(gateway, "_in_auto_distill", False):
+        return DueAutoDistillResult(ran=False, counter_before=counter_before)
+
+    previous_in_auto = getattr(gateway, "_in_auto_distill", False)
+    try:
+        setattr(gateway, "_in_auto_distill", True)
+        report = run_auto_distill(gateway)
+    except Exception as exc:  # noqa: BLE001
+        state["captures_since_last_distill"] = counter_before
+        try:
+            _write_distill_state(state_path, state)
+        except Exception:  # pragma: no cover - state-file IO failure
+            pass
+        _log_due_auto_distill(
+            gateway,
+            trigger=trigger,
+            success=False,
+            interval=interval,
+            counter_before=counter_before,
+            error=str(exc),
+        )
+        return DueAutoDistillResult(
+            ran=True,
+            counter_before=counter_before,
+            error=str(exc),
+        )
+    finally:
+        setattr(gateway, "_in_auto_distill", previous_in_auto)
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        _write_distill_state(
+            state_path,
+            {
+                "captures_since_last_distill": 0,
+                "last_distill_at": now_iso,
+            },
+        )
+    except Exception:  # pragma: no cover - state-file IO failure
+        pass
+    _log_due_auto_distill(
+        gateway,
+        trigger=trigger,
+        success=True,
+        interval=interval,
+        counter_before=counter_before,
+        report=report,
+    )
+
+    return DueAutoDistillResult(
+        ran=True,
+        counter_before=counter_before,
+        report=report,
+    )
 
 
 def run_auto_distill(gateway: _GatewayLike) -> dict[str, dict[str, int]]:

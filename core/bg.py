@@ -31,6 +31,7 @@ Public API
 - ``touch_timestamp()`` — record that a run just happened
 - ``run_gc(repo_root, **kwargs)`` — thin wrapper around GarbageCollector
 - ``run_auto_promote(repo_root)`` — call gateway.consolidate()
+- due auto-distill draining — run expensive distillation only when capture marked it due
 - ``find_duplicates(repo_root, layers, similarity_threshold)`` — hash-based dedup
 - ``BackgroundCheckResult`` — dataclass summarising a full check run
 - ``run_background_check(repo_root, ...)`` — orchestrates all operations and
@@ -180,9 +181,10 @@ def run_gc(
 def run_auto_promote(repo_root: str) -> int:
     """Sweep all memories and auto-promote eligible ones per policy.yaml.
 
-    Delegates entirely to ``MemoryGateway.consolidate()`` which already
-    implements the full promotion logic (age, access_count, quality_score
-    thresholds).  Returns the count of memories promoted.
+    Delegates promotion logic to ``MemoryGateway.consolidate()`` while opting
+    out of its manual end-of-sweep distillation hook. Background distillation is
+    drained separately by ``run_due_auto_distill`` only when the capture counter
+    marks it due.
 
     Parameters
     ----------
@@ -195,7 +197,7 @@ def run_auto_promote(repo_root: str) -> int:
     gw = MemoryGateway(repo_root=repo_root)
     # Wire in-process promotion events so they can be captured if needed.
     ClaudeCodeAdapter().subscribe_to_event_bus(gw.event_bus)
-    return gw.consolidate()
+    return gw.consolidate(run_distill=False)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +340,10 @@ class BackgroundCheckResult:
     duplicate_groups: list[DuplicateGroup] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     elapsed_ms: float = 0.0
+    auto_distill_ran: bool = False
+    auto_distill_domains_applied: int = 0
+    auto_distill_policies_applied: int = 0
+    auto_distill_error: str | None = None
     memory_os_enabled: bool = False
     memory_os_lifecycle_planned: int = 0
     memory_os_lifecycle_applied: int = 0
@@ -360,6 +366,9 @@ class BackgroundCheckResult:
             self.gc_archived > 0
             or self.promoted > 0
             or self.duplicate_groups
+            or self.auto_distill_domains_applied > 0
+            or self.auto_distill_policies_applied > 0
+            or self.auto_distill_error is not None
             or self.memory_os_lifecycle_applied > 0
             or self.memory_os_repaired > 0
             or self.memory_os_retrieval_status in {"degraded", "failed"}
@@ -382,6 +391,14 @@ class BackgroundCheckResult:
             lines.append(f"[mnemos bg] GC archived {self.gc_archived} stale/low-quality memories")
         if self.promoted:
             lines.append(f"[mnemos bg] Auto-promoted {self.promoted} memories")
+        if self.auto_distill_domains_applied or self.auto_distill_policies_applied:
+            lines.append(
+                "[mnemos bg] Auto-distilled "
+                f"{self.auto_distill_domains_applied} domain artifact(s), "
+                f"{self.auto_distill_policies_applied} policy artifact(s)"
+            )
+        if self.auto_distill_error:
+            lines.append(f"[mnemos bg] Auto-distill failed: {self.auto_distill_error}")
         for group in self.duplicate_groups[:3]:  # cap at 3 to keep output short
             ids = ", ".join(i["item_id"] for i in group.duplicates[:2])
             primary_id = group.primary.get("item_id", "?")
@@ -527,7 +544,37 @@ def run_background_check(
         except Exception:
             pass  # Promotion failure is non-fatal
 
-    # Phase 3: Duplicate detection
+    # Phase 3: Due auto-distillation
+    try:
+        from core.distill import run_due_auto_distill
+        from core.gateway import MemoryGateway
+
+        gw = MemoryGateway(repo_root=repo_root)
+        auto_distill_result = run_due_auto_distill(gw, trigger="bg-check")
+        result.auto_distill_ran = auto_distill_result.ran
+        result.auto_distill_error = auto_distill_result.error
+        if auto_distill_result.report:
+            result.auto_distill_domains_applied = (
+                auto_distill_result.report.get("domains", {}).get("applied", 0)
+            )
+            result.auto_distill_policies_applied = (
+                auto_distill_result.report.get("policies", {}).get("applied", 0)
+            )
+        if auto_distill_result.error:
+            messages.append("Auto-distill: failed")
+        elif (
+            result.auto_distill_domains_applied
+            or result.auto_distill_policies_applied
+        ):
+            messages.append(
+                "Auto-distill: applied "
+                f"{result.auto_distill_domains_applied} domain artifact(s), "
+                f"{result.auto_distill_policies_applied} policy artifact(s)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        result.auto_distill_error = str(exc)
+
+    # Phase 4: Duplicate detection
     if dedup_enabled:
         try:
             groups = find_duplicates(repo_root, layers=dedup_layers)
@@ -540,7 +587,7 @@ def run_background_check(
         except Exception:
             pass  # Dedup failure is non-fatal
 
-    # Phase 4: opt-in Memory OS operational evidence and validation
+    # Phase 5: opt-in Memory OS operational evidence and validation
     if memory_os_enabled:
         result.memory_os_enabled = True
         try:

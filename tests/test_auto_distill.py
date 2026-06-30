@@ -124,9 +124,9 @@ def test_post_capture_below_threshold_does_not_fire(repo_root: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 2. At threshold — fire once, counter resets.
+# 2. At threshold — capture only marks distill due.
 # --------------------------------------------------------------------------- #
-def test_post_capture_at_threshold_fires_once_and_resets(repo_root: Path) -> None:
+def test_post_capture_at_threshold_marks_due_without_inline_fire(repo_root: Path) -> None:
     _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
     from core.gateway import MemoryGateway
 
@@ -138,15 +138,40 @@ def test_post_capture_at_threshold_fires_once_and_resets(repo_root: Path) -> Non
         for i in range(25):
             _capture_silent(g, i)
 
+    assert run_mock.call_count == 0
+
+    state = json.loads(_state_file().read_text())
+    assert state["captures_since_last_distill"] == 25
+    assert state["last_distill_at"] == ""
+
+
+def test_due_auto_distill_runs_and_resets(repo_root: Path) -> None:
+    _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
+    from core.distill import run_due_auto_distill
+    from core.gateway import MemoryGateway
+
+    g = MemoryGateway(repo_root=str(repo_root))
+    for i in range(25):
+        _capture_silent(g, i)
+
+    with patch("core.distill.run_auto_distill", return_value={
+        "domains": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+        "policies": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+    }) as run_mock:
+        result = run_due_auto_distill(g, trigger="test")
+
+    assert result.ran is True
+    assert result.counter_before == 25
+    assert result.error is None
     assert run_mock.call_count == 1
 
     state = json.loads(_state_file().read_text())
     assert state["captures_since_last_distill"] == 0
-    assert state["last_distill_at"]  # non-empty ISO timestamp
+    assert state["last_distill_at"]
 
 
 # --------------------------------------------------------------------------- #
-# 3. Above threshold — fires exactly twice over 50 captures.
+# 3. Above threshold — capture accumulates due work without inline fires.
 # --------------------------------------------------------------------------- #
 def test_post_capture_above_threshold_fires_exactly_once_per_interval(
     repo_root: Path,
@@ -162,11 +187,14 @@ def test_post_capture_above_threshold_fires_exactly_once_per_interval(
         for i in range(50):
             _capture_silent(g, i)
 
-    assert run_mock.call_count == 2
+    assert run_mock.call_count == 0
+
+    state = json.loads(_state_file().read_text())
+    assert state["captures_since_last_distill"] == 50
 
 
 # --------------------------------------------------------------------------- #
-# 4. 26 captures: 25 fires once, then counter at 26 is 1.
+# 4. 26 captures: counter remains due for maintenance.
 # --------------------------------------------------------------------------- #
 def test_post_capture_threshold_26_fires_once(repo_root: Path) -> None:
     _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
@@ -180,10 +208,10 @@ def test_post_capture_threshold_26_fires_once(repo_root: Path) -> None:
         for i in range(26):
             _capture_silent(g, i)
 
-    assert run_mock.call_count == 1
+    assert run_mock.call_count == 0
 
     state = json.loads(_state_file().read_text())
-    assert state["captures_since_last_distill"] == 1
+    assert state["captures_since_last_distill"] == 26
 
 
 # --------------------------------------------------------------------------- #
@@ -294,22 +322,44 @@ def test_config_missing_block_uses_defaults(repo_root: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 12. Error swallow — distill raises but capture succeeds, counter preserved.
 # --------------------------------------------------------------------------- #
-def test_error_swallow_capture_succeeds_when_distill_raises(
+def test_capture_succeeds_when_distill_due_even_if_distill_would_raise(
     repo_root: Path,
 ) -> None:
     _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
     from core.gateway import MemoryGateway
 
     g = MemoryGateway(repo_root=str(repo_root))
-    with patch("core.distill.run_auto_distill", side_effect=RuntimeError("boom")):
+    with patch("core.distill.run_auto_distill", side_effect=RuntimeError("boom")) as run_mock:
         ids: list[str] = []
         for i in range(25):
             ids.append(_capture_silent(g, i))
 
     # All captures succeeded — the subscriber error never propagated.
     assert all(ids)
+    assert run_mock.call_count == 0
 
-    # Counter preserved at 25 (NOT reset) so the next capture retries the fire.
+    # Counter preserved at 25 so the maintenance path can run/retry later.
+    state = json.loads(_state_file().read_text())
+    assert state["captures_since_last_distill"] == 25
+
+
+def test_due_auto_distill_failure_preserves_due_counter_and_logs(
+    repo_root: Path,
+) -> None:
+    _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
+    from core.distill import run_due_auto_distill
+    from core.gateway import MemoryGateway
+
+    g = MemoryGateway(repo_root=str(repo_root))
+    for i in range(25):
+        _capture_silent(g, i)
+
+    with patch("core.distill.run_auto_distill", side_effect=RuntimeError("boom")):
+        result = run_due_auto_distill(g, trigger="test")
+
+    assert result.ran is True
+    assert result.error == "boom"
+
     state = json.loads(_state_file().read_text())
     assert state["captures_since_last_distill"] == 25
 
@@ -331,7 +381,7 @@ def test_error_swallow_capture_succeeds_when_distill_raises(
                 if e.get("event") == "auto_distill"
                 and e.get("success") is False
                 and e.get("error") == "boom"
-                and e.get("trigger") == "post-capture"
+                and e.get("trigger") == "test"
             ]
             if failure_entries:
                 break
@@ -435,9 +485,9 @@ def test_state_file_atomic_rewrite_concurrent_best_effort() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 17. Idempotency — 50 captures with real apply fires twice, no duplicates.
+# 17. Idempotency — two maintenance cycles with real apply fire twice, no duplicates.
 # --------------------------------------------------------------------------- #
-def test_idempotency_50_captures_no_duplicate_artifacts(repo_root: Path) -> None:
+def test_idempotency_two_due_maintenance_runs_no_duplicate_artifacts(repo_root: Path) -> None:
     """The skip-if-exists guard from #84 means re-running the auto-distill
     against the same source set produces no new artifacts on the second
     fire. We count fires by patching ``core.distill.run_auto_distill`` so
@@ -445,6 +495,7 @@ def test_idempotency_50_captures_no_duplicate_artifacts(repo_root: Path) -> None
     ``tests/test_distill.py``.
     """
     _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
+    from core.distill import run_due_auto_distill
     from core.gateway import MemoryGateway
 
     g = MemoryGateway(repo_root=str(repo_root))
@@ -462,8 +513,15 @@ def test_idempotency_50_captures_no_duplicate_artifacts(repo_root: Path) -> None
         return report
 
     with patch("core.distill.run_auto_distill", side_effect=real_then_track):
-        for i in range(50):
+        for i in range(25):
             _capture_silent(g, i)
+        first = run_due_auto_distill(g, trigger="test")
+        assert first.ran is True
+
+        for i in range(25, 50):
+            _capture_silent(g, i)
+        second = run_due_auto_distill(g, trigger="test")
+        assert second.ran is True
 
     assert len(real_calls) == 2
 
@@ -477,6 +535,7 @@ def test_idempotency_50_captures_no_duplicate_artifacts(repo_root: Path) -> None
 # --------------------------------------------------------------------------- #
 def test_reentrancy_guard_prevents_runaway(repo_root: Path) -> None:
     _write_mnemos_yml(repo_root, {"enabled": True, "interval_captures": 25})
+    from core.distill import run_due_auto_distill
     from core.gateway import MemoryGateway
 
     g = MemoryGateway(repo_root=str(repo_root))
@@ -503,8 +562,10 @@ def test_reentrancy_guard_prevents_runaway(repo_root: Path) -> None:
     with patch("core.distill.run_auto_distill", side_effect=fake_run):
         for i in range(25):
             _capture_silent(g, i)
+        result = run_due_auto_distill(g, trigger="test")
 
     # Exactly one outer fire — the inner recursive capture was guarded.
+    assert result.ran is True
     assert call_count["n"] == 1
 
 

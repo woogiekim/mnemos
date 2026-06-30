@@ -386,6 +386,71 @@ class TestBackgroundCheckResult:
 # ---------------------------------------------------------------------------
 
 class TestRunBackgroundCheck:
+    def test_bg_check_runs_due_auto_distill(self, repo_root: Path, tmp_path: Path):
+        """Due distillation is drained by background maintenance, not capture."""
+        from core.bg import run_background_check
+        from core.distill import _state_path, _write_distill_state
+
+        (repo_root / "mnemos.yml").write_text(
+            yaml.dump({"storage": {"distillation": {"enabled": True, "interval_captures": 25}}})
+        )
+        _write_distill_state(
+            _state_path(),
+            {"captures_since_last_distill": 25, "last_distill_at": ""},
+        )
+
+        ts_file = tmp_path / "ts.ts"
+        with patch("core.bg._timestamp_path", return_value=ts_file), patch(
+            "core.distill.run_auto_distill",
+            return_value={
+                "domains": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+                "policies": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+            },
+        ) as run_mock:
+            result = run_background_check(
+                str(repo_root),
+                force=True,
+                gc_enabled=False,
+                auto_promote_enabled=False,
+                dedup_enabled=False,
+            )
+
+        assert result.auto_distill_ran is True
+        assert result.auto_distill_error is None
+        assert run_mock.call_count == 1
+
+        state = json.loads(_state_path().read_text())
+        assert state["captures_since_last_distill"] == 0
+
+    def test_bg_check_auto_promote_does_not_run_distill_unconditionally(
+        self, repo_root: Path, tmp_path: Path
+    ):
+        """The promotion phase must not reintroduce unconditional distill cost."""
+        from core.bg import run_background_check
+
+        (repo_root / "mnemos.yml").write_text(
+            yaml.dump({"storage": {"distillation": {"enabled": True, "interval_captures": 25}}})
+        )
+
+        ts_file = tmp_path / "ts.ts"
+        with patch("core.bg._timestamp_path", return_value=ts_file), patch(
+            "core.distill.run_auto_distill",
+            return_value={
+                "domains": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+                "policies": {"planned": 0, "applied": 0, "skipped": 0, "errors": 0},
+            },
+        ) as run_mock:
+            result = run_background_check(
+                str(repo_root),
+                force=True,
+                gc_enabled=False,
+                auto_promote_enabled=True,
+                dedup_enabled=False,
+            )
+
+        assert result.auto_distill_ran is False
+        assert run_mock.call_count == 0
+
     def test_not_run_when_throttled(self, repo_root: Path, tmp_path: Path):
         """When should_run returns False, result.ran is False."""
         from core.bg import run_background_check

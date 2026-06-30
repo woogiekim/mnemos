@@ -368,15 +368,14 @@ class MemoryGateway:
         self._event_bus.subscribe("post-capture", self._on_post_capture_distill)
 
     def _on_post_capture_distill(self, payload: dict) -> None:
-        """Bump the counter and fire auto-distill when the threshold is hit.
+        """Bump the durable counter so maintenance can drain due distillation.
 
         Wrapped end-to-end in ``try/except Exception`` so a corrupt sidecar,
-        a planning bug, or a downstream apply error can never propagate to
-        the original ``capture()`` caller. The re-entrancy guard
+        a planning bug, or a downstream apply error can never propagate to the
+        original ``capture()`` caller. The re-entrancy guard
         (``self._in_auto_distill``) prevents the recursive ``gateway.capture``
-        the apply path issues for the artifact body from firing another
-        distill (the recursive capture still increments the counter — that
-        is the documented contract).
+        the apply path issues for the artifact body from mutating the due
+        counter while a maintenance run is already draining it.
         """
         if self._in_auto_distill:
             return
@@ -385,7 +384,6 @@ class MemoryGateway:
             _read_distill_state,
             _state_path,
             _write_distill_state,
-            run_auto_distill,
         )
 
         try:
@@ -393,58 +391,8 @@ class MemoryGateway:
             state = _read_distill_state(state_path)
             counter_before = int(state.get("captures_since_last_distill", 0))
             new_counter = counter_before + 1
-
-            if new_counter < self._distill_interval:
-                state["captures_since_last_distill"] = new_counter
-                _write_distill_state(state_path, state)
-                return
-
-            # Threshold crossed — fire distill and reset the counter.
-            self._in_auto_distill = True
-            try:
-                report = run_auto_distill(self)
-            except Exception as exc:  # noqa: BLE001
-                # Preserve the incremented counter so the next capture
-                # retries the fire; record the failure.
-                state["captures_since_last_distill"] = new_counter
-                try:
-                    _write_distill_state(state_path, state)
-                except Exception:  # pragma: no cover - state-file IO failure
-                    pass
-                try:
-                    self._obs.log_auto_distill(
-                        success=False,
-                        error=str(exc),
-                        trigger="post-capture",
-                        interval=self._distill_interval,
-                        counter_before=new_counter,
-                    )
-                except Exception:  # pragma: no cover - observability is best-effort
-                    pass
-                return
-
-            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            try:
-                _write_distill_state(
-                    state_path,
-                    {
-                        "captures_since_last_distill": 0,
-                        "last_distill_at": now_iso,
-                    },
-                )
-            except Exception:  # pragma: no cover - state-file IO failure
-                pass
-            try:
-                self._obs.log_auto_distill(
-                    success=True,
-                    trigger="post-capture",
-                    interval=self._distill_interval,
-                    counter_before=new_counter,
-                    domains_applied=report["domains"]["applied"],
-                    policies_applied=report["policies"]["applied"],
-                )
-            except Exception:  # pragma: no cover - observability is best-effort
-                pass
+            state["captures_since_last_distill"] = new_counter
+            _write_distill_state(state_path, state)
         except Exception as exc:  # noqa: BLE001
             # Last-resort swallow: e.g. a sidecar read raised an unexpected
             # type and slipped past the inner guards. Log via observability,
@@ -458,8 +406,6 @@ class MemoryGateway:
                 )
             except Exception:  # pragma: no cover - observability is best-effort
                 pass
-        finally:
-            self._in_auto_distill = False
 
     def _reset_distill_counter(self) -> None:
         """Rewrite the sidecar with a zero counter and a fresh ``last_distill_at``.
@@ -1097,12 +1043,17 @@ class MemoryGateway:
     # Consolidate                                                           #
     # ------------------------------------------------------------------ #
 
-    def consolidate(self) -> int:
+    def consolidate(self, *, run_distill: bool = True) -> int:
         """Sweep ALL memories across all layers and promote eligible ones.
 
         This is the engine behind `mnemos consolidate`. It evaluates every
         memory item against policy.yaml thresholds and promotes those that
         qualify. Promotion decisions are fully owned by mnemos — AI has no role.
+
+        ``run_distill`` controls only the end-of-sweep automatic distillation
+        hook. Manual ``mnemos consolidate`` keeps the default ``True`` behavior;
+        background auto-promotion disables it so due distillation is drained by
+        the dedicated maintenance path instead of every promotion sweep.
 
         Returns the total number of items promoted.
         """
@@ -1130,12 +1081,11 @@ class MemoryGateway:
                     # Skip items that fail — consolidate is best-effort
                     continue
 
-        # End-of-sweep automatic distillation (#87). Fires unconditionally
-        # when ``distillation.enabled`` is True — independent of the
-        # post-capture counter. Errors are caught and logged so that a
-        # distill failure can never affect the sweep's return value.
+        # End-of-sweep automatic distillation (#87). Manual consolidate fires
+        # unconditionally when enabled; background promotion opts out and lets
+        # ``run_due_auto_distill`` drain only due work.
         try:
-            if self._distill_enabled:
+            if run_distill and self._distill_enabled:
                 from core.distill import run_auto_distill
 
                 report = run_auto_distill(self)
