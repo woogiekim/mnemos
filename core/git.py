@@ -19,6 +19,7 @@ Public API
 - :func:`rebase_onto` — rebase current branch onto an explicit ref
 - :func:`rebase_continue` — continue an in-progress rebase
 - :func:`status` — return ahead/behind/dirty information as a dict
+- :func:`is_tracked` — return whether a path is tracked by git
 - :func:`mv` — rename a tracked file with ``git mv``
 """
 from __future__ import annotations
@@ -211,6 +212,12 @@ def add(path: str | Path, files: Sequence[str]) -> None:
     rc, _, stderr = _git("add", "--", *[str(f) for f in files], cwd=path)
     if rc != 0:
         raise GitCommandError(rc, stderr, ["git", "add", "--"] + [str(f) for f in files])
+
+
+def is_tracked(path: str | Path, file: str | Path) -> bool:
+    """Return ``True`` when *file* is tracked in the repository at *path*."""
+    rc, _, _ = _git("ls-files", "--error-unmatch", "--", str(file), cwd=path)
+    return rc == 0
 
 
 def mv(path: str | Path, old: str | Path, new: str | Path) -> None:

@@ -154,6 +154,36 @@ class TestSafeFilenames:
         assert path == legacy_path
         assert frontmatter.load(str(legacy_path)).content == "updated"
 
+    def test_success_case_regression_update_content_refreshes_content_hash(
+        self,
+        tmp_path,
+    ):
+        """success-case(regression) - updating content refreshes content_hash."""
+        from core.gateway import _capture_content_hash
+
+        # given
+        old_content = "old content"
+        new_content = "new content"
+        store = _make_store(tmp_path)
+        store.write(
+            layer="global",
+            item_id="hash-update",
+            content=old_content,
+            metadata={
+                "id": "hash-update",
+                "layer": "global",
+                "content_hash": _capture_content_hash(old_content),
+            },
+        )
+
+        # when
+        store.update("hash-update", content=new_content)
+
+        # then
+        item = store.read("hash-update")
+        assert item["content_hash"] == _capture_content_hash(new_content)
+        assert item["content_hash"] != _capture_content_hash(old_content)
+
     def test_delete_legacy_raw_id_filename_by_frontmatter(self, tmp_path):
         """Deletes resolve legacy files by frontmatter id."""
         legacy_dir = tmp_path / "wiki" / "global"
@@ -165,6 +195,32 @@ class TestSafeFilenames:
         _make_store(tmp_path).delete("rule:legacy")
 
         assert not legacy_path.exists()
+
+    def test_success_case_delete_removes_file_when_parse_fails(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """success-case(regression) - delete still removes a file when parse fails."""
+        # given
+        store = _make_store(tmp_path)
+        path = store.write(
+            layer="global",
+            item_id="parse-fail-delete",
+            content="delete despite parse failure",
+            metadata={"id": "parse-fail-delete", "layer": "global"},
+        )
+
+        def fail_parse(_path):
+            raise ValueError("bad frontmatter")
+
+        monkeypatch.setattr(store, "_parse_file", fail_parse)
+
+        # when
+        store.delete(str(path))
+
+        # then
+        assert not path.exists()
 
     def test_migrate_unsafe_filenames_renames_legacy_file(self, tmp_path):
         """The default store exposes a migration path for unsafe filenames."""

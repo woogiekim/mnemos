@@ -1,6 +1,9 @@
 """Filesystem Store — read/write memory items as Markdown with YAML front-matter."""
 from __future__ import annotations
 
+import hashlib
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterator, Protocol, runtime_checkable
 from urllib.parse import quote
@@ -119,6 +122,17 @@ class SyncableBackend(Protocol):
     def sync_commit(self, message: str | None = None) -> bool: ...
     def sync_status(self) -> dict[str, Any]: ...
     def sync_continue(self) -> None: ...
+
+
+def _normalise_content(content: str) -> str:
+    """Return the canonical text form used for persisted content hashes."""
+    nfkc = unicodedata.normalize("NFKC", content)
+    return re.sub(r"\s+", " ", nfkc.strip()).lower()
+
+
+def _content_hash(content: str) -> str:
+    """Return SHA-256 hex digest of the canonical memory content."""
+    return hashlib.sha256(_normalise_content(content).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -355,20 +369,54 @@ class MemoryStore:
                         yield md_file
                         return
 
+    def _delete_file(self, file_path: Path) -> None:
+        """Delete one memory file and sync a tracked wiki removal when enabled."""
+        resolved_root = self._root.resolve()
+        resolved_path = file_path.resolve()
+        relative_path = (
+            resolved_path.relative_to(resolved_root)
+            if resolved_path.is_relative_to(resolved_root)
+            else None
+        )
+        should_sync = (
+            relative_path is not None
+            and self._sync.enabled
+            and git.is_tracked(self._root, relative_path)
+        )
+        if should_sync:
+            self._sync_engine.hook_before_write()
+
+        try:
+            item = self._parse_file(file_path)
+        except Exception:
+            item = {}
+
+        layer = str(item.get("layer") or file_path.parent.name)
+        item_id = str(item.get("id") or file_path.stem)
+        file_path.unlink()
+
+        if should_sync:
+            committed = self._sync_engine.hook_after_write_item(
+                layer,
+                item_id,
+                [file_path],
+            )
+            self._sync_engine.hook_after_commit(committed)
+
     def delete(self, item_id_or_path: str) -> None:
         """Remove a memory item file."""
         path = Path(item_id_or_path)
         if path.exists() and path.is_file():
-            path.unlink()
+            self._delete_file(path)
             return
 
         candidate = self._root / item_id_or_path
         if candidate.exists():
-            candidate.unlink()
+            self._delete_file(candidate)
             return
 
         for found_path in self._find_by_id(item_id_or_path):
-            found_path.unlink()
+            self._delete_file(found_path)
             return
 
         raise FileNotFoundError(f"Memory item not found for deletion: '{item_id_or_path}'")
@@ -478,6 +526,8 @@ class MemoryStore:
         new_metadata = {k: v for k, v in item.items() if k not in ("content", "_path")}
         if metadata_updates:
             new_metadata.update(metadata_updates)
+        if content is not None:
+            new_metadata["content_hash"] = _content_hash(new_content)
 
         post = frontmatter.Post(new_content, **new_metadata)
         with file_path.open("w", encoding="utf-8") as f:

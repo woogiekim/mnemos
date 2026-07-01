@@ -381,6 +381,42 @@ def test_sync_pull_with_remote_branch(repo_with_remote: Path, monkeypatch: pytes
     assert store._sync_engine.last_pull_ts > 0.0
 
 
+def test_success_case_regression_delete_commits_and_pushes_wiki_removal(
+    repo_with_remote: Path,
+    bare_remote: Path,
+    tmp_path: Path,
+) -> None:
+    """success-case(regression) - synced promotion delete removes old remote file."""
+    # given
+    store = MemoryStore(repo_root=str(repo_with_remote), sync_config=_sync_config())
+    source_path = store.write(
+        layer="project",
+        item_id="promote-sync",
+        content="promote me",
+        metadata={"id": "promote-sync", "layer": "project"},
+    )
+    store.write(
+        layer="global",
+        item_id="promote-sync",
+        content="promote me",
+        metadata={"id": "promote-sync", "layer": "global"},
+    )
+
+    # when
+    store.delete(str(source_path))
+
+    # then
+    clone = tmp_path / "remote-checkout"
+    subprocess.run(
+        ["git", "clone", str(bare_remote), str(clone)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (clone / "wiki" / "global" / "promote-sync.md").exists()
+    assert not (clone / "wiki" / "projects" / "promote-sync.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # engine branch coverage
 # ---------------------------------------------------------------------------

@@ -1053,6 +1053,32 @@ class TestCrossProcessCaptureDedup:
             "Flag must be reset to False after a fresh new write"
         )
 
+    def test_success_case_regression_update_allows_old_content_to_be_captured_again(
+        self,
+        repo_root,
+    ):
+        """success-case(regression) - updated item no longer claims the old hash."""
+        # given
+        old_content = "old content before edit"
+        new_content = "new content after edit"
+        gw1 = self._make_gateway(repo_root)
+        edited_id = gw1.capture(content=old_content, layer="global", no_classify=True)
+        assert edited_id is not None
+
+        # when
+        gw1.update(edited_id, content=new_content)
+        gw2 = self._make_gateway(repo_root)
+        recaptured_id = gw2.capture(
+            content=old_content,
+            layer="global",
+            no_classify=True,
+        )
+
+        # then
+        assert recaptured_id is not None
+        assert recaptured_id != edited_id
+        assert gw2.last_capture_was_duplicate is False
+
     # ------------------------------------------------------------------
     # Test 6: in-process cache warmed after cross-process detection
     # ------------------------------------------------------------------
