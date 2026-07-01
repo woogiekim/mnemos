@@ -445,6 +445,7 @@ def run_background_check(
     gc_threshold: float = DEFAULT_GC_THRESHOLD,
     gc_limit: int = 20,
     auto_promote_enabled: bool = True,
+    auto_distill_enabled: bool = True,
     dedup_enabled: bool = True,
     dedup_layers: list[str] | None = None,
     memory_os_enabled: bool = False,
@@ -480,6 +481,9 @@ def run_background_check(
         bound latency; manual ``mnemos gc`` uses a higher default).
     auto_promote_enabled:
         Run auto-promotion (consolidate) phase.
+    auto_distill_enabled:
+        Drain due automatic distillation work. Update health checks can disable
+        this because distillation can write many memories and trigger git sync.
     dedup_enabled:
         Run duplicate detection phase.
     dedup_layers:
@@ -545,34 +549,35 @@ def run_background_check(
             pass  # Promotion failure is non-fatal
 
     # Phase 3: Due auto-distillation
-    try:
-        from core.distill import run_due_auto_distill
-        from core.gateway import MemoryGateway
+    if auto_distill_enabled:
+        try:
+            from core.distill import run_due_auto_distill
+            from core.gateway import MemoryGateway
 
-        gw = MemoryGateway(repo_root=repo_root)
-        auto_distill_result = run_due_auto_distill(gw, trigger="bg-check")
-        result.auto_distill_ran = auto_distill_result.ran
-        result.auto_distill_error = auto_distill_result.error
-        if auto_distill_result.report:
-            result.auto_distill_domains_applied = (
-                auto_distill_result.report.get("domains", {}).get("applied", 0)
-            )
-            result.auto_distill_policies_applied = (
-                auto_distill_result.report.get("policies", {}).get("applied", 0)
-            )
-        if auto_distill_result.error:
-            messages.append("Auto-distill: failed")
-        elif (
-            result.auto_distill_domains_applied
-            or result.auto_distill_policies_applied
-        ):
-            messages.append(
-                "Auto-distill: applied "
-                f"{result.auto_distill_domains_applied} domain artifact(s), "
-                f"{result.auto_distill_policies_applied} policy artifact(s)"
-            )
-    except Exception as exc:  # noqa: BLE001
-        result.auto_distill_error = str(exc)
+            gw = MemoryGateway(repo_root=repo_root)
+            auto_distill_result = run_due_auto_distill(gw, trigger="bg-check")
+            result.auto_distill_ran = auto_distill_result.ran
+            result.auto_distill_error = auto_distill_result.error
+            if auto_distill_result.report:
+                result.auto_distill_domains_applied = (
+                    auto_distill_result.report.get("domains", {}).get("applied", 0)
+                )
+                result.auto_distill_policies_applied = (
+                    auto_distill_result.report.get("policies", {}).get("applied", 0)
+                )
+            if auto_distill_result.error:
+                messages.append("Auto-distill: failed")
+            elif (
+                result.auto_distill_domains_applied
+                or result.auto_distill_policies_applied
+            ):
+                messages.append(
+                    "Auto-distill: applied "
+                    f"{result.auto_distill_domains_applied} domain artifact(s), "
+                    f"{result.auto_distill_policies_applied} policy artifact(s)"
+                )
+        except Exception as exc:  # noqa: BLE001
+            result.auto_distill_error = str(exc)
 
     # Phase 4: Duplicate detection
     if dedup_enabled:

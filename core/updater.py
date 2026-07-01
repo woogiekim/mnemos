@@ -380,11 +380,11 @@ def update_cursor_rules(cursor_dir: Path) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def _run_bg_check_quiet() -> None:
-    """Run ``mnemos bg-check --quiet`` in-process.
+    """Run a non-mutating update health check in-process.
 
     Invokes :func:`core.bg.run_background_check` directly (no subprocess) so
     the update step works even when the newly-reinstalled ``mnemos`` binary is
-    not yet on PATH.  Output is suppressed because --quiet is the intended
+    not yet on PATH. Output is suppressed because --quiet is the intended
     behaviour in update context.
     """
     from core.bg import run_background_check
@@ -394,12 +394,15 @@ def _run_bg_check_quiet() -> None:
         # Fall back to the repo root inferred from this module's location
         repo_root = str(Path(__file__).resolve().parents[1])
 
-    # Force a run (bypass throttle) so the update always triggers maintenance.
+    # Force a run (bypass throttle), but do not let update drain mutating
+    # maintenance. GC, promotion, and distillation can write many vault files
+    # and trigger git sync, which makes a package update look hung.
     run_background_check(
         repo_root=repo_root,
         force=True,
-        gc_enabled=True,
-        auto_promote_enabled=True,
+        gc_enabled=False,
+        auto_promote_enabled=False,
+        auto_distill_enabled=False,
         dedup_enabled=True,
     )
 
@@ -514,9 +517,10 @@ def run_update(
     except Exception as exc:
         print(f"warning: policy migration failed — {exc}", file=sys.stderr)
 
-    # -- 5. Run bg-check --quiet (GC + auto-promote + dedup) ----------------
-    # This step runs silently so the update summary stays readable. Failures
-    # are non-fatal — they are reported as warnings and do not change exit_code.
+    # -- 5. Run non-mutating bg-check --quiet -------------------------------
+    # This step runs silently so the update summary stays readable. It must
+    # not drain write-heavy maintenance because update is an install workflow.
+    # Failures are non-fatal — they are reported as warnings and do not change exit_code.
     print("\n── running mnemos bg-check --quiet ───────────────────────────────")
     try:
         _run_bg_check_quiet()

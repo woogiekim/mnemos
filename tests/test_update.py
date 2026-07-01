@@ -656,13 +656,15 @@ class TestRunBgCheckQuiet:
         _, kwargs = mock.call_args
         assert kwargs.get("force") is True
 
-    def test_gc_enabled_by_default(self, tmp_path, monkeypatch):
+    def test_update_bg_check_disables_mutating_maintenance(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))
         from core.bg import BackgroundCheckResult
         with patch("core.bg.run_background_check", return_value=BackgroundCheckResult(ran=True)) as mock:
             _run_bg_check_quiet()
         _, kwargs = mock.call_args
-        assert kwargs.get("gc_enabled") is True
+        assert kwargs.get("gc_enabled") is False
+        assert kwargs.get("auto_promote_enabled") is False
+        assert kwargs.get("auto_distill_enabled") is False
 
     def test_exception_propagates_to_caller(self, tmp_path, monkeypatch):
         """_run_bg_check_quiet propagates exceptions; run_update handles them non-fatally."""
