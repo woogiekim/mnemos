@@ -29,8 +29,8 @@ CLAUDE_MD_BLOCK = (
 # Two PostToolUse entries are registered:
 #   1. ingest-claude-md — fires on Write|Edit to keep CLAUDE.md memories current.
 #   2. bg-check — fires on all tool calls (empty matcher) for background GC,
-#      auto-promotion, and duplicate detection.  The bg-check command has its
-#      own throttle (default: once per 5 minutes) so the hook itself is cheap.
+#      auto-promotion, and duplicate detection. The hook atomically elects a
+#      detached worker, so heavy maintenance never blocks the tool response.
 _POST_TOOL_USE_INGEST_HOOK_TEMPLATE = {
     "matcher": "Write|Edit",
     "hooks": [
@@ -46,6 +46,7 @@ _POST_TOOL_USE_BG_HOOK_TEMPLATE = {
     "hooks": [
         {
             "type": "command",
+            "timeout": 10,
             "command": (
                 'MNEMOS_REPO_ROOT="{repo_root}" '
                 'bash "{bg_hook_script}" 2>/dev/null || true'

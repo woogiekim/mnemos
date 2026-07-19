@@ -929,6 +929,9 @@ class TestClaudeAdapterBgHook:
         cmds = " ".join(str(h) for h in post_hooks)
         assert "PostToolUse.sh" in cmds
 
+        bg_entries = [entry for entry in post_hooks if "PostToolUse.sh" in str(entry)]
+        assert bg_entries[0]["hooks"][0]["timeout"] == 10
+
     def test_verify_hooks_detects_missing_bg_hook(self, tmp_path: Path, monkeypatch):
         """verify_hooks reports missing when bg hook is absent."""
         monkeypatch.setenv("MNEMOS_REPO_ROOT", str(tmp_path))

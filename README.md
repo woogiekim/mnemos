@@ -123,6 +123,11 @@ Expected result: `mnemos install` scaffolds the repo and, when host config
 files are present, writes managed mnemos blocks for Claude Code and Cursor.
 Claude Code has the strongest local adapter: a managed `CLAUDE.md` block plus
 `settings.json` hooks for `PostToolUse`, `UserPromptSubmit`, and `Stop`.
+The `PostToolUse` maintenance hook atomically elects one worker across concurrent
+host sessions and launches GC, promotion, distillation, and duplicate detection
+outside the synchronous tool-response path. Notable maintenance output is
+spooled and delivered by a later tool event, so maintenance latency cannot block
+normal tool use.
 Cursor support is a managed rules block in `~/.cursor/rules` or
 `~/.cursor/rules.md`; Cursor hook registration is not claimed because the local
 adapter documents no equivalent hooks API. `mnemos context --render` emits a
