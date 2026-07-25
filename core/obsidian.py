@@ -60,6 +60,7 @@ import datetime
 import hashlib
 import os
 import re
+import sqlite3
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterator
@@ -198,6 +199,11 @@ class ObsidianBackend:
         self._fts: FTSIndex | None = fts
         # mtime cache: maps str(path) → float (mtime at last sync)
         self._mtime_cache: dict[str, float] = {}
+        # Fast id lookup for slug-named vault files. This avoids scanning every
+        # Markdown frontmatter block for hot reads in prompt-context paths.
+        self._id_path_cache: dict[str, Path] = {}
+        self._hash_index_path = self._default_hash_index_path()
+        self._init_hash_index()
 
         # ── Sync wiring (issue #24, refactored onto core.sync for #69) ──────
         from core.config import SyncConfig as _SyncConfig
@@ -243,6 +249,99 @@ class ObsidianBackend:
     def _save_last_pull_ts(self, ts: float) -> None:
         """Persist the last-pull timestamp to disk (best-effort)."""
         self._sync_engine._save_last_pull_ts(ts)
+
+    def _default_hash_index_path(self) -> Path:
+        """Return the per-vault duplicate index path outside the vault repo."""
+        from core.sync import hash_path as _hash_path
+
+        cache_dir = Path(
+            os.environ.get("MNEMOS_HASH_INDEX_CACHE_DIR")
+            or Path.home() / ".mnemos" / ".cache"
+        )
+        return cache_dir / f"obsidian-hash-index-{_hash_path(self._vault)}.sqlite3"
+
+    def _init_hash_index(self) -> None:
+        self._hash_index_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self._hash_index_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS content_hash_index (
+                    content_hash TEXT PRIMARY KEY,
+                    item_id TEXT NOT NULL,
+                    layer TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
+    def _index_content_hash(
+        self,
+        *,
+        content_hash: str | None,
+        item_id: str,
+        layer: str,
+        path: Path,
+    ) -> None:
+        if not content_hash:
+            return
+        with sqlite3.connect(self._hash_index_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO content_hash_index
+                    (content_hash, item_id, layer, path, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(content_hash) DO UPDATE SET
+                    item_id = excluded.item_id,
+                    layer = excluded.layer,
+                    path = excluded.path,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    content_hash,
+                    item_id,
+                    layer,
+                    str(path),
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def _remove_hash_index_for_item(self, item_id: str) -> None:
+        with sqlite3.connect(self._hash_index_path) as conn:
+            conn.execute(
+                "DELETE FROM content_hash_index WHERE item_id = ?",
+                (item_id,),
+            )
+            conn.commit()
+
+    def find_by_content_hash(self, content_hash: str) -> tuple[str, str] | None:
+        """Return an indexed duplicate match without scanning vault files."""
+        with sqlite3.connect(self._hash_index_path) as conn:
+            row = conn.execute(
+                """
+                SELECT item_id, layer, path
+                FROM content_hash_index
+                WHERE content_hash = ?
+                """,
+                (content_hash,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        item_id, layer, raw_path = row
+        path = Path(raw_path)
+        if not path.exists():
+            with sqlite3.connect(self._hash_index_path) as conn:
+                conn.execute(
+                    "DELETE FROM content_hash_index WHERE content_hash = ?",
+                    (content_hash,),
+                )
+                conn.commit()
+            return None
+        self._id_path_cache[str(item_id)] = path
+        return (str(item_id), str(layer))
 
     def _has_remote(self) -> bool:
         """Return ``True`` when the configured remote exists in the vault repo."""
@@ -357,6 +456,7 @@ class ObsidianBackend:
         for layer in OBSIDIAN_LAYERS:
             candidate = self._vault / layer / f"{item_id}.md"
             if candidate.exists():
+                self._id_path_cache[item_id] = candidate
                 return candidate
         # Slow path: scan frontmatter for matching id (slug-named files)
         for layer in OBSIDIAN_LAYERS:
@@ -367,6 +467,7 @@ class ObsidianBackend:
                 try:
                     post = frontmatter.load(str(md_file))
                     if post.metadata.get("id") == item_id:
+                        self._id_path_cache[item_id] = md_file
                         return md_file
                 except Exception:
                     continue
@@ -423,6 +524,11 @@ class ObsidianBackend:
             return p
         if (self._vault / item_id_or_path).exists():
             return self._vault / item_id_or_path
+        cached = self._id_path_cache.get(item_id_or_path)
+        if cached is not None and cached.exists():
+            return cached
+        if cached is not None:
+            self._id_path_cache.pop(item_id_or_path, None)
         # Treat as item_id
         return self._find_path(item_id_or_path)
 
@@ -432,6 +538,9 @@ class ObsidianBackend:
         result = dict(post.metadata)
         result["content"] = post.content
         result["_path"] = str(path)
+        item_id = result.get("id")
+        if item_id:
+            self._id_path_cache[str(item_id)] = path
         return result
 
     def _write_path(self, path: Path, content: str, metadata: dict[str, Any]) -> None:
@@ -498,6 +607,14 @@ class ObsidianBackend:
 
         self._write_path(file_path, content, meta)
         self._mtime_cache[str(file_path)] = file_path.stat().st_mtime
+        self._id_path_cache[item_id] = file_path
+        self._remove_hash_index_for_item(item_id)
+        self._index_content_hash(
+            content_hash=meta.get("content_hash"),
+            item_id=item_id,
+            layer=layer,
+            path=file_path,
+        )
         self._fts_index(item_id, content, meta)
 
         # Hook 2 — commit, Hook 3 — push
@@ -536,10 +653,18 @@ class ObsidianBackend:
         self._write_path(path, new_content, new_meta)
         self._mtime_cache[str(path)] = path.stat().st_mtime
         item_id = new_meta.get("id", path.stem)
+        layer = str(new_meta.get("layer", path.parent.name))
+        self._id_path_cache[str(item_id)] = path
+        self._remove_hash_index_for_item(str(item_id))
+        self._index_content_hash(
+            content_hash=new_meta.get("content_hash"),
+            item_id=str(item_id),
+            layer=layer,
+            path=path,
+        )
         self._fts_index(item_id, new_content, new_meta)
 
         # Hook 2 — commit, Hook 3 — push
-        layer = str(new_meta.get("layer", path.parent.name))
         committed = self._hook_after_write_item(layer, item_id, [path])
         self._hook_after_commit(committed)
 
@@ -548,8 +673,11 @@ class ObsidianBackend:
     def delete(self, item_id_or_path: str) -> None:
         """Remove a vault item file."""
         path = self._resolve_path(item_id_or_path)
-        item_id = self._parse_path(path).get("id", path.stem)
+        item = self._parse_path(path)
+        item_id = item.get("id", path.stem)
         self._mtime_cache.pop(str(path), None)
+        self._id_path_cache.pop(str(item_id), None)
+        self._remove_hash_index_for_item(str(item_id))
         path.unlink()
         self._fts_delete(item_id)
 
@@ -622,6 +750,14 @@ class ObsidianBackend:
 
         self._mtime_cache.pop(str(src_path), None)
         self._mtime_cache[str(dst_path)] = dst_path.stat().st_mtime
+        self._id_path_cache[str(item_id)] = dst_path
+        self._remove_hash_index_for_item(str(item_id))
+        self._index_content_hash(
+            content_hash=item.get("content_hash"),
+            item_id=str(item_id),
+            layer=target_layer,
+            path=dst_path,
+        )
         self._fts_index(item_id, content, item)
 
         # Hook 2 — commit both the src deletion and the dst creation together

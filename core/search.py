@@ -40,6 +40,7 @@ class SearchMiddleware:
         query: str,
         layers: list[str] | None = None,
         limit: int = 20,
+        allow_grep: bool = True,
     ) -> list[dict[str, Any]]:
         """
         Search across memory layers.
@@ -127,7 +128,7 @@ class SearchMiddleware:
                     seen_ids.add(r_id)
 
         # Stage 3: pathlib grep fallback (if no results yet)
-        if not results:
+        if not results and allow_grep:
             fallback_used = True
             try:
                 grep_results = self._grep_fallback(query, layers=layers, limit=limit)
@@ -161,6 +162,17 @@ class SearchMiddleware:
                 if r_id and r_id not in seen_ids:
                     results.append(r)
                     seen_ids.add(r_id)
+        elif not results:
+            backend_traces.append(
+                {
+                    "name": "grep",
+                    "status": "disabled",
+                    "available": True,
+                    "configured": True,
+                    "result_count": 0,
+                    "reason": "disabled by caller",
+                }
+            )
         else:
             backend_traces.append(
                 {

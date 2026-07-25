@@ -267,17 +267,23 @@ def _error_diagnostics(query: str, exc: Exception) -> dict[str, Any]:
     }
 
 
-def _enrich(gw: MemoryGateway, result: dict[str, Any], score: float) -> dict[str, Any]:
+def _enrich(
+    gw: MemoryGateway,
+    result: dict[str, Any],
+    score: float,
+    *,
+    read_only: bool = False,
+) -> dict[str, Any]:
     item_id = result.get("item_id") or result.get("id") or ""
     metadata = result.get("metadata") or {}
     item: dict[str, Any] = {}
-    if item_id:
+    if item_id and not read_only:
         try:
             item = gw._store.read(str(item_id))
         except Exception:
             item = {}
     return {
-        "id": item.get("id") or item_id,
+        "id": item.get("id") or metadata.get("id") or item_id,
         "layer": item.get("layer") or metadata.get("layer") or result.get("layer"),
         "score": score,
         "recency": _first_present(item.get("updated_at"), item.get("created_at"), metadata.get("updated_at"), metadata.get("created_at")),
@@ -298,6 +304,8 @@ def retrieve_context(
     gateway: MemoryGateway | None = None,
     limit: int = 5,
     max_chars: int = 1800,
+    read_only: bool = False,
+    allow_grep: bool = True,
 ) -> dict[str, Any]:
     """Return bounded deterministic context for host adapters."""
     limit = max(0, min(limit, _MAX_LIMIT))
@@ -319,15 +327,25 @@ def retrieve_context(
     else:
         try:
             search_limit = max(limit * 3, _DEFAULT_LIMIT, 1)
-            raw_results = gw.search(query=query, limit=search_limit) if query else []
+            search_func = gw.search_for_context if read_only and hasattr(gw, "search_for_context") else gw.search
+            if query:
+                if read_only:
+                    raw_results = search_func(query=query, limit=search_limit, allow_grep=allow_grep)
+                else:
+                    raw_results = search_func(query=query, limit=search_limit)
+            else:
+                raw_results = []
             diagnostics = _search_diagnostics(gw, query)
             if diagnostics is not None:
                 diagnostic_attempts.append(diagnostics)
-            if not raw_results:
+            if not raw_results and allow_grep:
                 seen_ids: set[str] = set()
                 fallback_results: list[dict[str, Any]] = []
                 for keyword in keywords:
-                    keyword_results = gw.search(query=keyword, limit=search_limit)
+                    if read_only:
+                        keyword_results = search_func(query=keyword, limit=search_limit, allow_grep=allow_grep)
+                    else:
+                        keyword_results = search_func(query=keyword, limit=search_limit)
                     diagnostics = _search_diagnostics(gw, keyword)
                     if diagnostics is not None:
                         diagnostic_attempts.append(diagnostics)
@@ -353,7 +371,7 @@ def retrieve_context(
     if gw is not None:
         for index, result in enumerate(raw_results):
             rank_score = _score(index, total_candidates)
-            item = _enrich(gw, result, rank_score)
+            item = _enrich(gw, result, rank_score, read_only=read_only)
             content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
             selection_score, components = _selection_score(
                 item,

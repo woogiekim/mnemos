@@ -328,6 +328,10 @@ class MemoryGateway:
         transient).  The scan short-circuits on the first match to keep
         latency bounded for typical small stores.
         """
+        indexed_lookup = getattr(self._store, "find_by_content_hash", None)
+        if callable(indexed_lookup):
+            return indexed_lookup(content_hash)
+
         from core.layers import LAYER_STATIC_PATHS
 
         static_layers = list(LAYER_STATIC_PATHS.keys())
@@ -804,6 +808,32 @@ class MemoryGateway:
             session_id=self._session_id,
         )
 
+        return results
+
+    def search_for_context(
+        self,
+        *,
+        query: str,
+        layers: list[str] | None = None,
+        limit: int = 20,
+        allow_grep: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Search for host context injection without mutating memory metadata.
+
+        Prompt hooks must stay on a read-only fast path: no access_count bump,
+        no auto-promotion, and no storage update/git-sync side effects.
+        """
+        results = self._search.search(
+            query=query,
+            layers=layers,
+            limit=limit,
+            allow_grep=allow_grep,
+        )
+        self._obs.log_search(
+            keywords=[query],
+            results=results,
+            session_id=self._session_id,
+        )
         return results
 
     @property

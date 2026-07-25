@@ -27,6 +27,7 @@ from core.adapters.claude import (
 
 HOOK_SCRIPT = Path(__file__).parent.parent / "hooks" / "UserPromptSubmit.sh"
 STOP_HOOK_SCRIPT = Path(__file__).parent.parent / "hooks" / "Stop.sh"
+CONTEXT_PREFETCH_WORKER = Path(__file__).parent.parent / "hooks" / "context_prefetch_worker.py"
 
 
 def _run_hook(prompt: str, session_id: str = "test-session-123",
@@ -151,8 +152,8 @@ def _run_stop_hook_json(
     return result.returncode, result.stdout + result.stderr, calls
 
 
-def test_user_prompt_submit_calls_context_command(tmp_path):
-    """UserPromptSubmit uses deterministic context injection, not capture protocol text."""
+def test_user_prompt_submit_reads_cached_context_without_foreground_command(tmp_path):
+    """UserPromptSubmit prints cached context and does not run heavy retrieval inline."""
     fake_bin = tmp_path / "mnemos"
     log_file = tmp_path / "mnemos_calls.log"
     fake_bin.write_text(
@@ -166,17 +167,52 @@ def test_user_prompt_submit_calls_context_command(tmp_path):
     flag_dir = tmp_path / "mnemos-session-flags"
     flag_dir.mkdir(parents=True)
     (flag_dir / "mnemos-session-loaded-test-session-123").touch()
+    cache_file = tmp_path / "context-cache.txt"
+    cache_file.write_text('<mnemos-context mode="deterministic-v1"></mnemos-context>\n', encoding="utf-8")
 
     rc, output = _run_hook(
         "Explain deterministic retrieval",
         mnemos_repo_root=str(tmp_path),
-        env_extras={"PATH": f"{tmp_path}:{os.environ.get('PATH', '')}", "TMPDIR": str(tmp_path)},
+        env_extras={
+            "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+            "TMPDIR": str(tmp_path),
+            "MNEMOS_CONTEXT_CACHE_FILE": str(cache_file),
+            "MNEMOS_CONTEXT_CACHE_TTL_SECONDS": "300",
+            "MNEMOS_CONTEXT_PREFETCH": "0",
+        },
     )
 
     assert rc == 0, output
     assert "<mnemos-context" in output
     assert "<mnemos-capture-protocol>" not in output
-    assert "context --render" in log_file.read_text(encoding="utf-8")
+    assert not log_file.exists()
+
+
+def test_user_prompt_submit_cache_miss_returns_without_context(tmp_path):
+    """Cache miss should not block the prompt on a foreground context command."""
+    fake_bin = tmp_path / "mnemos"
+    log_file = tmp_path / "mnemos_calls.log"
+    fake_bin.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"echo \"$@\" >> {log_file}\n"
+        "sleep 5\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
+
+    rc, output = _run_hook(
+        "Explain deterministic retrieval",
+        mnemos_repo_root=str(tmp_path),
+        env_extras={
+            "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+            "TMPDIR": str(tmp_path),
+            "MNEMOS_CONTEXT_CACHE_FILE": str(tmp_path / "missing-cache.txt"),
+        },
+    )
+
+    assert rc == 0, output
+    assert output == ""
 
 
 def test_stop_hook_calls_capture_transcript(tmp_path):
@@ -481,7 +517,28 @@ class TestSearchOutput:
         # cursor file can never make a stray promotion render.
         monkeypatch.setenv("MNEMOS_PROMO_CURSOR", str(repo_root / "promotion-cursor.txt"))
 
-        rc, output = _run_hook("memory hook search", mnemos_repo_root=str(repo_root))
+        from core.context import render_context_block, retrieve_context
+
+        cache_file = tmp_path / "context-cache.txt"
+        cache_file.write_text(
+            render_context_block(
+                retrieve_context(
+                    prompt="memory hook search",
+                    session_id="test-session-123",
+                    host="claude-code",
+                    gateway=gw,
+                    read_only=True,
+                    allow_grep=False,
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        rc, output = _run_hook(
+            "memory hook search",
+            mnemos_repo_root=str(repo_root),
+            env_extras={"MNEMOS_CONTEXT_CACHE_FILE": str(cache_file)},
+        )
         assert rc == 0
         assert "no results found" not in output
         assert "<mnemos-context" in output
@@ -844,8 +901,8 @@ class TestKeywordExtraction:
 class TestAutonomousSearchGuidance:
     """Search guidance now lives in managed host behavior, not prompt protocol text."""
 
-    def test_prompt_hook_delegates_retrieval_to_context_command(self, tmp_path):
-        """Per-prompt search policy is implemented by `mnemos context`."""
+    def test_context_prefetch_worker_delegates_retrieval_to_context_command(self, tmp_path):
+        """Per-prompt search policy is implemented by background `mnemos context`."""
         fake_bin = tmp_path / "mnemos"
         log_file = tmp_path / "mnemos_calls.log"
         fake_bin.write_text(
@@ -856,17 +913,38 @@ class TestAutonomousSearchGuidance:
             encoding="utf-8",
         )
         fake_bin.chmod(0o755)
+        exact_cache = tmp_path / "exact.txt"
+        last_cache = tmp_path / "last.txt"
 
-        rc, output = _run_hook(
-            "why does the parser fail on empty input?",
-            mnemos_repo_root=str(tmp_path),
-            env_extras={"PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"},
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(CONTEXT_PREFETCH_WORKER),
+                "--repo-root",
+                str(tmp_path),
+                "--prompt",
+                "why does the parser fail on empty input?",
+                "--session-id",
+                "test-session-123",
+                "--host",
+                "claude-code",
+                "--exact-cache",
+                str(exact_cache),
+                "--last-cache",
+                str(last_cache),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}"},
+            timeout=30,
         )
 
-        assert rc == 0, output
-        assert "<mnemos-context" in output
-        assert "<mnemos-capture-protocol>" not in output
-        assert "context --render" in log_file.read_text(encoding="utf-8")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "<mnemos-context" in exact_cache.read_text(encoding="utf-8")
+        assert exact_cache.read_text(encoding="utf-8") == last_cache.read_text(encoding="utf-8")
+        call = log_file.read_text(encoding="utf-8")
+        assert "context --render" in call
+        assert "--read-only --no-grep" in call
 
     def test_behavior_block_owns_concrete_search_trigger_guidance(self):
         """Managed behavior text keeps concrete mid-session search triggers."""

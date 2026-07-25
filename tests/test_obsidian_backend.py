@@ -133,6 +133,24 @@ class TestWriteRead:
         result = backend.read(str(path))
         assert result["content"] == "read by path"
 
+    def test_read_uses_item_path_index_without_frontmatter_scan(self, tmp_path, monkeypatch):
+        backend = _make_backend(tmp_path)
+        backend.write(
+            layer="project",
+            item_id="indexed-read-001",
+            content="indexed read content",
+            metadata={"id": "indexed-read-001", "layer": "project"},
+        )
+
+        def fail_scan(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("read should use id path index instead of vault-wide scan")
+
+        monkeypatch.setattr(backend, "_find_path", fail_scan)
+
+        result = backend.read("indexed-read-001")
+        assert result["id"] == "indexed-read-001"
+        assert result["content"] == "indexed read content"
+
     def test_write_stores_content_hash_in_frontmatter(self, tmp_path):
         backend = _make_backend(tmp_path)
         content = "hash check content"

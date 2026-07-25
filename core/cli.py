@@ -111,6 +111,13 @@ def cli() -> None:
 @click.option("--quiet", "quiet", is_flag=True, default=False, help="Suppress capture notification output.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
 @click.option(
+    "--async",
+    "async_capture",
+    is_flag=True,
+    default=False,
+    help="Queue capture for background materialization.",
+)
+@click.option(
     "--no-classify",
     "no_classify",
     is_flag=True,
@@ -129,6 +136,7 @@ def memory_capture(
     no_color: bool,
     quiet: bool,
     as_json: bool,
+    async_capture: bool,
     no_classify: bool,
 ) -> None:
     """Capture a new memory item into the target layer (default: ephemeral).
@@ -150,6 +158,29 @@ def memory_capture(
     # when Claude omits the flag from the injected capture protocol command.
     if session_id is None:
         session_id = os.environ.get("MNEMOS_SESSION_ID")
+    if async_capture:
+        from core.capture_queue import enqueue_capture
+
+        repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+        queued = enqueue_capture(
+            repo_root=repo_root,
+            layer=layer,
+            content=content,
+            item_id=item_id,
+            tags=list(tags),
+            quality_score=quality_score,
+            run_id=run_id,
+            session_id=session_id,
+            no_classify=no_classify,
+        )
+        effective_layer = layer or "ephemeral"
+        if as_json:
+            _echo_json({"status": "queued", "id": queued.item_id, "layer": effective_layer})
+            return
+        if not quiet:
+            click.echo(f"queued: {queued.item_id}")
+        return
+
     gw = _get_gateway()
     try:
         captured_id = gw.capture(
@@ -230,6 +261,22 @@ def memory_capture(
 
         click.echo(f"error: {exc}", err=True)
         sys.exit(1)
+
+
+@cli.command("capture-worker")
+@click.option("--limit", default=None, type=int, help="Maximum queued captures to process.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output JSON result.")
+def capture_worker(limit: int | None, as_json: bool) -> None:
+    """Process queued async capture jobs."""
+    from core.capture_queue import process_pending_captures
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    result = process_pending_captures(repo_root=repo_root, limit=limit)
+    payload = {"processed": result.processed, "failed": result.failed}
+    if as_json:
+        _echo_json(payload)
+        return
+    click.echo(f"processed={result.processed} failed={result.failed}")
 
 
 @cli.command("classify")
@@ -451,6 +498,8 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
 @click.option("--host", default="unknown", help="Host adapter name.")
 @click.option("--limit", default=5, type=int, help="Maximum memories to inject.")
 @click.option("--max-chars", default=1800, type=int, help="Maximum total injected content characters.")
+@click.option("--read-only", is_flag=True, default=False, help="Avoid metadata updates during retrieval.")
+@click.option("--allow-grep/--no-grep", default=True, help="Allow or disable filesystem grep fallback.")
 def context_cmd(
     as_json: bool,
     render: bool,
@@ -459,6 +508,8 @@ def context_cmd(
     host: str,
     limit: int,
     max_chars: int,
+    read_only: bool,
+    allow_grep: bool,
 ) -> None:
     """Retrieve deterministic V1 context for host injection."""
     if as_json and render:
@@ -474,6 +525,8 @@ def context_cmd(
         host=host,
         limit=limit,
         max_chars=max_chars,
+        read_only=read_only,
+        allow_grep=allow_grep,
     )
     if as_json:
         _echo_json(payload)

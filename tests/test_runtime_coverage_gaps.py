@@ -172,6 +172,66 @@ def test_context_helpers_and_retrieval_edge_paths(
     assert context._format_error(RuntimeError()) == "RuntimeError"
 
 
+def test_retrieve_context_fast_path_is_read_only_and_skips_grep_fallback(tmp_path: Path) -> None:
+    import core.context as context
+
+    class FakeStore:
+        def read(self, item_id: str) -> dict[str, Any]:
+            raise AssertionError(f"context fast path must not enrich via store.read: {item_id}")
+
+        def update(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("context fast path must not mutate store metadata")
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self._root = tmp_path
+            self._store = FakeStore()
+            self.calls: list[dict[str, Any]] = []
+            self.last_search_diagnostics = {
+                "status": "ok",
+                "partial_failure": False,
+                "fallback_used": False,
+                "degraded_reasons": [],
+            }
+
+        def search_for_context(
+            self,
+            *,
+            query: str,
+            limit: int,
+            allow_grep: bool,
+        ) -> list[dict[str, Any]]:
+            self.calls.append({"query": query, "limit": limit, "allow_grep": allow_grep})
+            return [
+                {
+                    "item_id": "ctx-1",
+                    "content": "fast context memory",
+                    "metadata": {
+                        "id": "ctx-1",
+                        "layer": "project",
+                        "quality_score": 0.9,
+                        "confidence": 0.9,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                }
+            ]
+
+    gateway = FakeGateway()
+    payload = context.retrieve_context(
+        prompt="fast context",
+        session_id="s",
+        host="test",
+        gateway=gateway,
+        read_only=True,
+        allow_grep=False,
+    )
+
+    assert payload["count"] == 1
+    assert payload["results"][0]["id"] == "ctx-1"
+    assert payload["results"][0]["content"] == "fast context memory"
+    assert gateway.calls == [{"query": "context fast", "limit": 15, "allow_grep": False}]
+
+
 def test_search_middleware_backend_and_fallback_edges(tmp_path: Path) -> None:
     from core.search import SearchMiddleware, _format_error, _grep_health, _vector_trace
 
