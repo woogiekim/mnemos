@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,8 +103,7 @@ def _run_stop_hook(
         timeout=30,
     )
     calls = []
-    if calls_path.exists():
-        calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    calls = _wait_for_jsonl_call(calls_path)
     return result.returncode, result.stdout + result.stderr, calls
 
 
@@ -147,9 +147,24 @@ def _run_stop_hook_json(
         timeout=30,
     )
     calls = []
-    if calls_path.exists():
-        calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    calls = _wait_for_jsonl_call(calls_path)
     return result.returncode, result.stdout + result.stderr, calls
+
+
+def _read_jsonl_calls(path: Path) -> list[list[str]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _wait_for_jsonl_call(path: Path, timeout: float = 5.0) -> list[list[str]]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        calls = _read_jsonl_calls(path)
+        if calls:
+            return calls
+        time.sleep(0.05)
+    return _read_jsonl_calls(path)
 
 
 def test_user_prompt_submit_reads_cached_context_without_foreground_command(tmp_path):
@@ -216,20 +231,80 @@ def test_user_prompt_submit_cache_miss_returns_without_context(tmp_path):
 
 
 def test_stop_hook_calls_capture_transcript(tmp_path):
-    """Stop delegates extraction/capture to mnemos capture-transcript."""
-    rc, output, calls = _run_stop_hook_json(
-        [{"role": "assistant", "content": "✻ 💾 Durable decision"}],
-        tmp_path,
-        session_id="sess-stop",
+    """Stop delegates extraction/capture to mnemos capture-transcript asynchronously."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(
+        json.dumps([{"role": "assistant", "content": "✻ 💾 Durable decision"}]),
+        encoding="utf-8",
     )
+    calls_path = tmp_path / "mnemos_calls.jsonl"
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(calls_path)!r}).open('a', encoding='utf-8').write("
+        "json.dumps(sys.argv[1:], ensure_ascii=False) + '\\n')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
 
-    assert rc == 0, output
+    payload = json.dumps({
+        "session_id": "sess-stop",
+        "transcript_path": str(transcript_path),
+        "hook_event_name": "Stop",
+    })
+    env = os.environ.copy()
+    env["MNEMOS_REPO_ROOT"] = str(tmp_path)
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        ["bash", str(STOP_HOOK_SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=4,
+    )
+    calls = _wait_for_jsonl_call(calls_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
     assert len(calls) == 1
     call = calls[0]
     assert call[:2] == ["capture-transcript", "--json"]
     assert "--transcript-path" in call
     assert "--session-id" in call
     assert "sess-stop" in call
+
+
+def test_stop_hook_does_not_block_on_slow_capture_transcript(tmp_path):
+    """Stop hook must not wait for transcript capture completion."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text(json.dumps([{"role": "assistant", "content": "slow"}]), encoding="utf-8")
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text("#!/usr/bin/env bash\nsleep 5\nexit 0\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+    payload = json.dumps({
+        "session_id": "slow-stop",
+        "transcript_path": str(transcript_path),
+        "hook_event_name": "Stop",
+    })
+    env = os.environ.copy()
+    env["MNEMOS_REPO_ROOT"] = str(tmp_path)
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '')}"
+
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(STOP_HOOK_SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=2,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert time.monotonic() - started < 4
 
 
 # ---------------------------------------------------------------------------

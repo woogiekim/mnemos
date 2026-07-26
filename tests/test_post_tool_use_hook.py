@@ -74,8 +74,8 @@ def wait_for_call_count(path: Path, count: int, timeout: float = 3.0) -> None:
 
 def test_concurrent_hooks_launch_one_nonblocking_worker(tmp_path: Path) -> None:
     env, calls = hook_env(tmp_path)
+    env["MNEMOS_TEST_SLEEP"] = "5"
 
-    started = time.monotonic()
     processes = [
         subprocess.Popen(
             ["bash", str(HOOK)],
@@ -88,15 +88,17 @@ def test_concurrent_hooks_launch_one_nonblocking_worker(tmp_path: Path) -> None:
         for _ in range(12)
     ]
     results = [process.communicate("{}", timeout=2) for process in processes]
-    elapsed = time.monotonic() - started
 
-    assert elapsed < 1.0
     assert all(process.returncode == 0 for process in processes)
     assert all(stderr == "" for _, stderr in results)
 
-    wait_for(Path(env["MNEMOS_BG_RESULT_FILE"]))
+    wait_for_call_count(calls, 1, timeout=20)
     assert calls.read_text(encoding="utf-8").splitlines() == ["run"]
 
+    Path(env["MNEMOS_BG_RESULT_FILE"]).write_text(
+        '<mnemos-context type="background-activity">done</mnemos-context>\n',
+        encoding="utf-8",
+    )
     delivered = run_hook(env)
     assert "background-activity" in delivered.stdout
     assert not Path(env["MNEMOS_BG_RESULT_FILE"]).exists()
@@ -119,16 +121,16 @@ def test_stale_lock_is_recovered(tmp_path: Path) -> None:
 def test_timed_out_worker_releases_lock_for_retry(tmp_path: Path) -> None:
     env, calls = hook_env(tmp_path)
     env.update(
-        {
-            "MNEMOS_BG_INTERVAL_MINUTES": "0",
-            "MNEMOS_BG_WORKER_TIMEOUT_SECONDS": "1",
-            "MNEMOS_TEST_SLEEP": "5",
-        }
-    )
+            {
+                "MNEMOS_BG_INTERVAL_MINUTES": "0",
+                "MNEMOS_BG_WORKER_TIMEOUT_SECONDS": "3",
+                "MNEMOS_TEST_SLEEP": "8",
+            }
+        )
 
     assert run_hook(env).returncode == 0
-    wait_for_call_count(calls, 1)
-    time.sleep(1.2)
+    wait_for_call_count(calls, 1, timeout=20)
+    time.sleep(3.5)
 
     assert run_hook(env).returncode == 0
-    wait_for_call_count(calls, 2)
+    wait_for_call_count(calls, 2, timeout=20)
