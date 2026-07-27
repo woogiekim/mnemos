@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hook_input import read_available_stdin
+
 
 def main() -> int:
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
@@ -20,7 +22,7 @@ def main() -> int:
         return 0
 
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(read_available_stdin() or b"{}")
     except json.JSONDecodeError:
         payload = {}
 

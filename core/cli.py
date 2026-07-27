@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
@@ -12,6 +13,7 @@ import click
 import yaml
 
 from core.gateway import MemoryGateway
+from core.hook_input import read_available_stdin
 from core.output import capture_notice
 from core.policy import PolicyViolationError
 
@@ -20,7 +22,7 @@ from core.policy import PolicyViolationError
 # Bootstrap sync helper (stdlib-only — no core.* imports)
 # ---------------------------------------------------------------------------
 
-_BOOTSTRAP_SYNC_DIRS = ("core", "agents")
+_BOOTSTRAP_SYNC_DIRS = ("core", "agents", "hooks")
 
 
 def _bootstrap_sync_source(repo_root: str | None) -> None:
@@ -91,6 +93,62 @@ def _truncate_content(s: str, width: int, full: bool = False) -> str:
 def _echo_json(payload: object) -> None:
     """Emit stable UTF-8 JSON for machine consumers."""
     click.echo(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+
+
+def _queue_stale_ingest_hook() -> bool:
+    """Convert a cached synchronous PostToolUse command to detached ingestion."""
+    raw_payload = read_available_stdin()
+    if not raw_payload:
+        return False
+
+    try:
+        payload = json.loads(raw_payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+    if not isinstance(payload, dict) or payload.get("hook_event_name") != "PostToolUse":
+        return False
+
+    if payload.get("tool_name") not in {"Write", "Edit", "MultiEdit"}:
+        return True
+
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    raw_path = (
+        tool_input.get("file_path")
+        or payload.get("file_path")
+        or payload.get("path")
+        or ""
+    )
+    changed_path = Path(str(raw_path)).expanduser()
+    if changed_path.name != "CLAUDE.md":
+        return True
+
+    mnemos_bin = shutil.which("mnemos")
+    if not mnemos_bin:
+        return True
+
+    project_root = str(payload.get("cwd") or changed_path.parent)
+    try:
+        subprocess.Popen(
+            [
+                mnemos_bin,
+                "ingest-claude-md",
+                "--project-root",
+                project_root,
+                "--skip-files",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+    return True
 
 
 @click.group()
@@ -2338,6 +2396,9 @@ def memory_ingest_claude_md(
     Missing files and directories are silently skipped.
     Pass --skip-files to omit the ~/.claude/projects memory sync.
     """
+    if _queue_stale_ingest_hook():
+        return
+
     from agents.scanner import ClaudeMdScanner
     from agents.ingest import IngestAgent
     from core.adapters.claude import ClaudeCodeAdapter

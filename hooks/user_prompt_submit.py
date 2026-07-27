@@ -12,6 +12,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from hook_input import read_available_stdin
+
 
 def _cache_paths(repo_root: str, session_id: str, prompt: str) -> tuple[Path, Path]:
     override = os.environ.get("MNEMOS_CONTEXT_CACHE_FILE")
@@ -157,7 +159,7 @@ def main() -> int:
         return 0
 
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(read_available_stdin() or b"{}")
     except json.JSONDecodeError:
         payload = {}
     session_id = str(payload.get("session_id") or "")

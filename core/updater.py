@@ -7,8 +7,8 @@ Sequence:
 
 Managed block sentinels
 -----------------------
-settings.json  : hook entries containing "mnemos ingest-claude-md"
-                 or "mnemos search" (PostToolUse / UserPromptSubmit hooks)
+settings.json  : managed mnemos hook entries for PostToolUse,
+                 UserPromptSubmit, and Stop
 CLAUDE.md      : <!-- mnemos-start --> … <!-- mnemos-end -->
 cursor rules   : <!-- mnemos:start --> … <!-- mnemos:end -->
 """
@@ -33,11 +33,15 @@ from core.adapters.cursor import CURSOR_RULES_BLOCK
 # recorded in the existing hook command (we preserve the path, only the
 # structure/matcher is normalised).
 _POST_TOOL_USE_HOOK_TEMPLATE = {
-    "matcher": "Write|Edit",
+    "matcher": "",
     "hooks": [
         {
             "type": "command",
-            "command": "MNEMOS_REPO_ROOT=\"{repo_root}\" mnemos ingest-claude-md",
+            "timeout": 10,
+            "command": (
+                'MNEMOS_REPO_ROOT="{repo_root}" '
+                'bash "{repo_root}/hooks/PostToolUse.sh" 2>/dev/null || true'
+            ),
         }
     ],
 }
@@ -48,8 +52,8 @@ _USER_PROMPT_SUBMIT_HOOK_TEMPLATE = {
         {
             "type": "command",
             "command": (
-                'MNEMOS_REPO_ROOT="{repo_root}" mnemos search '
-                '"${CLAUDE_PROMPT:0:200}" 2>/dev/null | head -30 || true'
+                'MNEMOS_REPO_ROOT="{repo_root}" '
+                'bash "{repo_root}/hooks/UserPromptSubmit.sh" 2>/dev/null || true'
             ),
         }
     ],
@@ -141,15 +145,16 @@ def pipx_reinstall() -> None:
 # Step 1b — sync updated source directories to the install location
 # ---------------------------------------------------------------------------
 
-_SYNC_DIRS = ("core", "agents")
+_SYNC_DIRS = ("core", "agents", "hooks")
 
 
 def sync_source_to_install(repo_root: str, install_root: Optional[Path] = None) -> list[str]:
     """Copy updated source directories from repo_root to the install location.
 
     After ``git pull`` updates the dev repo, the editable-install target
-    (``~/.mnemos/core/`` and ``~/.mnemos/agents/``) must be refreshed so the
-    running binary loads the new code.
+    (``~/.mnemos/core/``, ``~/.mnemos/agents/``, and ``~/.mnemos/hooks/``)
+    must be refreshed so the running binary and registered host hooks load the
+    new code.
 
     Args:
         repo_root: Path to the source dev repo (e.g. ~/Development/mnemos).
@@ -157,8 +162,8 @@ def sync_source_to_install(repo_root: str, install_root: Optional[Path] = None) 
 
     Returns:
         List of directory paths that were synced (relative names such as
-        ``"core"`` and ``"agents"``).  Directories that are absent in
-        ``repo_root`` are silently skipped.
+        ``"core"``, ``"agents"``, and ``"hooks"``). Directories that are
+        absent in ``repo_root`` are silently skipped.
     """
     if install_root is None:
         install_root = Path.home() / ".mnemos"
@@ -192,7 +197,13 @@ def _is_mnemos_hook_entry(entry: dict) -> bool:
     """Return True if this hook-list entry contains any mnemos command."""
     for h in entry.get("hooks", []):
         cmd = h.get("command", "")
-        if "mnemos ingest-claude-md" in cmd or "mnemos search" in cmd:
+        if (
+            "mnemos ingest-claude-md" in cmd
+            or "mnemos search" in cmd
+            or "PostToolUse.sh" in cmd
+            or "UserPromptSubmit.sh" in cmd
+            or "Stop.sh" in cmd
+        ):
             return True
     return False
 

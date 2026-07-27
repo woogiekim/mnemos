@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -70,6 +72,129 @@ def wait_for_call_count(path: Path, count: int, timeout: float = 3.0) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"timed out waiting for {count} calls in {path}")
+
+
+def test_claude_md_write_queues_nonblocking_ingest(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "ingest-calls.log"
+    fake_mnemos = bin_dir / "mnemos"
+    fake_mnemos.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"${MNEMOS_TEST_CALLS}\"\n",
+        encoding="utf-8",
+    )
+    fake_mnemos.chmod(0o755)
+    timestamp = tmp_path / "last-run.ts"
+    timestamp.touch()
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "MNEMOS_REPO_ROOT": str(tmp_path),
+            "MNEMOS_BG_TS_FILE": str(timestamp),
+            "MNEMOS_BG_LOCK_FILE": str(tmp_path / "worker.lock"),
+            "MNEMOS_BG_RESULT_FILE": str(tmp_path / "result.txt"),
+            "MNEMOS_BG_INTERVAL_MINUTES": "5",
+            "MNEMOS_TEST_CALLS": str(calls),
+        }
+    )
+    payload = json.dumps(
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp_path / "CLAUDE.md")},
+            "cwd": str(tmp_path),
+        }
+    )
+
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(HOOK)],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=2,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stderr
+    assert elapsed < 1.0
+    wait_for_call_count(calls, 1)
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        f"ingest-claude-md --project-root {tmp_path} --skip-files"
+    ]
+
+
+def test_non_claude_write_does_not_queue_ingest(tmp_path: Path) -> None:
+    env, calls = hook_env(tmp_path)
+    Path(env["MNEMOS_BG_TS_FILE"]).touch()
+    payload = json.dumps(
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp_path / "service.py")},
+            "cwd": str(tmp_path),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(HOOK)],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=2,
+        check=False,
+    )
+    time.sleep(0.3)
+
+    assert result.returncode == 0, result.stderr
+    assert not calls.exists()
+
+
+def test_post_tool_hook_does_not_wait_for_stdin_eof(tmp_path: Path) -> None:
+    env, _ = hook_env(tmp_path)
+    Path(env["MNEMOS_BG_TS_FILE"]).touch()
+    proc = subprocess.Popen(
+        ["bash", str(HOOK)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read"}))
+    proc.stdin.flush()
+    started = time.monotonic()
+    timed_out = False
+    try:
+        rc = proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGKILL)
+        rc = proc.wait(timeout=1)
+    finally:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    elapsed = time.monotonic() - started
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    proc.stdout.close()
+    proc.stderr.close()
+
+    assert not timed_out, "PostToolUse.sh waited for stdin EOF"
+    assert rc == 0, stderr
+    assert elapsed < 1.0
+    assert stdout == ""
 
 
 def test_concurrent_hooks_launch_one_nonblocking_worker(tmp_path: Path) -> None:

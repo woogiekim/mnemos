@@ -2,11 +2,14 @@
 """Fast PostToolUse hook entrypoint."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from hook_input import read_available_stdin
 
 
 def _drain_result(result_file: Path) -> None:
@@ -28,12 +31,57 @@ def _drain_result(result_file: Path) -> None:
             pass
 
 
+def _start_claude_md_ingest(payload: dict, mnemos_bin: str) -> None:
+    if payload.get("tool_name") not in {"Write", "Edit", "MultiEdit"}:
+        return
+
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    raw_path = (
+        tool_input.get("file_path")
+        or payload.get("file_path")
+        or payload.get("path")
+        or ""
+    )
+    changed_path = Path(str(raw_path)).expanduser()
+    if changed_path.name != "CLAUDE.md":
+        return
+
+    project_root = str(payload.get("cwd") or changed_path.parent)
+    try:
+        subprocess.Popen(
+            [
+                mnemos_bin,
+                "ingest-claude-md",
+                "--project-root",
+                project_root,
+                "--skip-files",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
 def main() -> int:
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", "")
     if not repo_root:
         return 0
-    if not shutil.which("mnemos"):
+    mnemos_bin = shutil.which("mnemos")
+    if not mnemos_bin:
         return 0
+
+    try:
+        payload = json.loads(read_available_stdin() or b"{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if isinstance(payload, dict):
+        _start_claude_md_ingest(payload, mnemos_bin)
 
     uid = os.getuid() if hasattr(os, "getuid") else 0
     interval = os.environ.get("MNEMOS_BG_INTERVAL_MINUTES", "5")

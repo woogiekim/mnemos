@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -165,6 +167,179 @@ def _wait_for_jsonl_call(path: Path, timeout: float = 5.0) -> list[list[str]]:
             return calls
         time.sleep(0.05)
     return _read_jsonl_calls(path)
+
+
+def _run_hook_with_open_stdin(
+    script: Path,
+    payload: dict,
+    env: dict[str, str],
+) -> tuple[int, float, str]:
+    proc = subprocess.Popen(
+        ["bash", str(script)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps(payload))
+    proc.stdin.flush()
+    started = time.monotonic()
+    timed_out = False
+    try:
+        rc = proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGKILL)
+        rc = proc.wait(timeout=1)
+    finally:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    elapsed = time.monotonic() - started
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    output = proc.stdout.read() + proc.stderr.read()
+    proc.stdout.close()
+    proc.stderr.close()
+    if timed_out:
+        pytest.fail(f"{script.name} waited for stdin EOF")
+    return rc, elapsed, output
+
+
+def test_user_prompt_submit_does_not_wait_for_stdin_eof(tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "MNEMOS_CONTEXT_PREFETCH": "0",
+            "MNEMOS_REPO_ROOT": str(tmp_path),
+            "TMPDIR": str(tmp_path),
+        }
+    )
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": "open-user-prompt",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "check hook latency",
+        },
+        env,
+    )
+
+    assert rc == 0, output
+    assert elapsed < 1.0
+
+
+def test_stop_hook_does_not_wait_for_stdin_eof(tmp_path):
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text("[]", encoding="utf-8")
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "MNEMOS_REPO_ROOT": str(tmp_path),
+            "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        }
+    )
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        STOP_HOOK_SCRIPT,
+        {
+            "session_id": "open-stop",
+            "transcript_path": str(transcript_path),
+            "hook_event_name": "Stop",
+        },
+        env,
+    )
+
+    assert rc == 0, output
+    assert elapsed < 1.0
+
+
+def test_stale_direct_ingest_hook_queues_nonblocking_compatibility(tmp_path):
+    mnemos_cli = shutil.which("mnemos")
+    assert mnemos_cli is not None
+    calls_path = tmp_path / "mnemos_calls.jsonl"
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(calls_path)!r}).open('a', encoding='utf-8').write("
+        "json.dumps(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "MNEMOS_REPO_ROOT": str(tmp_path),
+            "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+            "PYTHONPATH": str(HOOK_SCRIPT.parent.parent),
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            mnemos_cli,
+            "ingest-claude-md",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(
+        json.dumps(
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Write",
+                "tool_input": {"file_path": str(tmp_path / "CLAUDE.md")},
+                "cwd": str(tmp_path),
+            }
+        )
+    )
+    proc.stdin.flush()
+    started = time.monotonic()
+    timed_out = False
+    try:
+        rc = proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGKILL)
+        rc = proc.wait(timeout=1)
+    finally:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    elapsed = time.monotonic() - started
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    output = proc.stdout.read() + proc.stderr.read()
+    proc.stdout.close()
+    proc.stderr.close()
+
+    assert not timed_out, "stale ingest hook waited in the foreground"
+    assert rc == 0, output
+    assert elapsed < 1.0
+    calls = _wait_for_jsonl_call(calls_path)
+    assert calls == [
+        [
+            "ingest-claude-md",
+            "--project-root",
+            str(tmp_path),
+            "--skip-files",
+        ]
+    ]
 
 
 def test_user_prompt_submit_reads_cached_context_without_foreground_command(tmp_path):

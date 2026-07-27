@@ -203,7 +203,8 @@ class TestFreshInstall_AC1:
             for entry in hooks["PostToolUse"]
             for h in entry.get("hooks", [])
         )
-        assert "mnemos ingest-claude-md" in post_cmds
+        assert "PostToolUse.sh" in post_cmds
+        assert " mnemos ingest-claude-md" not in post_cmds
         assert "PostToolUse.sh" in post_cmds  # bg-check hook
         assert any(
             "UserPromptSubmit.sh" in h.get("command", "")

@@ -112,8 +112,14 @@ class TestClaudeCodeAdapterInstall:
         assert "PostToolUse" in hooks
         assert "UserPromptSubmit" in hooks
 
-        post_cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
-        assert "mnemos ingest-claude-md" in post_cmd
+        post_commands = [
+            hook["command"]
+            for entry in hooks["PostToolUse"]
+            for hook in entry.get("hooks", [])
+        ]
+        assert len(post_commands) == 1
+        assert "PostToolUse.sh" in post_commands[0]
+        assert " mnemos ingest-claude-md" not in post_commands[0]
 
         user_cmd = hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
         assert "UserPromptSubmit.sh" in user_cmd
@@ -239,7 +245,11 @@ class TestClaudeCodeAdapterUpdate:
 
         result = json.loads(settings.read_text())
         hooks = result["hooks"]["PostToolUse"]
-        assert hooks[0]["matcher"] == "Write|Edit"
+        assert len(hooks) == 1
+        assert hooks[0]["matcher"] == ""
+        command = hooks[0]["hooks"][0]["command"]
+        assert "PostToolUse.sh" in command
+        assert " mnemos ingest-claude-md" not in command
 
     def test_update_replaces_legacy_stop_hook_with_canonical_stop_sh(self, tmp_path):
         """update() replaces a legacy mnemos Stop hook with the canonical Stop.sh entry.

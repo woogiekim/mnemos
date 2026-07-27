@@ -51,8 +51,9 @@ class TestUpdateSettingsJson:
         hooks = result["hooks"]["PostToolUse"]
         assert len(hooks) == 1
         cmd = hooks[0]["hooks"][0]["command"]
-        assert "mnemos ingest-claude-md" in cmd
-        assert hooks[0]["matcher"] == "Write|Edit"
+        assert "PostToolUse.sh" in cmd
+        assert " mnemos ingest-claude-md" not in cmd
+        assert hooks[0]["matcher"] == ""
 
     def test_replaces_user_prompt_submit_hook(self, tmp_path):
         settings = tmp_path / "settings.json"
@@ -75,7 +76,8 @@ class TestUpdateSettingsJson:
         hooks = result["hooks"]["UserPromptSubmit"]
         assert len(hooks) == 1
         cmd = hooks[0]["hooks"][0]["command"]
-        assert "mnemos search" in cmd
+        assert "UserPromptSubmit.sh" in cmd
+        assert " mnemos search" not in cmd
 
     def test_preserves_non_mnemos_hooks(self, tmp_path):
         settings = tmp_path / "settings.json"
@@ -459,6 +461,27 @@ class TestSyncSourceToInstall:
         assert (install_root / "core" / "cli.py").exists()
         assert (install_root / "agents" / "writer.py").exists()
 
+    def test_copies_host_hook_runtime(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path,
+            {
+                "hooks": [
+                    "hook_input.py",
+                    "user_prompt_submit.py",
+                    "stop_hook.py",
+                ]
+            },
+        )
+        install_root = tmp_path / "install"
+        install_root.mkdir()
+
+        synced = sync_source_to_install(str(repo), install_root=install_root)
+
+        assert synced == ["hooks"]
+        assert (install_root / "hooks" / "hook_input.py").exists()
+        assert (install_root / "hooks" / "user_prompt_submit.py").exists()
+        assert (install_root / "hooks" / "stop_hook.py").exists()
+
     def test_overwrites_stale_files(self, tmp_path):
         repo = self._make_repo(tmp_path, {"core": ["updater.py"]})
         install_root = tmp_path / "install"
@@ -748,13 +771,14 @@ class TestBootstrapSyncSource:
                 f.write_text(content)
         return repo
 
-    def test_copies_core_and_agents_to_install(self, tmp_path, monkeypatch):
-        """_bootstrap_sync_source must copy core/ and agents/ to ~/.mnemos/."""
+    def test_copies_core_agents_and_hooks_to_install(self, tmp_path, monkeypatch):
+        """_bootstrap_sync_source copies runtime code and host hooks."""
         from core.cli import _bootstrap_sync_source
 
         repo = self._make_repo(tmp_path, {
             "core": [("install.py", "def migrate_policy_transient(): pass\n")],
             "agents": [("writer.py", "# writer\n")],
+            "hooks": [("hook_input.py", "# bounded hook input\n")],
         })
         fake_home = tmp_path / "fakehome"
         fake_mnemos = fake_home / ".mnemos"
@@ -765,6 +789,7 @@ class TestBootstrapSyncSource:
 
         assert (fake_mnemos / "core" / "install.py").exists()
         assert (fake_mnemos / "agents" / "writer.py").exists()
+        assert (fake_mnemos / "hooks" / "hook_input.py").exists()
 
     def test_new_function_is_importable_after_sync(self, tmp_path, monkeypatch):
         """After _bootstrap_sync_source, a newly-added function in core/ must be importable."""

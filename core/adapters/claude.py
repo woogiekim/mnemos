@@ -26,21 +26,8 @@ CLAUDE_MD_BLOCK = (
 
 # Hook definitions that install.sh injects.
 #
-# Two PostToolUse entries are registered:
-#   1. ingest-claude-md — fires on Write|Edit to keep CLAUDE.md memories current.
-#   2. bg-check — fires on all tool calls (empty matcher) for background GC,
-#      auto-promotion, and duplicate detection. The hook atomically elects a
-#      detached worker, so heavy maintenance never blocks the tool response.
-_POST_TOOL_USE_INGEST_HOOK_TEMPLATE = {
-    "matcher": "Write|Edit",
-    "hooks": [
-        {
-            "type": "command",
-            "command": "MNEMOS_REPO_ROOT=\"{repo_root}\" mnemos ingest-claude-md",
-        }
-    ],
-}
-
+# One PostToolUse entry is registered. It dispatches CLAUDE.md ingestion and
+# periodic maintenance to detached workers so no storage scan runs inline.
 _POST_TOOL_USE_BG_HOOK_TEMPLATE = {
     "matcher": "",
     "hooks": [
@@ -273,11 +260,8 @@ class ClaudeCodeAdapter(HostAdapter):
         hooks = data.setdefault("hooks", {})
         changed = False
 
-        # PostToolUse: two canonical entries (ingest + bg-check)
-        post_tool_templates = [
-            _POST_TOOL_USE_INGEST_HOOK_TEMPLATE,
-            _POST_TOOL_USE_BG_HOOK_TEMPLATE,
-        ]
+        # PostToolUse: one nonblocking dispatcher entry.
+        post_tool_templates = [_POST_TOOL_USE_BG_HOOK_TEMPLATE]
         hook_list = hooks.get("PostToolUse", [])
         non_mnemos = [e for e in hook_list if not _is_mnemos_hook_entry(e)]
         canonical_entries = [_render_template(t, repo_root) for t in post_tool_templates]
@@ -397,13 +381,10 @@ class ClaudeCodeAdapter(HostAdapter):
             if repo_root:
                 break
 
-        # PostToolUse: two canonical entries (ingest + bg-check)
+        # PostToolUse: one nonblocking dispatcher entry.
         post_tool_list = hooks.get("PostToolUse", [])
         non_mnemos_pt = [e for e in post_tool_list if not _is_mnemos_hook_entry(e)]
-        canonical_pt = [
-            _render_template(_POST_TOOL_USE_INGEST_HOOK_TEMPLATE, repo_root),
-            _render_template(_POST_TOOL_USE_BG_HOOK_TEMPLATE, repo_root),
-        ]
+        canonical_pt = [_render_template(_POST_TOOL_USE_BG_HOOK_TEMPLATE, repo_root)]
         new_pt = non_mnemos_pt + canonical_pt
         if new_pt != post_tool_list:
             changed = True
@@ -474,8 +455,7 @@ class ClaudeCodeAdapter(HostAdapter):
         """Check that all expected Claude Code hooks and managed blocks are present.
 
         Checks:
-        - PostToolUse hook (mnemos ingest-claude-md) in settings.json
-        - PostToolUse hook (PostToolUse.sh / mnemos bg-check) in settings.json
+        - PostToolUse hook (PostToolUse.sh) in settings.json
         - UserPromptSubmit hook (UserPromptSubmit.sh) in settings.json
         - Managed block (<!-- mnemos-start --> ... <!-- mnemos-end -->) in CLAUDE.md
 
@@ -491,9 +471,6 @@ class ClaudeCodeAdapter(HostAdapter):
                 hooks = data.get("hooks", {})
 
                 post_list = hooks.get("PostToolUse", [])
-                if not any(_is_mnemos_hook_entry(e) and "ingest-claude-md" in str(e) for e in post_list):
-                    missing.append("PostToolUse ingest-claude-md hook (settings.json)")
-
                 if not any(
                     _is_mnemos_hook_entry(e)
                     and ("PostToolUse.sh" in str(e) or "bg-check" in str(e))

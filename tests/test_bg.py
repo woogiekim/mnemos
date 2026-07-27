@@ -875,8 +875,8 @@ class TestBgCheckCliCommand:
 # ---------------------------------------------------------------------------
 
 class TestClaudeAdapterBgHook:
-    def test_install_registers_two_post_tool_use_entries(self, tmp_path: Path, monkeypatch, safe_repo_root):
-        """After install, settings.json should have two PostToolUse hooks."""
+    def test_install_registers_one_post_tool_use_dispatcher(self, tmp_path: Path, monkeypatch, safe_repo_root):
+        """After install, settings.json has one nonblocking PostToolUse hook."""
         # Issue #70: a SAFE repo_root is required for install() to template hooks;
         # the autouse temp default would be refused. safe_repo_root sets it.
         from core.adapters.claude import ClaudeCodeAdapter
@@ -893,9 +893,9 @@ class TestClaudeAdapterBgHook:
         import json
         data = json.loads(settings.read_text())
         post_hooks = data["hooks"].get("PostToolUse", [])
-        assert len(post_hooks) == 2, f"Expected 2 PostToolUse hooks, got {len(post_hooks)}"
+        assert len(post_hooks) == 1, f"Expected 1 PostToolUse hook, got {len(post_hooks)}"
 
-    def test_install_registers_ingest_hook(self, tmp_path: Path, monkeypatch, safe_repo_root):
+    def test_install_does_not_register_synchronous_ingest(self, tmp_path: Path, monkeypatch, safe_repo_root):
         from core.adapters.claude import ClaudeCodeAdapter
 
         claude_dir = tmp_path / ".claude"
@@ -910,7 +910,8 @@ class TestClaudeAdapterBgHook:
         data = json.loads(settings.read_text())
         post_hooks = data["hooks"].get("PostToolUse", [])
         cmds = " ".join(str(h) for h in post_hooks)
-        assert "ingest-claude-md" in cmds
+        assert " mnemos ingest-claude-md" not in cmds
+        assert "PostToolUse.sh" in cmds
 
     def test_install_registers_bg_hook(self, tmp_path: Path, monkeypatch, safe_repo_root):
         from core.adapters.claude import ClaudeCodeAdapter
@@ -991,5 +992,5 @@ class TestClaudeAdapterBgHook:
 
         data = json.loads(settings.read_text())
         post_hooks = data["hooks"].get("PostToolUse", [])
-        # Should still be exactly 2 (no duplicates from second install)
-        assert len(post_hooks) == 2
+        # Should still be exactly 1 (no duplicates from second install)
+        assert len(post_hooks) == 1
