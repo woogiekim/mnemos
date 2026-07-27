@@ -28,6 +28,10 @@ from core.adapters.claude import CLAUDE_MD_BLOCK
 from core.adapters.cursor import CURSOR_RULES_BLOCK
 
 
+_UPDATE_REEXEC_ENV = "MNEMOS_UPDATE_REEXEC"
+_UPDATE_ENTRYPOINT = "from core.cli import cli; cli()"
+
+
 # Hook definitions that install.sh injects.  The MNEMOS_REPO_ROOT placeholder
 # is expanded at install time; on update we keep whatever value is already
 # recorded in the existing hook command (we preserve the path, only the
@@ -93,6 +97,21 @@ def git_pull(repo_root: str) -> None:
     _run(["git", "pull", "--rebase", "origin", "main"], cwd=repo_root)
 
 
+def _git_revision(repo_root: str) -> Optional[str]:
+    """Return the checkout's current commit, or ``None`` when unavailable."""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+
+    revision = result.stdout.strip()
+    return revision or None
+
+
 def _stash_if_dirty(repo_root: str) -> bool:
     """Stash local changes in repo_root if the working tree is dirty.
 
@@ -139,6 +158,31 @@ def _stash_pop(repo_root: str) -> None:
 def pipx_reinstall() -> None:
     """Run pipx reinstall mnemos."""
     _run(["pipx", "reinstall", "mnemos"])
+
+
+def _run_updated_process(repo_root: str) -> int:
+    """Finish the update in a process that imports the refreshed source tree."""
+    env = os.environ.copy()
+    env[_UPDATE_REEXEC_ENV] = "1"
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else repo_root
+    )
+
+    command = [
+        sys.executable,
+        "-c",
+        _UPDATE_ENTRYPOINT,
+        "update",
+        "--repo-root",
+        repo_root,
+        "--skip-git-pull",
+        "--skip-pipx",
+    ]
+    result = subprocess.run(command, cwd=repo_root, env=env)
+    return result.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -438,9 +482,12 @@ def run_update(
         repo_root = str(Path(__file__).resolve().parents[1])
 
     exit_code = 0
+    source_revision_before: Optional[str] = None
+    source_revision_after: Optional[str] = None
 
     # -- 1. git pull ---------------------------------------------------------
     if not skip_git_pull:
+        source_revision_before = _git_revision(repo_root)
         print("── git pull --rebase origin main ─────────────────────────────")
         # Auto-stash any local changes before pulling, restore after.
         stashed = _stash_if_dirty(repo_root)
@@ -469,6 +516,8 @@ def run_update(
             print("\n── update aborted ────────────────────────────────────────────────")
             return 1
 
+        source_revision_after = _git_revision(repo_root)
+
     # -- 1b. sync updated source directories to install location -------------
     # git pull updates the dev repo but ~/.mnemos/core/ and ~/.mnemos/agents/
     # are separate copies that must be refreshed so the running binary loads
@@ -491,6 +540,24 @@ def run_update(
         except subprocess.CalledProcessError as exc:
             print(f"warning: pipx reinstall failed — {exc}", file=sys.stderr)
             exit_code = 1
+
+    source_changed = (
+        source_revision_before is not None
+        and source_revision_after is not None
+        and source_revision_before != source_revision_after
+    )
+    if source_changed and os.environ.get(_UPDATE_REEXEC_ENV) != "1":
+        if exit_code != 0:
+            print(
+                "warning: refreshed runtime was not started because pipx reinstall failed",
+                file=sys.stderr,
+            )
+            return exit_code
+
+        print("\n── continuing with refreshed runtime ───────────────────────────")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return _run_updated_process(repo_root)
 
     # -- 3. Replace managed blocks via adapters (run ALL — not filtered by is_present) --
     print("\n── updating managed config blocks ───────────────────────────────")

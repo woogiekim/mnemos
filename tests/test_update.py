@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -589,6 +592,139 @@ class TestSyncSourceToInstall:
         )
 
         assert exit_code == 0, "sync failure must not change update exit code"
+
+    def test_run_update_hands_off_to_refreshed_runtime_after_pull(
+        self, tmp_path, monkeypatch
+    ):
+        """A changed checkout must finish config work in a fresh Python process."""
+        from core import updater as updater_module
+
+        revisions = iter(["old-revision", "new-revision"])
+        call_order: list[str] = []
+
+        monkeypatch.setattr(
+            updater_module,
+            "_git_revision",
+            lambda _repo_root: next(revisions),
+        )
+        monkeypatch.setattr(updater_module, "_stash_if_dirty", lambda _repo_root: False)
+        monkeypatch.setattr(
+            updater_module,
+            "git_pull",
+            lambda _repo_root: call_order.append("pull"),
+        )
+        monkeypatch.setattr(
+            updater_module,
+            "sync_source_to_install",
+            lambda _repo_root, install_root=None: call_order.append("sync") or ["core"],
+        )
+        monkeypatch.setattr(
+            updater_module,
+            "pipx_reinstall",
+            lambda: call_order.append("pipx"),
+        )
+
+        def fake_handoff(repo_root: str) -> int:
+            call_order.append(f"handoff:{repo_root}")
+            return 23
+
+        monkeypatch.setattr(
+            updater_module,
+            "_run_updated_process",
+            fake_handoff,
+        )
+        monkeypatch.setattr(
+            updater_module,
+            "_run_bg_check_quiet",
+            lambda: call_order.append("bg-check"),
+        )
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=False,
+            home=tmp_path,
+        )
+
+        assert exit_code == 23
+        assert call_order == [
+            "pull",
+            "sync",
+            "pipx",
+            f"handoff:{tmp_path}",
+        ]
+
+    def test_run_update_does_not_handoff_when_pull_keeps_same_revision(
+        self, tmp_path, monkeypatch
+    ):
+        """A no-op pull must not pay for another Python process."""
+        from core import updater as updater_module
+
+        monkeypatch.setattr(
+            updater_module,
+            "_git_revision",
+            lambda _repo_root: "same",
+        )
+        monkeypatch.setattr(updater_module, "_stash_if_dirty", lambda _repo_root: False)
+        monkeypatch.setattr(updater_module, "git_pull", lambda _repo_root: None)
+        monkeypatch.setattr(
+            updater_module,
+            "sync_source_to_install",
+            lambda *_args, **_kwargs: [],
+        )
+        monkeypatch.setattr(updater_module, "pipx_reinstall", lambda: None)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+        monkeypatch.setattr(
+            updater_module,
+            "_run_updated_process",
+            lambda _repo_root: (_ for _ in ()).throw(AssertionError("unexpected handoff")),
+        )
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=False,
+            skip_pipx=False,
+            home=tmp_path,
+        )
+
+        assert exit_code == 0
+
+    def test_updated_process_imports_repo_and_skips_completed_phases(
+        self, tmp_path, monkeypatch
+    ):
+        """The handoff must import new source and avoid a pull/reinstall loop."""
+        from core import updater as updater_module
+
+        captured: dict[str, object] = {}
+
+        def fake_run(command, cwd=None, env=None):
+            captured.update(command=command, cwd=cwd, env=env)
+            return subprocess.CompletedProcess(command, 19)
+
+        monkeypatch.setattr(updater_module.subprocess, "run", fake_run)
+        monkeypatch.setenv("PYTHONPATH", "/existing/pythonpath")
+
+        exit_code = updater_module._run_updated_process(str(tmp_path))
+
+        assert exit_code == 19
+        assert captured["cwd"] == str(tmp_path)
+        assert captured["command"] == [
+            sys.executable,
+            "-c",
+            updater_module._UPDATE_ENTRYPOINT,
+            "update",
+            "--repo-root",
+            str(tmp_path),
+            "--skip-git-pull",
+            "--skip-pipx",
+        ]
+        env = captured["env"]
+        assert isinstance(env, dict)
+        assert env[updater_module._UPDATE_REEXEC_ENV] == "1"
+        assert env["PYTHONPATH"].split(os.pathsep) == [
+            str(tmp_path),
+            "/existing/pythonpath",
+        ]
 
 
 # ---------------------------------------------------------------------------
