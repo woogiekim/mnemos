@@ -2,6 +2,7 @@
 """Read one host hook payload without requiring stdin EOF."""
 from __future__ import annotations
 
+import json
 import os
 import select
 import stat
@@ -10,10 +11,22 @@ import time
 
 
 DEFAULT_IDLE_SECONDS = 0.2
+MAX_BYTES = 1024 * 1024
 READ_SIZE = 65536
 
 
-def read_available_stdin(idle_seconds: float = DEFAULT_IDLE_SECONDS) -> bytes:
+def is_complete_json(payload: bytearray) -> bool:
+    try:
+        json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return True
+
+
+def read_available_stdin(
+    idle_seconds: float = DEFAULT_IDLE_SECONDS,
+    max_bytes: int = MAX_BYTES,
+) -> bytes:
     """Return delivered stdin bytes after EOF or a short idle window."""
     try:
         fd = sys.stdin.fileno()
@@ -29,11 +42,11 @@ def read_available_stdin(idle_seconds: float = DEFAULT_IDLE_SECONDS) -> bytes:
     except OSError:
         pass
 
-    chunks: list[bytes] = []
+    payload = bytearray()
     idle_until = time.monotonic() + idle_seconds
-    while True:
+    while len(payload) < max_bytes:
         try:
-            chunk = os.read(fd, READ_SIZE)
+            chunk = os.read(fd, min(READ_SIZE, max_bytes - len(payload)))
         except BlockingIOError:
             remaining = idle_until - time.monotonic()
             if remaining <= 0:
@@ -51,7 +64,9 @@ def read_available_stdin(idle_seconds: float = DEFAULT_IDLE_SECONDS) -> bytes:
         if not chunk:
             break
 
-        chunks.append(chunk)
+        payload.extend(chunk)
+        if is_complete_json(payload):
+            return bytes(payload)
         idle_until = time.monotonic() + idle_seconds
 
-    return b"".join(chunks)
+    return bytes(payload)
