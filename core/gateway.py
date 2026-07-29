@@ -6,9 +6,11 @@ import hashlib
 import os
 import unicodedata
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from core.contracts import RecallMemory, RecallReport
 from core.policy import PolicyEngine, PolicyViolationError
 from core.store import MemoryStore, StorageBackend
 from core.log import AuditLogger
@@ -130,6 +132,85 @@ def _resolve_repo_root() -> Path:
 
 
 _DEFAULT_LAYER = "ephemeral"
+
+
+def _recall_score(result: dict[str, Any]) -> float:
+    metadata = result.get("metadata") or {}
+    for value in (
+        result.get("operational_score"),
+        metadata.get("operational_score"),
+        result.get("score"),
+    ):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _as_tuple(values: Any) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, (list, tuple, set)):
+        return tuple(str(value) for value in values)
+    return (str(values),)
+
+
+def _recall_memory(
+    item: dict[str, Any],
+    *,
+    score: float,
+    matched_queries: tuple[str, ...],
+    source: str | None,
+) -> RecallMemory:
+    item_id = str(item.get("id") or Path(str(item.get("_path", ""))).stem)
+    return RecallMemory(
+        id=item_id,
+        layer=str(item.get("layer") or ""),
+        stage=str(item.get("stage") or ""),
+        content=str(item.get("content") or ""),
+        score=round(score, 6),
+        matched_queries=matched_queries,
+        tags=_as_tuple(item.get("tags")),
+        project_id=item.get("project_id"),
+        project_root_hash=item.get("project_root_hash"),
+        semantic_status=item.get("semantic_status"),
+        task_shape=item.get("task_shape"),
+        agent_role=item.get("agent_role"),
+        active_files=_as_tuple(item.get("active_files")),
+        created_at=item.get("created_at"),
+        updated_at=item.get("updated_at"),
+        source=source,
+    )
+
+
+def _select_recall_memories(
+    candidates: list[RecallMemory],
+    *,
+    selected_limit: int,
+    max_selected_chars: int,
+) -> tuple[list[RecallMemory], int]:
+    selected: list[RecallMemory] = []
+    used_chars = 0
+    for candidate in candidates:
+        if len(selected) >= selected_limit:
+            break
+
+        remaining = max_selected_chars - used_chars
+        if remaining <= 0:
+            break
+
+        content = candidate.content
+        if len(content) > remaining:
+            if remaining <= 3:
+                content = "." * remaining
+            else:
+                content = content[: remaining - 3].rstrip() + "..."
+
+        used_chars += len(content)
+        selected.append(replace(candidate, content=content))
+
+    return selected, used_chars
 
 
 class MemoryGateway:
@@ -836,6 +917,164 @@ class MemoryGateway:
         )
         return results
 
+    def recall(
+        self,
+        *,
+        queries: list[str],
+        layers: list[str] | None = None,
+        tags_all: list[str] | None = None,
+        tags_any: list[str] | None = None,
+        project_id: str | None = None,
+        project_root_hash: str | None = None,
+        semantic_statuses: list[str] | None = None,
+        task_shape: str | None = None,
+        agent_role: str | None = None,
+        active_files: list[str] | None = None,
+        candidate_limit: int = 20,
+        selected_limit: int = 6,
+        max_selected_chars: int = 3600,
+    ) -> RecallReport:
+        """Return read-only recall candidates and selected memories.
+
+        This path intentionally uses :meth:`search_for_context` plus
+        :meth:`peek`, never :meth:`search` or :meth:`read`, so candidate lookup
+        is not counted as memory use and cannot trigger auto-promotion.
+        """
+        normalized_queries = tuple(query for query in queries if query.strip())
+        candidate_limit = max(0, candidate_limit)
+        selected_limit = max(0, selected_limit)
+        max_selected_chars = max(0, max_selected_chars)
+
+        if not normalized_queries or candidate_limit == 0:
+            return RecallReport(
+                queries=normalized_queries,
+                candidates=(),
+                selected=(),
+                candidate_limit=candidate_limit,
+                selected_limit=selected_limit,
+                max_selected_chars=max_selected_chars,
+                used_chars=0,
+                diagnostics={"attempts": []},
+            )
+
+        fetch_limit = max(candidate_limit, selected_limit, 1)
+        by_id: dict[str, dict[str, Any]] = {}
+        diagnostics: list[dict[str, Any]] = []
+        for query in normalized_queries:
+            results = self.search_for_context(
+                query=query,
+                layers=layers,
+                limit=fetch_limit,
+                allow_grep=True,
+            )
+            diagnostics.append({"query": query, **self.last_search_diagnostics})
+
+            for result in results:
+                item_id = str(result.get("item_id") or result.get("id") or "")
+                if not item_id:
+                    continue
+                try:
+                    item = self.peek(item_id)
+                except Exception:
+                    continue
+                if not self._matches_recall_filters(
+                    item,
+                    layers=layers,
+                    tags_all=tags_all,
+                    tags_any=tags_any,
+                    project_id=project_id,
+                    project_root_hash=project_root_hash,
+                    semantic_statuses=semantic_statuses,
+                    task_shape=task_shape,
+                    agent_role=agent_role,
+                    active_files=active_files,
+                ):
+                    continue
+
+                score = _recall_score(result)
+                existing = by_id.get(item_id)
+                if existing is None:
+                    by_id[item_id] = {
+                        "item": item,
+                        "score": score,
+                        "queries": [query],
+                        "source": result.get("source"),
+                    }
+                    continue
+
+                existing["score"] = max(float(existing["score"]), score)
+                if query not in existing["queries"]:
+                    existing["queries"].append(query)
+
+        candidates = [
+            _recall_memory(
+                data["item"],
+                score=float(data["score"]),
+                matched_queries=tuple(data["queries"]),
+                source=data.get("source"),
+            )
+            for data in by_id.values()
+        ]
+        candidates.sort(key=lambda item: (-item.score, item.id))
+        candidates = candidates[:candidate_limit]
+
+        selected, used_chars = _select_recall_memories(
+            candidates,
+            selected_limit=selected_limit,
+            max_selected_chars=max_selected_chars,
+        )
+
+        return RecallReport(
+            queries=normalized_queries,
+            candidates=tuple(candidates),
+            selected=tuple(selected),
+            candidate_limit=candidate_limit,
+            selected_limit=selected_limit,
+            max_selected_chars=max_selected_chars,
+            used_chars=used_chars,
+            diagnostics={"attempts": diagnostics},
+        )
+
+    def _matches_recall_filters(
+        self,
+        item: dict[str, Any],
+        *,
+        layers: list[str] | None,
+        tags_all: list[str] | None,
+        tags_any: list[str] | None,
+        project_id: str | None,
+        project_root_hash: str | None,
+        semantic_statuses: list[str] | None,
+        task_shape: str | None,
+        agent_role: str | None,
+        active_files: list[str] | None,
+    ) -> bool:
+        if layers is not None and item.get("layer") not in layers:
+            return False
+
+        item_tags = {str(tag) for tag in item.get("tags") or []}
+        if tags_all and not all(tag in item_tags for tag in tags_all):
+            return False
+        if tags_any and not any(tag in item_tags for tag in tags_any):
+            return False
+
+        if project_id is not None and item.get("project_id") != project_id:
+            return False
+        if project_root_hash is not None and item.get("project_root_hash") != project_root_hash:
+            return False
+        if semantic_statuses is not None and item.get("semantic_status") not in semantic_statuses:
+            return False
+        if task_shape is not None and item.get("task_shape") != task_shape:
+            return False
+        if agent_role is not None and item.get("agent_role") != agent_role:
+            return False
+
+        stored_active_files = {str(path) for path in item.get("active_files") or []}
+        if active_files and stored_active_files and not stored_active_files.intersection(active_files):
+            return False
+
+        return True
+
     @property
     def last_search_diagnostics(self) -> dict[str, Any]:
         """Return backend diagnostics from the most recent search."""
@@ -848,6 +1087,10 @@ class MemoryGateway:
     # ------------------------------------------------------------------ #
     # Read                                                                  #
     # ------------------------------------------------------------------ #
+
+    def peek(self, item_id: str) -> dict[str, Any]:
+        """Read without changing counters, stage, timestamps or promotion state."""
+        return self._store.read(item_id)
 
     def read(self, item_id: str) -> dict[str, Any]:
         """Read a memory item and increment its access_count."""

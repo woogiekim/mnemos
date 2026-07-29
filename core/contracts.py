@@ -132,6 +132,42 @@ class RetrievalMatch:
 
 
 @dataclass(frozen=True)
+class RecallMemory:
+    """One read-only recall candidate or selected memory."""
+
+    id: str
+    layer: str
+    stage: str
+    content: str
+    score: float
+    matched_queries: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    project_id: str | None = None
+    project_root_hash: str | None = None
+    semantic_status: str | None = None
+    task_shape: str | None = None
+    agent_role: str | None = None
+    active_files: tuple[str, ...] = ()
+    created_at: str | None = None
+    updated_at: str | None = None
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class RecallReport:
+    """Read-only recall result separating candidates from selected memories."""
+
+    queries: tuple[str, ...]
+    candidates: tuple[RecallMemory, ...]
+    selected: tuple[RecallMemory, ...]
+    candidate_limit: int
+    selected_limit: int
+    max_selected_chars: int
+    used_chars: int
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class LifecycleTransition:
     """A lifecycle transition request or result."""
 

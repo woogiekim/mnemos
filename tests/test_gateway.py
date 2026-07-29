@@ -1,4 +1,5 @@
 """Tests for MemoryGateway."""
+import hashlib
 import pytest
 import yaml
 from pathlib import Path
@@ -437,6 +438,261 @@ class TestAutoPromotion:
         assert len(matches_project) == 1
         matches_global = list((repo_root / "wiki" / "global").glob(f"{item_id}.md"))
         assert len(matches_global) == 0
+
+
+class TestRecallCore:
+    def _hash_memory_files(self, repo_root: Path) -> dict[str, str]:
+        return {
+            str(path.relative_to(repo_root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted((repo_root / "wiki").rglob("*.md"))
+            if path.name != "log.md"
+        }
+
+    def test_peek_reads_without_changing_memory_item(self, gateway):
+        item_id = gateway.capture(
+            layer="project",
+            content="peek immutable token",
+            item_id="peek-readonly-001",
+            no_classify=True,
+        )
+        before = gateway._store.read(item_id)
+
+        peeked = gateway.peek(item_id)
+
+        after = gateway._store.read(item_id)
+        assert peeked == before
+        assert after == before
+
+    def test_recall_is_read_only_and_does_not_auto_promote(self, gateway, repo_root, monkeypatch):
+        item_id = gateway.capture(
+            layer="project",
+            content="readonly recall unique token",
+            item_id="recall-readonly-001",
+            quality_score=0.9,
+            no_classify=True,
+        )
+        before_item = gateway._store.read(item_id)
+        before_hashes = self._hash_memory_files(repo_root)
+        calls = []
+
+        def fail_auto_promote(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("recall must not auto-promote")
+
+        monkeypatch.setattr(gateway, "_auto_promote_if_eligible", fail_auto_promote)
+
+        report = gateway.recall(queries=["readonly recall"], selected_limit=3)
+
+        after_item = gateway._store.read(item_id)
+        assert [candidate.id for candidate in report.candidates] == [item_id]
+        assert [selected.id for selected in report.selected] == [item_id]
+        assert calls == []
+        assert self._hash_memory_files(repo_root) == before_hashes
+        assert after_item["access_count"] == before_item["access_count"]
+        assert after_item["stage"] == before_item["stage"]
+        assert after_item["layer"] == before_item["layer"]
+
+    def test_recall_deduplicates_multiple_query_results(self, gateway):
+        item_id = gateway.capture(
+            layer="project",
+            content="duplicate alpha beta shared memory",
+            item_id="recall-dedup-001",
+            no_classify=True,
+        )
+
+        report = gateway.recall(queries=["alpha", "beta"], candidate_limit=10, selected_limit=10)
+
+        assert [candidate.id for candidate in report.candidates].count(item_id) == 1
+        assert report.candidates[0].matched_queries == ("alpha", "beta")
+
+    def test_recall_applies_project_and_layer_filters(self, gateway):
+        project_item = gateway.capture(
+            layer="project",
+            content="filterable project recall",
+            item_id="recall-filter-project",
+            extra_metadata={"project_id": "project-a"},
+            no_classify=True,
+        )
+        gateway.capture(
+            layer="global",
+            content="filterable global recall",
+            item_id="recall-filter-global",
+            extra_metadata={"project_id": "project-b"},
+            no_classify=True,
+        )
+
+        report = gateway.recall(
+            queries=["filterable recall"],
+            layers=["project"],
+            project_id="project-a",
+            candidate_limit=10,
+            selected_limit=10,
+        )
+
+        assert [candidate.id for candidate in report.candidates] == [project_item]
+
+    def test_recall_applies_tag_and_status_filters(self, gateway):
+        matched = gateway.capture(
+            layer="project",
+            content="semantic filtered recall",
+            item_id="recall-status-matched",
+            tags=["backend", "tdd"],
+            extra_metadata={"semantic_status": "verified"},
+            no_classify=True,
+        )
+        gateway.capture(
+            layer="project",
+            content="semantic filtered recall",
+            item_id="recall-status-rejected",
+            tags=["backend"],
+            extra_metadata={"semantic_status": "draft"},
+            no_classify=True,
+        )
+
+        report = gateway.recall(
+            queries=["semantic filtered"],
+            tags_all=["backend"],
+            tags_any=["tdd"],
+            semantic_statuses=["verified"],
+            candidate_limit=10,
+            selected_limit=10,
+        )
+
+        assert [candidate.id for candidate in report.candidates] == [matched]
+
+    def test_recall_applies_character_budget(self, gateway):
+        gateway.capture(
+            layer="project",
+            content="budget recall " + ("x" * 200),
+            item_id="recall-budget-001",
+            no_classify=True,
+        )
+
+        report = gateway.recall(
+            queries=["budget recall"],
+            selected_limit=1,
+            max_selected_chars=40,
+        )
+
+        assert report.used_chars <= 40
+        assert len(report.selected) == 1
+        assert len(report.selected[0].content) <= 40
+        assert report.selected[0].content.endswith("...")
+
+    def test_recall_result_order_is_deterministic_for_same_request(self, gateway):
+        for item_id in ["recall-order-b", "recall-order-a", "recall-order-c"]:
+            gateway.capture(
+                layer="project",
+                content="same score ordering token",
+                item_id=item_id,
+                extra_metadata={
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "quality_score": 0.8,
+                },
+                no_classify=True,
+            )
+
+        first = gateway.recall(queries=["same score ordering"], candidate_limit=10, selected_limit=10)
+        second = gateway.recall(queries=["same score ordering"], candidate_limit=10, selected_limit=10)
+
+        assert [candidate.id for candidate in first.candidates] == [
+            candidate.id for candidate in second.candidates
+        ]
+
+    def test_recall_returns_empty_report_for_empty_queries_or_zero_limit(self, gateway):
+        empty = gateway.recall(queries=[" ", ""], candidate_limit=10)
+        zero_limit = gateway.recall(queries=["anything"], candidate_limit=0)
+
+        assert empty.candidates == ()
+        assert empty.selected == ()
+        assert zero_limit.candidates == ()
+        assert zero_limit.selected == ()
+
+    def test_recall_skips_missing_and_filter_rejected_results(self, gateway, monkeypatch):
+        gateway.capture(
+            layer="project",
+            content="patched recall reject",
+            item_id="recall-filter-rejected",
+            extra_metadata={"project_id": "other"},
+            no_classify=True,
+        )
+
+        def fake_search_for_context(**kwargs):
+            return [
+                {"item_id": "", "content": "", "metadata": {}, "score": 1.0},
+                {"item_id": "missing-memory", "content": "", "metadata": {}, "score": 1.0},
+                {"item_id": "recall-filter-rejected", "content": "", "metadata": {}, "score": 1.0},
+            ]
+
+        monkeypatch.setattr(gateway, "search_for_context", fake_search_for_context)
+
+        report = gateway.recall(queries=["patched recall"], project_id="wanted")
+
+        assert report.candidates == ()
+
+    def test_recall_filters_reject_each_supported_dimension(self, gateway):
+        item = {
+            "layer": "project",
+            "tags": ["backend"],
+            "project_id": "project-a",
+            "project_root_hash": "root-a",
+            "semantic_status": "verified",
+            "task_shape": "bugfix",
+            "agent_role": "backend",
+            "active_files": ["core/gateway.py"],
+        }
+
+        common = {
+            "layers": None,
+            "tags_all": None,
+            "tags_any": None,
+            "project_id": None,
+            "project_root_hash": None,
+            "semantic_statuses": None,
+            "task_shape": None,
+            "agent_role": None,
+            "active_files": None,
+        }
+        assert gateway._matches_recall_filters(item, **{**common, "layers": ["global"]}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "tags_all": ["missing"]}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "tags_any": ["missing"]}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "project_id": "project-b"}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "project_root_hash": "root-b"}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "semantic_statuses": ["draft"]}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "task_shape": "feature"}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "agent_role": "frontend"}) is False
+        assert gateway._matches_recall_filters(item, **{**common, "active_files": ["core/search.py"]}) is False
+
+    def test_recall_helper_edge_cases(self):
+        from core.contracts import RecallMemory
+        from core.gateway import _recall_memory, _recall_score, _select_recall_memories
+
+        assert _recall_score({"score": object()}) == 0.0
+        fallback = _recall_memory(
+            {"_path": "/tmp/path-fallback.md", "content": "x"},
+            score=1.0,
+            matched_queries=("x",),
+            source=None,
+        )
+        assert fallback.id == "path-fallback"
+
+        candidate = RecallMemory(
+            id="short-budget",
+            layer="project",
+            stage="stored",
+            content="abcdef",
+            score=1.0,
+        )
+        assert _select_recall_memories([candidate], selected_limit=0, max_selected_chars=10) == ([], 0)
+        assert _select_recall_memories([candidate], selected_limit=1, max_selected_chars=0) == ([], 0)
+        selected, used_chars = _select_recall_memories(
+            [candidate],
+            selected_limit=1,
+            max_selected_chars=2,
+        )
+        assert selected[0].content == ".."
+        assert used_chars == 2
 
 
 class TestConsolidate:
