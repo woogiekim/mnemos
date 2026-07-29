@@ -386,6 +386,8 @@ def feedback_response_payload(
             "duration_ms": duration_ms,
             "ledger_path": result.get("ledger_path"),
             "projection_path": result.get("projection_path"),
+            "promotion_evaluated": bool(result.get("promotion_evaluated")),
+            "promoted": bool(result.get("promoted")),
         },
     }
 

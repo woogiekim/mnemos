@@ -89,6 +89,23 @@ class FeedbackStore:
                     events.append(entry)
         return events
 
+    def read_projection(self) -> dict[str, dict[str, Any]]:
+        if not self.projection_path.exists():
+            return build_usage_projection(self.read_events())
+
+        try:
+            payload = json.loads(self.projection_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return build_usage_projection(self.read_events())
+        if not isinstance(payload, dict):
+            return {}
+
+        return {
+            str(memory_id): dict(value)
+            for memory_id, value in payload.items()
+            if isinstance(value, dict)
+        }
+
     def _ensure_files(self) -> None:
         self._feedback_dir.mkdir(parents=True, exist_ok=True)
         if not self.ledger_path.exists():
@@ -149,6 +166,8 @@ def build_usage_projection(events: list[dict[str, Any]]) -> dict[str, dict[str, 
     projection: dict[str, dict[str, Any]] = {}
     applied_tasks: dict[str, set[str]] = {}
     validated_tasks: dict[str, set[str]] = {}
+    applied_projects: dict[str, set[str]] = {}
+    validated_projects: dict[str, set[str]] = {}
 
     for entry in events:
         memory_id = str(entry.get("memory_id") or "")
@@ -167,6 +186,7 @@ def build_usage_projection(events: list[dict[str, Any]]) -> dict[str, dict[str, 
         event = entry.get("event")
         ts = entry.get("recorded_at")
         task_id = str(entry.get("task_id") or "")
+        project_id = str(entry.get("project_id") or "")
         if event == "retrieved":
             usage["retrieval_count"] += 1
             usage["last_retrieved_at"] = _latest_ts(usage["last_retrieved_at"], ts)
@@ -177,15 +197,25 @@ def build_usage_projection(events: list[dict[str, Any]]) -> dict[str, dict[str, 
             usage["last_applied_at"] = _latest_ts(usage["last_applied_at"], ts)
             if task_id:
                 applied_tasks.setdefault(memory_id, set()).add(task_id)
+            if project_id:
+                applied_projects.setdefault(memory_id, set()).add(project_id)
         elif event == "validated":
             usage["validated_use_count"] += 1
             usage["last_validated_at"] = _latest_ts(usage["last_validated_at"], ts)
             if task_id:
                 validated_tasks.setdefault(memory_id, set()).add(task_id)
+            if project_id:
+                validated_projects.setdefault(memory_id, set()).add(project_id)
+        elif event == "invalidated":
+            usage["invalidated"] = True
+        elif event == "superseded":
+            usage["superseded"] = True
 
     for memory_id, usage in projection.items():
         usage["distinct_applied_task_count"] = len(applied_tasks.get(memory_id, set()))
         usage["distinct_validated_task_count"] = len(validated_tasks.get(memory_id, set()))
+        usage["distinct_applied_project_count"] = len(applied_projects.get(memory_id, set()))
+        usage["distinct_validated_project_count"] = len(validated_projects.get(memory_id, set()))
 
     return projection
 
@@ -199,11 +229,33 @@ def empty_usage_projection(memory_id: str, legacy_access_count: int = 0) -> dict
         "validated_use_count": 0,
         "distinct_applied_task_count": 0,
         "distinct_validated_task_count": 0,
+        "distinct_applied_project_count": 0,
+        "distinct_validated_project_count": 0,
         "last_retrieved_at": None,
         "last_applied_at": None,
         "last_validated_at": None,
         "legacy_access_count": legacy_access_count,
+        "invalidated": False,
+        "superseded": False,
     }
+
+
+def validated_usage_score(usage: dict[str, Any] | None) -> float:
+    """Return Recall-only usage score from applied and validated feedback."""
+    if not usage:
+        return 0.0
+
+    applied = min(1.0, _int_value(usage.get("applied_count"), 0) / 4)
+    validated = min(1.0, _int_value(usage.get("validated_use_count"), 0) / 3)
+    distinct_validated = min(1.0, _int_value(usage.get("distinct_validated_task_count"), 0) / 2)
+    return round((applied * 0.2) + (validated * 0.3) + (distinct_validated * 0.5), 6)
+
+
+def is_recall_suppressed(usage: dict[str, Any] | None) -> bool:
+    """Return True when feedback says a memory should not appear by default."""
+    if not usage:
+        return False
+    return bool(usage.get("invalidated") or usage.get("superseded"))
 
 
 def _find_duplicate(

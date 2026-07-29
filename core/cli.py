@@ -765,6 +765,13 @@ def feedback_cmd(as_json: bool, request_file: str) -> None:
             request,
             legacy_access_count=int(item.get("access_count") or 0),
         )
+        if normalized["event"] in {"applied", "validated"}:
+            promoted = gw.evaluate_feedback_promotion(str(normalized["memory_id"]))
+            result["promotion_evaluated"] = True
+            result["promoted"] = promoted
+        else:
+            result["promotion_evaluated"] = False
+            result["promoted"] = False
     except FeedbackValidationError as exc:
         _exit_json(
             feedback_error_payload(

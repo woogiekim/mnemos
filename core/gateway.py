@@ -148,12 +148,39 @@ def _recall_score(result: dict[str, Any]) -> float:
     return 0.0
 
 
+def _recall_score_without_legacy_history(result: dict[str, Any]) -> float:
+    metadata = result.get("metadata") or {}
+    components = metadata.get("score_components") or {}
+    score = _recall_score(result)
+    try:
+        legacy_historical = float(components.get("historical") or 0.0)
+    except (TypeError, ValueError):
+        legacy_historical = 0.0
+    return max(0.0, score - (legacy_historical * 0.1))
+
+
 def _as_tuple(values: Any) -> tuple[str, ...]:
     if values is None:
         return ()
     if isinstance(values, (list, tuple, set)):
         return tuple(str(value) for value in values)
     return (str(values),)
+
+
+def _has_contradiction(item: dict[str, Any]) -> bool:
+    tags = {str(tag).lower() for tag in item.get("tags") or []}
+    return bool(item.get("contradiction") or "contradiction" in tags or "invalidated" in tags)
+
+
+def _project_specific(item: dict[str, Any]) -> bool:
+    if item.get("project_root_hash"):
+        return True
+    for key in ("source_path", "source_section"):
+        value = str(item.get(key) or "")
+        if value.startswith(("/", "apps/", "src/", "core/", "agents/", "tests/")):
+            return True
+    tags = {str(tag).lower() for tag in item.get("tags") or []}
+    return "project-specific" in tags or "project_specific" in tags
 
 
 def _recall_memory(
@@ -964,6 +991,9 @@ class MemoryGateway:
             )
 
         fetch_limit = max(candidate_limit, selected_limit, 1)
+        from core.feedback import FeedbackStore, is_recall_suppressed, validated_usage_score
+
+        usage_projection = FeedbackStore(self._root).read_projection()
         by_id: dict[str, dict[str, Any]] = {}
         diagnostics: list[dict[str, Any]] = []
         for query in normalized_queries:
@@ -999,8 +1029,25 @@ class MemoryGateway:
                     active_files=active_files,
                 ):
                     continue
+                usage = usage_projection.get(item_id, {})
+                if item.get("superseded_by") or item.get("semantic_status") == "invalidated" or is_recall_suppressed(usage):
+                    continue
 
-                score = _recall_score(result)
+                result_metadata = result.get("metadata") or {}
+                result_components = dict(result_metadata.get("score_components") or {})
+                usage_score = validated_usage_score(usage)
+                score = min(1.0, _recall_score_without_legacy_history(result) + (usage_score * 0.1))
+                item["score_components"] = {
+                    **result_components,
+                    "historical": usage_score,
+                    "validated_usage": usage_score,
+                    "applied_count": int(usage.get("applied_count") or 0),
+                    "validated_use_count": int(usage.get("validated_use_count") or 0),
+                    "distinct_validated_task_count": int(usage.get("distinct_validated_task_count") or 0),
+                    "retrieval_count": int(usage.get("retrieval_count") or 0),
+                    "selected_count": int(usage.get("selected_count") or 0),
+                    "legacy_access_count": int(usage.get("legacy_access_count") or item.get("access_count") or 0),
+                }
                 existing = by_id.get(item_id)
                 if existing is None:
                     by_id[item_id] = {
@@ -1043,6 +1090,55 @@ class MemoryGateway:
             used_chars=used_chars,
             diagnostics={"attempts": diagnostics},
         )
+
+    def evaluate_feedback_promotion(self, memory_id: str) -> bool:
+        """Promote only after applied/validated feedback proves real use."""
+        from core.feedback import FeedbackStore
+
+        store = FeedbackStore(self._root)
+        events = store.read_events()
+        projection = store.read_projection()
+        usage = projection.get(memory_id, {})
+        try:
+            item = self.peek(memory_id)
+        except Exception:
+            return False
+
+        if item.get("semantic_status") not in (None, "active", "verified"):
+            return False
+        if item.get("superseded_by") or usage.get("invalidated") or usage.get("superseded"):
+            return False
+        if _has_contradiction(item):
+            return False
+
+        layer = item.get("layer")
+        if layer == "session":
+            if int(usage.get("distinct_applied_task_count") or 0) < 2:
+                return False
+            if int(usage.get("validated_use_count") or 0) < 1:
+                return False
+            project_ids = {
+                str(event.get("project_id"))
+                for event in events
+                if event.get("memory_id") == memory_id
+                and event.get("event") in {"applied", "validated"}
+                and event.get("project_id")
+            }
+            item_project_id = item.get("project_id")
+            if item_project_id and project_ids and project_ids != {str(item_project_id)}:
+                return False
+            self.promote(memory_id, target_layer="project", force=True)
+            return True
+
+        if layer == "project":
+            if int(usage.get("distinct_validated_project_count") or 0) < 2:
+                return False
+            if _project_specific(item):
+                return False
+            self.promote(memory_id, target_layer="global", force=True)
+            return True
+
+        return False
 
     def _matches_recall_filters(
         self,

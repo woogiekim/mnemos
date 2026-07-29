@@ -694,6 +694,128 @@ class TestRecallCore:
         assert selected[0].content == ".."
         assert used_chars == 2
 
+    def test_recall_ranking_ignores_access_and_retrieval_counts(self, gateway):
+        from core.feedback import FeedbackStore
+
+        high_access = gateway.capture(
+            layer="project",
+            content="usage ranking neutral token high",
+            item_id="recall-usage-access-a",
+            extra_metadata={"access_count": 999},
+            no_classify=True,
+        )
+        low_access = gateway.capture(
+            layer="project",
+            content="usage ranking neutral token low",
+            item_id="recall-usage-access-b",
+            extra_metadata={"access_count": 0},
+            no_classify=True,
+        )
+        store = FeedbackStore(gateway._root)
+        store.record({
+            "schema_version": "mnemos.feedback.request.v1",
+            "event_id": "retrieval-loop-a",
+            "event": "retrieved",
+            "memory_id": high_access,
+            "task_id": "task-a",
+            "application": {"artifact": "ctx", "locator": "/a"},
+        }, legacy_access_count=999)
+
+        report = gateway.recall(
+            queries=["usage ranking neutral"],
+            candidate_limit=10,
+            selected_limit=10,
+        )
+
+        assert [candidate.id for candidate in report.candidates[:2]] == [high_access, low_access]
+        assert report.candidates[0].score_components["validated_usage"] == 0.0
+        assert report.candidates[0].score_components["retrieval_count"] == 1
+        assert report.candidates[0].score_components["legacy_access_count"] == 999
+
+    def test_recall_ranking_prefers_validated_distinct_task_usage(self, gateway):
+        from core.feedback import FeedbackStore
+
+        weak = gateway.capture(
+            layer="project",
+            content="validated usage ranking token weak",
+            item_id="recall-usage-rank-a",
+            no_classify=True,
+        )
+        strong = gateway.capture(
+            layer="project",
+            content="validated usage ranking token strong",
+            item_id="recall-usage-rank-b",
+            no_classify=True,
+        )
+        store = FeedbackStore(gateway._root)
+        for index, task_id in enumerate(["task-1", "task-2"], start=1):
+            store.record({
+                "schema_version": "mnemos.feedback.request.v1",
+                "event_id": f"validated-{index}",
+                "event": "validated",
+                "memory_id": strong,
+                "task_id": task_id,
+                "application": {"artifact": "review.json", "locator": f"/{index}"},
+            })
+        store.record({
+            "schema_version": "mnemos.feedback.request.v1",
+            "event_id": "applied-weak",
+            "event": "applied",
+            "memory_id": weak,
+            "task_id": "task-3",
+            "application": {"artifact": "plan.json", "locator": "/weak"},
+        })
+
+        report = gateway.recall(
+            queries=["validated usage ranking"],
+            candidate_limit=10,
+            selected_limit=10,
+        )
+
+        assert [candidate.id for candidate in report.candidates[:2]] == [strong, weak]
+        assert report.candidates[0].score_components["validated_usage"] > report.candidates[1].score_components["validated_usage"]
+        assert report.candidates[0].score_components["distinct_validated_task_count"] == 2
+
+    def test_recall_excludes_superseded_and_invalidated_memories(self, gateway):
+        from core.feedback import FeedbackStore
+
+        active = gateway.capture(
+            layer="project",
+            content="status exclusion recall token active",
+            item_id="recall-status-active",
+            no_classify=True,
+        )
+        invalidated = gateway.capture(
+            layer="project",
+            content="status exclusion recall token invalidated",
+            item_id="recall-status-invalidated",
+            no_classify=True,
+        )
+        superseded = gateway.capture(
+            layer="project",
+            content="status exclusion recall token superseded",
+            item_id="recall-status-superseded",
+            no_classify=True,
+        )
+        gateway._store.update(gateway.peek(superseded)["_path"], metadata_updates={"superseded_by": active})
+        store = FeedbackStore(gateway._root)
+        store.record({
+            "schema_version": "mnemos.feedback.request.v1",
+            "event_id": "invalidated-status",
+            "event": "invalidated",
+            "memory_id": invalidated,
+            "task_id": "task-status",
+            "application": {"artifact": "review.json", "locator": "/invalid"},
+        })
+
+        report = gateway.recall(
+            queries=["status exclusion recall"],
+            candidate_limit=10,
+            selected_limit=10,
+        )
+
+        assert [candidate.id for candidate in report.candidates] == [active]
+
 
 class TestConsolidate:
     """Tests for the gateway.consolidate() sweep (Part 2 of issue #11)."""

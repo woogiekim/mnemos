@@ -78,14 +78,21 @@ def _isolate_repo(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MNEMOS_VECTOR_BACKEND", "none")
 
 
-def _capture_memory(memory_id: str, content: str = "feedback target memory") -> None:
+def _capture_memory(
+    memory_id: str,
+    content: str = "feedback target memory",
+    *,
+    layer: str = "project",
+    metadata: dict[str, Any] | None = None,
+) -> None:
     from core.gateway import MemoryGateway
 
     gateway = MemoryGateway(repo_root=os.environ["MNEMOS_REPO_ROOT"])
     captured_id = gateway.capture(
-        layer="project",
+        layer=layer,
         content=content,
         item_id=memory_id,
+        extra_metadata=metadata,
         no_classify=True,
     )
     assert captured_id == memory_id
@@ -281,6 +288,197 @@ def test_feedback_retrieved_and_selected_counts_are_separate(
     assert projection["selected_count"] == 1
     assert projection["applied_count"] == 0
     assert projection["last_retrieved_at"]
+
+
+def test_feedback_retrieved_selected_and_accepted_do_not_promote(
+    runner: CliRunner,
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    _capture_memory(
+        "mem-no-promote",
+        layer="session",
+        metadata={"project_id": "project-a", "semantic_status": "active"},
+    )
+    for event in ["retrieved", "selected", "accepted"]:
+        request_path = tmp_path / f"{event}.json"
+        request_path.write_text(
+            json.dumps(_feedback_request(
+                event_id=f"{event}-no-promote",
+                event=event,
+                memory_id="mem-no-promote",
+                task_id=f"task-{event}",
+                application={"artifact": "ctx.json", "locator": f"/{event}"},
+            )),
+            encoding="utf-8",
+        )
+        result = _invoke_feedback(runner, request_path)
+        assert result.exit_code == 0, result.output
+
+    assert list((repo_root / "wiki" / "projects").glob("mem-no-promote.md")) == []
+    assert (repo_root / ".agent" / "sessions").exists()
+
+
+def test_feedback_applied_and_validated_promote_session_to_project(
+    runner: CliRunner,
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    _capture_memory(
+        "mem-promote-session",
+        layer="session",
+        metadata={"project_id": "project-a", "semantic_status": "active"},
+    )
+    requests = [
+        _feedback_request(
+            event_id="applied-promote-1",
+            event="applied",
+            memory_id="mem-promote-session",
+            task_id="task-a",
+            project_id="project-a",
+            application={"artifact": "plan.json", "locator": "/a"},
+        ),
+        _feedback_request(
+            event_id="applied-promote-2",
+            event="applied",
+            memory_id="mem-promote-session",
+            task_id="task-b",
+            project_id="project-a",
+            application={"artifact": "plan.json", "locator": "/b"},
+        ),
+        _feedback_request(
+            event_id="validated-promote-1",
+            event="validated",
+            memory_id="mem-promote-session",
+            task_id="task-a",
+            project_id="project-a",
+            application={"artifact": "review.json", "locator": "/a"},
+        ),
+    ]
+
+    for index, request in enumerate(requests):
+        request_path = tmp_path / f"promote-{index}.json"
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        result = _invoke_feedback(runner, request_path)
+        assert result.exit_code == 0, result.output
+
+    project_files = list((repo_root / "wiki" / "projects").glob("mem-promote-session.md"))
+    assert len(project_files) == 1
+
+
+def test_feedback_same_task_repetition_does_not_promote(
+    runner: CliRunner,
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    _capture_memory(
+        "mem-same-task",
+        layer="session",
+        metadata={"project_id": "project-a", "semantic_status": "active"},
+    )
+    requests = [
+        _feedback_request(
+            event_id="same-task-applied-1",
+            event="applied",
+            memory_id="mem-same-task",
+            task_id="task-a",
+            project_id="project-a",
+            application={"artifact": "plan.json", "locator": "/a"},
+        ),
+        _feedback_request(
+            event_id="same-task-applied-2",
+            event="applied",
+            memory_id="mem-same-task",
+            task_id="task-a",
+            project_id="project-a",
+            application={"artifact": "plan.json", "locator": "/b"},
+        ),
+        _feedback_request(
+            event_id="same-task-validated",
+            event="validated",
+            memory_id="mem-same-task",
+            task_id="task-a",
+            project_id="project-a",
+            application={"artifact": "review.json", "locator": "/a"},
+        ),
+    ]
+
+    for index, request in enumerate(requests):
+        request_path = tmp_path / f"same-task-{index}.json"
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        result = _invoke_feedback(runner, request_path)
+        assert result.exit_code == 0, result.output
+
+    assert list((repo_root / "wiki" / "projects").glob("mem-same-task.md")) == []
+
+
+def test_feedback_validated_across_projects_promotes_project_to_global(
+    runner: CliRunner,
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    _capture_memory(
+        "mem-global-promote",
+        layer="project",
+        metadata={"semantic_status": "active"},
+    )
+    requests = [
+        _feedback_request(
+            event_id="global-validated-a",
+            event="validated",
+            memory_id="mem-global-promote",
+            task_id="task-a",
+            project_id="project-a",
+            application={"artifact": "review.json", "locator": "/a"},
+        ),
+        _feedback_request(
+            event_id="global-validated-b",
+            event="validated",
+            memory_id="mem-global-promote",
+            task_id="task-b",
+            project_id="project-b",
+            application={"artifact": "review.json", "locator": "/b"},
+        ),
+    ]
+
+    for index, request in enumerate(requests):
+        request_path = tmp_path / f"global-{index}.json"
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        result = _invoke_feedback(runner, request_path)
+        assert result.exit_code == 0, result.output
+
+    global_files = list((repo_root / "wiki" / "global").glob("mem-global-promote.md"))
+    assert len(global_files) == 1
+
+
+def test_feedback_project_specific_memory_does_not_promote_to_global(
+    runner: CliRunner,
+    tmp_path: Path,
+    repo_root: Path,
+) -> None:
+    _capture_memory(
+        "mem-project-specific",
+        layer="project",
+        metadata={"semantic_status": "active", "source_path": "core/gateway.py"},
+    )
+    for project_id in ["project-a", "project-b"]:
+        request_path = tmp_path / f"specific-{project_id}.json"
+        request_path.write_text(
+            json.dumps(_feedback_request(
+                event_id=f"specific-{project_id}",
+                event="validated",
+                memory_id="mem-project-specific",
+                task_id=f"task-{project_id}",
+                project_id=project_id,
+                application={"artifact": "review.json", "locator": f"/{project_id}"},
+            )),
+            encoding="utf-8",
+        )
+        result = _invoke_feedback(runner, request_path)
+        assert result.exit_code == 0, result.output
+
+    assert list((repo_root / "wiki" / "global").glob("mem-project-specific.md")) == []
+    assert len(list((repo_root / "wiki" / "projects").glob("mem-project-specific.md"))) == 1
 
 
 def test_feedback_rejects_invalid_memory_id(runner: CliRunner, tmp_path: Path) -> None:
