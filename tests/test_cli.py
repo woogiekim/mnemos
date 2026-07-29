@@ -1,4 +1,5 @@
 """Tests for Click CLI commands."""
+import os
 import pytest
 import yaml
 import json
@@ -280,6 +281,51 @@ class TestMemorySearchCommand:
         assert n == len(result_lines), (
             f"Notification said {n} but found {len(result_lines)} result lines"
         )
+
+    def test_memory_search_default_does_not_touch_access_count(self, runner, cli_with_repo):
+        from core.gateway import MemoryGateway
+
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "search readonly cli token", "--id", "search-cli-readonly"],
+        )
+
+        result = runner.invoke(cli_with_repo, ["search", "search readonly cli"])
+
+        assert result.exit_code == 0, result.output
+        item = MemoryGateway(repo_root=os.environ["MNEMOS_REPO_ROOT"]).peek("search-cli-readonly")
+        assert item["access_count"] == 0
+
+    def test_memory_search_touch_updates_legacy_access_count(self, runner, cli_with_repo):
+        from core.gateway import MemoryGateway
+
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "search touch cli token", "--id", "search-cli-touch"],
+        )
+
+        result = runner.invoke(cli_with_repo, ["search", "search touch cli", "--touch"])
+
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output.lower()
+        item = MemoryGateway(repo_root=os.environ["MNEMOS_REPO_ROOT"]).peek("search-cli-touch")
+        assert item["access_count"] == 1
+
+    def test_memory_search_legacy_env_flag_enables_touch(self, runner, cli_with_repo, monkeypatch):
+        from core.gateway import MemoryGateway
+
+        runner.invoke(
+            cli_with_repo,
+            ["capture", "--layer", "global", "--content", "search env touch token", "--id", "search-cli-env-touch"],
+        )
+        monkeypatch.setenv("MNEMOS_SEARCH_TOUCH_DEFAULT", "1")
+
+        result = runner.invoke(cli_with_repo, ["search", "search env touch"])
+
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output.lower()
+        item = MemoryGateway(repo_root=os.environ["MNEMOS_REPO_ROOT"]).peek("search-cli-env-touch")
+        assert item["access_count"] == 1
 
 
 class TestListTruncation:

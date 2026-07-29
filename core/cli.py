@@ -568,12 +568,30 @@ def memory_list(layers: str | None, limit: int | None, full: bool, width: int) -
     multiple=True,
     help="Filter results to items with this tag (repeatable; AND logic).",
 )
-def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fast: bool, full: bool, width: int, tags: tuple) -> None:
+@click.option(
+    "--touch",
+    "touch",
+    is_flag=True,
+    default=False,
+    help="Increment legacy access_count for returned results.",
+)
+def memory_search(
+    query: str,
+    layers: str | None,
+    limit: int,
+    as_json: bool,
+    fast: bool,
+    full: bool,
+    width: int,
+    tags: tuple,
+    touch: bool,
+) -> None:
     """Search across memory layers.
 
     \b
     Examples:
       mnemos search "architecture"
+      mnemos search "architecture" --touch
       mnemos search "workflow" --layer session
       mnemos search --tag testing
       mnemos search "auth" --tag project --tag architecture
@@ -581,8 +599,14 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
     gw = _get_gateway()
     layer_list = [l.strip() for l in layers.split(",")] if layers else None
     tag_list = list(tags) if tags else None
+    legacy_touch = touch or _search_touch_default_enabled()
+    if legacy_touch:
+        click.echo(
+            "warning: search touch is deprecated; use mnemos recall for retrieval and mnemos feedback for usage.",
+            err=True,
+        )
     try:
-        results = gw.search(query=query, layers=layer_list, limit=limit, tags=tag_list)
+        results = gw.search(query=query, layers=layer_list, limit=limit, tags=tag_list, touch=legacy_touch)
     except Exception as exc:
         if as_json:
             from core.provider import provider_error_from_exception, search_payload
@@ -620,6 +644,10 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
             preview = _truncate_content(r["content"], width=width, full=full)
             click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {preview}")
     click.echo(f"[mnemos] Retrieved {len(results)} memories")
+
+
+def _search_touch_default_enabled() -> bool:
+    return os.environ.get("MNEMOS_SEARCH_TOUCH_DEFAULT", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @cli.command("recall")

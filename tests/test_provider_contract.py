@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -89,13 +90,34 @@ class TestProviderCapabilities:
         assert payload["capabilities"]["capture_json"] is True
         assert payload["capabilities"]["fast_search"] is True
         assert payload["capabilities"]["search_scores"] is True
+        assert payload["capabilities"]["search_read_only_default"] == "supported"
+        assert payload["capabilities"]["search_touch_legacy"] == "deprecated"
         assert payload["capability_status"]["retrieval_backend_health"] == "supported"
         assert payload["capability_status"]["retrieval_degradation_evidence"] == "supported"
         assert payload["capability_status"]["memory_os_readiness_audit"] == "supported"
-        assert payload["status_values"] == ["supported", "unsupported", "unknown"]
+        assert payload["status_values"] == ["supported", "unsupported", "deprecated", "unknown"]
         assert payload["capability_status"]["capture_json"] == "supported"
         assert payload["capability_status"]["read_json"] == "supported"
         assert payload["capability_descriptions"]["fast_search"]
+        assert "mnemos search --touch" in payload["capability_descriptions"]["search_touch_legacy"]
+
+    def test_search_recall_feedback_transition_doc_exists(self) -> None:
+        doc = Path("docs/search-recall-feedback.md")
+
+        assert doc.exists()
+        content = doc.read_text(encoding="utf-8")
+        assert "mnemos search --touch" in content
+        assert "mnemos recall" in content
+        assert "mnemos feedback" in content
+
+    def test_provider_payload_marks_access_count_as_legacy(self) -> None:
+        from core.provider import memory_item_payload, search_result_payload
+
+        item = memory_item_payload({"id": "m1", "content": "x", "access_count": 3})
+        result = search_result_payload({"item_id": "m1", "content": "x", "metadata": {"access_count": 4}})
+
+        assert item["metadata"]["legacy_access_count"] == 3
+        assert result["metadata"]["legacy_access_count"] == 4
 
     def test_capability_status_covers_backward_compatible_boolean_keys(self) -> None:
         """Every boolean capability has a tri-state status for new integrations."""
@@ -127,7 +149,7 @@ class TestProviderCapabilities:
         assert "version" in payload
         assert payload["capabilities"]["read_json"] is True
         assert payload["capability_status"]["read_json"] == "supported"
-        assert payload["status_values"] == ["supported", "unsupported", "unknown"]
+        assert payload["status_values"] == ["supported", "unsupported", "deprecated", "unknown"]
 
 
 class TestProviderCommandJson:

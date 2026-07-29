@@ -865,15 +865,17 @@ class MemoryGateway:
         layers: list[str] | None = None,
         limit: int = 20,
         tags: list[str] | None = None,
+        touch: bool = False,
     ) -> list[dict[str, Any]]:
         """Search across memory layers.
 
-        After returning results, access_count is incremented for each hit and
-        each hit is checked for silent auto-promotion.
+        By default this is read-only.  ``touch=True`` preserves the legacy
+        access_count update, but search never performs auto-promotion.
 
         Args:
             tags: When provided, only items whose stored tag list contains ALL
                   of the specified tags are returned (AND logic).
+            touch: When True, increment legacy access_count for each hit.
         """
         # Fetch more results than needed when tag filtering so post-filter can
         # still satisfy the limit.
@@ -898,7 +900,20 @@ class MemoryGateway:
                     continue
             results = filtered
 
-        # Side-effect: increment access_count and auto-promote eligible results
+        if touch:
+            self._touch_search_results(results)
+
+        # Observability: record this search event (async, non-blocking)
+        self._obs.log_search(
+            keywords=[query],
+            results=results,
+            session_id=self._session_id,
+        )
+
+        return results
+
+    def _touch_search_results(self, results: list[dict[str, Any]]) -> None:
+        """Increment legacy access_count for explicit ``search --touch``."""
         for result in results:
             result_item_id = result.get("item_id")
             if not result_item_id:
@@ -910,19 +925,8 @@ class MemoryGateway:
                     item["_path"],
                     metadata_updates={"access_count": new_count},
                 )
-                item["access_count"] = new_count
-                self._auto_promote_if_eligible(item_id=result_item_id, item=item)
             except Exception:
                 pass
-
-        # Observability: record this search event (async, non-blocking)
-        self._obs.log_search(
-            keywords=[query],
-            results=results,
-            session_id=self._session_id,
-        )
-
-        return results
 
     def search_for_context(
         self,

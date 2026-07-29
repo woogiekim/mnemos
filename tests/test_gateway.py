@@ -390,8 +390,8 @@ class TestAutoPromotion:
         matches_project_after = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
         assert len(matches_project_after) == 0
 
-    def test_search_auto_promotes_accessed_results(self, gateway, repo_root):
-        """Search should auto-promote eligible results silently."""
+    def test_search_does_not_auto_promote_eligible_results(self, gateway, repo_root):
+        """Search finds eligible results but never promotes them."""
         item_id = gateway.capture(
             layer="project",
             content="auto-promote-search-unique-token",
@@ -403,16 +403,16 @@ class TestAutoPromotion:
         matches_project = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
         assert len(matches_project) == 1
 
-        # Search finds the item → access_count incremented → auto-promotion triggered
+        # Search finds the item without access_count mutation or auto-promotion.
         results = gateway.search("auto-promote-search-unique-token")
         found_ids = [r.get("item_id") for r in results]
         assert item_id in found_ids
 
-        # With zero thresholds, item should have been promoted to global
+        # With zero thresholds, search still must not promote.
         matches_global = list((repo_root / "wiki" / "global").glob(f"{item_id}.md"))
-        assert len(matches_global) == 1
+        assert len(matches_global) == 0
         matches_project_after = list((repo_root / "wiki" / "projects").glob(f"{item_id}.md"))
-        assert len(matches_project_after) == 0
+        assert len(matches_project_after) == 1
 
     def test_auto_promotion_does_not_raise_when_already_at_top(self, gateway, repo_root):
         """Reading a global-layer item (no next layer) must not raise any error."""
@@ -815,6 +815,57 @@ class TestRecallCore:
         )
 
         assert [candidate.id for candidate in report.candidates] == [active]
+
+
+class TestSearchTouchPolicy:
+    def test_search_default_is_read_only_and_does_not_auto_promote(self, gateway, monkeypatch):
+        item_id = gateway.capture(
+            layer="project",
+            content="legacy search readonly token",
+            item_id="search-readonly-001",
+            quality_score=1.0,
+            no_classify=True,
+        )
+        before = gateway.peek(item_id)
+        calls = []
+
+        def fail_auto_promote(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("search default must not auto-promote")
+
+        monkeypatch.setattr(gateway, "_auto_promote_if_eligible", fail_auto_promote)
+
+        results = gateway.search("legacy search readonly", limit=5)
+
+        after = gateway.peek(item_id)
+        assert [result["item_id"] for result in results] == [item_id]
+        assert after["access_count"] == before["access_count"]
+        assert after["layer"] == before["layer"]
+        assert calls == []
+
+    def test_search_touch_increments_legacy_access_without_auto_promote(self, gateway, monkeypatch):
+        item_id = gateway.capture(
+            layer="project",
+            content="legacy search touch token",
+            item_id="search-touch-001",
+            quality_score=1.0,
+            no_classify=True,
+        )
+        calls = []
+
+        def fail_auto_promote(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("search touch must not auto-promote")
+
+        monkeypatch.setattr(gateway, "_auto_promote_if_eligible", fail_auto_promote)
+
+        results = gateway.search("legacy search touch", limit=5, touch=True)
+
+        after = gateway.peek(item_id)
+        assert [result["item_id"] for result in results] == [item_id]
+        assert after["access_count"] == 1
+        assert after["layer"] == "project"
+        assert calls == []
 
 
 class TestConsolidate:

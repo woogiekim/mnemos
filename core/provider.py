@@ -6,12 +6,14 @@ from typing import Any
 
 
 PROVIDER_CONTRACT_VERSION = "1.0"
-CAPABILITY_STATUS_VALUES = ["supported", "unsupported", "unknown"]
+CAPABILITY_STATUS_VALUES = ["supported", "unsupported", "deprecated", "unknown"]
 
 CAPABILITIES: dict[str, bool | str] = {
     "capture_json": True,
     "search_json": True,
     "fast_search": True,
+    "search_read_only_default": "supported",
+    "search_touch_legacy": "deprecated",
     "recall_v1": True,
     "recall_read_only": True,
     "retrieval_score": True,
@@ -72,6 +74,8 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "capture_json": "mnemos capture --json emits a stable provider-contract JSON payload.",
     "search_json": "mnemos search --json emits stable JSON with query metadata and results.",
     "fast_search": "mnemos search --fast --json is the stable low-latency search entry point.",
+    "search_read_only_default": "mnemos search is read-only by default and does not update access_count or trigger promotion.",
+    "search_touch_legacy": "mnemos search --touch preserves the deprecated legacy access_count update without search-based auto-promotion.",
     "recall_v1": "mnemos recall --json --request-file emits the structured read-only recall provider contract.",
     "recall_read_only": "Recall provider requests must declare read_only=true and use MemoryGateway.recall without mutating memory items.",
     "retrieval_score": "Recall results expose operational retrieval_score when the core supplies a real retrieval score.",
@@ -218,6 +222,13 @@ def provider_error_from_exception(exc: Exception) -> dict[str, Any]:
 
 def memory_item_payload(item: dict[str, Any]) -> dict[str, Any]:
     """Normalize a stored memory item for provider API consumers."""
+    metadata = {
+        k: v
+        for k, v in item.items()
+        if k not in {"content", "_path", "id", "layer", "tags", "summary"}
+    }
+    if "access_count" in metadata and "legacy_access_count" not in metadata:
+        metadata["legacy_access_count"] = metadata["access_count"]
     return {
         "id": item.get("id"),
         "content": item.get("content", ""),
@@ -229,11 +240,7 @@ def memory_item_payload(item: dict[str, Any]) -> dict[str, Any]:
             "path": item.get("_path"),
         },
         "recency": item.get("created_at") or item.get("updated_at"),
-        "metadata": {
-            k: v
-            for k, v in item.items()
-            if k not in {"content", "_path", "id", "layer", "tags", "summary"}
-        },
+        "metadata": metadata,
     }
 
 
@@ -244,6 +251,9 @@ def search_result_payload(
 ) -> dict[str, Any]:
     """Normalize a search result for provider API consumers."""
     metadata_payload = result.get("metadata") or {}
+    if "access_count" in metadata_payload and "legacy_access_count" not in metadata_payload:
+        metadata_payload = dict(metadata_payload)
+        metadata_payload["legacy_access_count"] = metadata_payload["access_count"]
     payload = {
         "id": result.get("item_id") or result.get("id"),
         "content": result.get("content", ""),

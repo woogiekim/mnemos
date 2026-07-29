@@ -297,7 +297,10 @@ mnemos/
 | `mnemos install [PATH]` | Scaffold a wiki repo structure at PATH (default: current directory) |
 | `mnemos capture` | Capture a new memory item into a target layer |
 | `mnemos classify` | Classify/tag a captured item |
-| `mnemos search` | Search across memory layers |
+| `mnemos search` | Search across memory layers without changing memory state |
+| `mnemos search --touch` | Deprecated legacy search mode that increments `access_count` |
+| `mnemos recall --json --request-file FILE` | Read-only structured Recall provider contract |
+| `mnemos feedback --json --request-file FILE` | Record applied/validated memory usage events |
 | `mnemos read` | Read a specific item by ID |
 | `mnemos use` | Mark an item as "in use" |
 | `mnemos edit` | Update item content |
