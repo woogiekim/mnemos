@@ -137,6 +137,13 @@ class ProjectContextRecallResult:
     tags: list[str]
     updated_at: str | None
     source_revision: str | None = None
+    project_id: str | None = None
+    project_root_hash: str | None = None
+    layer: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+    task_shape: str | None = None
+    record_type: str | None = None
+    score_components: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -163,6 +170,13 @@ class ProjectContextRecallReport:
                     "source_section": result.source_section,
                     "tags": result.tags,
                     "updated_at": result.updated_at,
+                    "project_id": result.project_id,
+                    "project_root_hash": result.project_root_hash,
+                    "layer": result.layer,
+                    "provenance": result.provenance,
+                    "task_shape": result.task_shape,
+                    "record_type": result.record_type,
+                    "score_components": result.score_components,
                     **(
                         {"source_revision": result.source_revision}
                         if result.source_revision is not None
@@ -626,10 +640,6 @@ class ProjectContextRecaller:
         limit: int = 10,
     ) -> ProjectContextRecallReport:
         filter_tags = ["source:project-context", *tags]
-        if project_id:
-            filter_tags.append(f"project:{project_id}")
-        if project_root_hash_value:
-            filter_tags.append(f"project_root:{project_root_hash_value}")
         if kind:
             filter_tags.append(f"kind:{kind}")
 
@@ -643,47 +653,56 @@ class ProjectContextRecaller:
         )
 
         try:
-            raw_results = self._gw.search(
-                query=query,
+            recall_report = self._gw.recall(
+                queries=[enriched_query, query],
                 layers=layers or ["project", "global"],
-                limit=max(limit * 5, limit),
-                tags=filter_tags,
+                tags_all=filter_tags,
+                project_id=project_id,
+                project_root_hash=project_root_hash_value,
+                active_files=list(active_files) or None,
+                selected_limit=limit,
+                candidate_limit=max(limit * 5, limit),
             )
         except Exception as exc:
             return ProjectContextRecallReport(
                 status="degraded",
                 query=query,
                 trace=_recall_trace(query, enriched_query, [], filter_tags),
-                degraded_reasons=[f"search: {exc}"],
+                degraded_reasons=[f"recall: {exc}"],
             )
 
         results: list[ProjectContextRecallResult] = []
         degraded_reasons: list[str] = []
-        for index, result in enumerate(raw_results):
-            item_id = str(result.get("item_id") or result.get("id") or "")
+        for memory in recall_report.selected:
+            item_id = str(getattr(memory, "id", "") or "")
             if not item_id:
                 continue
-            try:
-                item = self._gw._store.read(item_id)
-            except Exception as exc:
-                degraded_reasons.append(f"read:{item_id}: {exc}")
-                continue
-            if not _matches_project_context(item, project_id, project_root_hash_value, kind, tags):
+            if not _matches_project_context_memory(memory, project_id, project_root_hash_value, kind, tags):
                 continue
 
-            score = 1.0 if limit == 1 else max(0.0, 1.0 - (index / max(limit - 1, 1)))
             results.append(ProjectContextRecallResult(
-                memory_id=str(item.get("id") or item_id),
-                score=round(float(score), 6),
-                content=str(item.get("content", "")),
-                source_path=str(item.get("source_path") or ""),
-                source_section=str(item.get("source_section") or ""),
-                tags=list(item.get("tags") or []),
-                updated_at=item.get("updated_at") or item.get("created_at"),
-                source_revision=item.get("source_revision"),
+                memory_id=item_id,
+                score=getattr(memory, "score", None),
+                content=str(getattr(memory, "content", "") or ""),
+                source_path=str(getattr(memory, "source_path", "") or ""),
+                source_section=str(getattr(memory, "source_section", "") or ""),
+                tags=list(getattr(memory, "tags", ()) or []),
+                updated_at=getattr(memory, "updated_at", None) or getattr(memory, "created_at", None),
+                source_revision=getattr(memory, "source_revision", None),
+                project_id=getattr(memory, "project_id", None),
+                project_root_hash=getattr(memory, "project_root_hash", None),
+                layer=getattr(memory, "layer", None),
+                provenance=dict(getattr(memory, "provenance", None) or {}),
+                task_shape=getattr(memory, "task_shape", None),
+                record_type=getattr(memory, "record_type", None),
+                score_components=dict(getattr(memory, "score_components", None) or {}),
             ))
             if len(results) >= limit:
                 break
+        diagnostics = getattr(recall_report, "diagnostics", {}) or {}
+        for attempt in diagnostics.get("attempts", []) or []:
+            for reason in attempt.get("degraded_reasons", []) or []:
+                degraded_reasons.append(str(reason))
 
         status = "degraded" if degraded_reasons else "ok"
 
@@ -807,17 +826,40 @@ def _matches_project_context(
     return all(tag in item_tags for tag in tags)
 
 
+def _matches_project_context_memory(
+    memory: Any,
+    project_id: str | None,
+    project_root_hash_value: str | None,
+    kind: str | None,
+    tags: Iterable[str],
+) -> bool:
+    memory_tags = set(getattr(memory, "tags", ()) or [])
+    record_type = getattr(memory, "record_type", None)
+    if record_type not in {"project_context_section", None}:
+        return False
+    if "source:project-context" not in memory_tags:
+        return False
+    if project_id and getattr(memory, "project_id", None) != project_id:
+        return False
+    if project_root_hash_value and getattr(memory, "project_root_hash", None) != project_root_hash_value:
+        return False
+    if kind and f"kind:{kind}" not in memory_tags:
+        return False
+
+    return all(tag in memory_tags for tag in tags)
+
+
 def _recall_trace(
     query: str,
     enriched_query: str,
     results: Iterable[ProjectContextRecallResult],
     filter_tags: Iterable[str],
 ) -> dict[str, Any]:
-    return {
+    trace = {
         "query": query,
         "enriched_query": enriched_query,
         "filters": {"tags": list(filter_tags)},
-        "used_memories": [
+        "retrieved_memories": [
             {
                 "memory_id": result.memory_id,
                 "source_path": result.source_path,
@@ -827,6 +869,9 @@ def _recall_trace(
             for result in results
         ],
     }
+    trace["used_memories"] = trace["retrieved_memories"]
+
+    return trace
 
 
 def _stale_reasons(item: dict[str, Any], section: ProjectContextSection) -> list[str]:

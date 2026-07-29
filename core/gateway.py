@@ -181,6 +181,12 @@ def _recall_memory(
         created_at=item.get("created_at"),
         updated_at=item.get("updated_at"),
         source=source,
+        source_revision=item.get("source_revision"),
+        source_path=item.get("source_path"),
+        source_section=item.get("source_section"),
+        provenance=dict(item.get("provenance") or {}),
+        record_type=item.get("record_type") or item.get("sourceType"),
+        score_components=dict(item.get("score_components") or {}),
     )
 
 
@@ -974,9 +980,12 @@ class MemoryGateway:
                 if not item_id:
                     continue
                 try:
-                    item = self.peek(item_id)
+                    item = dict(self.peek(item_id))
                 except Exception:
                     continue
+                result_metadata = result.get("metadata") or {}
+                if result_metadata.get("score_components"):
+                    item["score_components"] = dict(result_metadata.get("score_components") or {})
                 if not self._matches_recall_filters(
                     item,
                     layers=layers,

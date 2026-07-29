@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import frontmatter
 import pytest
@@ -317,6 +318,125 @@ def test_project_context_recall_filters_and_trace_json(repo_root: Path, tmp_path
     assert 0.0 <= result["score"] <= 1.0
     assert payload["trace"]["used_memories"][0]["memory_id"] == result["memory_id"]
     assert "file core/cli.py" in payload["trace"]["enriched_query"]
+
+
+def test_project_context_recall_uses_scoped_read_only_recall_and_preserves_metadata() -> None:
+    from agents.source_adapters import ProjectContextRecaller
+    from core.contracts import RecallReport
+
+    class ForbiddenStore:
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("_store.read must not be used by project-context recall")
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self._store = ForbiddenStore()
+
+        def search(self, *_args, **_kwargs):
+            raise AssertionError("gw.search must not be used by project-context recall")
+
+        def recall(self, **kwargs):
+            self.calls.append(kwargs)
+            memory = SimpleNamespace(
+                id="pc-1",
+                score=0.87321,
+                score_components={"semantic": 0.7, "workflow": 0.2},
+                content="Project context recall content",
+                layer="project",
+                tags=("source:project-context", "project:mnemos", "kind:architecture", "agent-crew"),
+                project_id="mnemos",
+                project_root_hash="root-hash",
+                task_shape="debug",
+                record_type="project_context_section",
+                provenance={"source": "project-context"},
+                source_revision="rev1",
+                source_path="context/architecture.md",
+                source_section="Recall",
+                updated_at="2026-07-29T00:00:00Z",
+            )
+            return RecallReport(
+                queries=(kwargs["queries"][0],),
+                candidates=(memory,),
+                selected=(memory,),
+                candidate_limit=kwargs["candidate_limit"],
+                selected_limit=kwargs["selected_limit"],
+                max_selected_chars=3600,
+                used_chars=len(memory.content),
+                diagnostics={"attempts": []},
+            )
+
+    gateway = FakeGateway()
+    report = ProjectContextRecaller(gateway).recall(
+        "base query",
+        project_id="mnemos",
+        project_root_hash_value="root-hash",
+        kind="architecture",
+        tags=["agent-crew"],
+        active_files=["core/cli.py"],
+        agent_role="backend",
+        context_tags=["durable"],
+        limit=3,
+    )
+    payload = report.to_dict()
+
+    recall_call = gateway.calls[0]
+    assert recall_call["queries"] == [
+        "base query project mnemos kind architecture agent backend file core/cli.py tag durable",
+        "base query",
+    ]
+    assert recall_call["project_id"] == "mnemos"
+    assert recall_call["project_root_hash"] == "root-hash"
+    assert "task_shape" not in recall_call
+    assert recall_call["layers"] == ["project", "global"]
+    assert recall_call["tags_all"] == ["source:project-context", "agent-crew", "kind:architecture"]
+    assert recall_call["selected_limit"] == 3
+    assert payload["count"] == 1
+    result = payload["results"][0]
+    assert result["score"] == 0.87321
+    assert result["score_components"] == {"semantic": 0.7, "workflow": 0.2}
+    assert result["source_revision"] == "rev1"
+    assert result["source_path"] == "context/architecture.md"
+    assert result["source_section"] == "Recall"
+    assert result["project_id"] == "mnemos"
+    assert result["project_root_hash"] == "root-hash"
+    assert result["layer"] == "project"
+    assert result["provenance"] == {"source": "project-context"}
+    assert result["task_shape"] == "debug"
+    assert result["record_type"] == "project_context_section"
+    assert payload["trace"]["retrieved_memories"][0]["memory_id"] == "pc-1"
+    assert payload["trace"]["used_memories"] == payload["trace"]["retrieved_memories"]
+
+
+def test_project_context_recall_is_read_only_for_memory_metadata(repo_root: Path, tmp_path: Path) -> None:
+    from agents.source_adapters import ProjectContextIngestor, ProjectContextRecaller, ProjectContextScanner
+    from core.gateway import MemoryGateway
+
+    context_dir = tmp_path / "context"
+    context_dir.mkdir()
+    (context_dir / "architecture.md").write_text(
+        "# Read Only\nRecall should not mutate lifecycle metadata.",
+        encoding="utf-8",
+    )
+    gateway = MemoryGateway(repo_root=str(repo_root))
+    sections = ProjectContextScanner(context_dir, project_id="mnemos", project_root=tmp_path).discover()
+    created = ProjectContextIngestor(gateway).ingest(sections).created
+    assert len(created) == 1
+    memory_id = created[0]
+    before = gateway.peek(memory_id)
+
+    report = ProjectContextRecaller(gateway).recall(
+        "lifecycle metadata",
+        project_id="mnemos",
+        kind="architecture",
+        limit=5,
+    )
+
+    after = gateway.peek(memory_id)
+    assert report.status == "ok"
+    assert after["access_count"] == before["access_count"]
+    assert after["stage"] == before["stage"]
+    assert after["layer"] == before["layer"]
 
 
 def test_project_context_audit_reports_stale_and_missing(

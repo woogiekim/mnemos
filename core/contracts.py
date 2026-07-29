@@ -151,6 +151,12 @@ class RecallMemory:
     created_at: str | None = None
     updated_at: str | None = None
     source: str | None = None
+    source_revision: str | None = None
+    source_path: str | None = None
+    source_section: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+    record_type: str | None = None
+    score_components: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
