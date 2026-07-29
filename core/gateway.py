@@ -965,7 +965,7 @@ class MemoryGateway:
                 query=query,
                 layers=layers,
                 limit=fetch_limit,
-                allow_grep=True,
+                allow_grep=False,
             )
             diagnostics.append({"query": query, **self.last_search_diagnostics})
 

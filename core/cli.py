@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -93,6 +94,79 @@ def _truncate_content(s: str, width: int, full: bool = False) -> str:
 def _echo_json(payload: object) -> None:
     """Emit stable UTF-8 JSON for machine consumers."""
     click.echo(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+
+
+def _exit_json(payload: object, code: int) -> None:
+    _echo_json(payload)
+    raise click.exceptions.Exit(code)
+
+
+def _read_json_request_file(request_file: str) -> dict:
+    raw = click.get_text_stream("stdin").read() if request_file == "-" else Path(request_file).read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON request: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    return payload
+
+
+def _normalize_recall_request(request: dict) -> dict[str, object]:
+    if request.get("read_only") is not True:
+        raise ValueError("read_only must be true")
+
+    raw_queries = request.get("queries")
+    if not isinstance(raw_queries, list) or not raw_queries:
+        raise ValueError("queries must contain at least one query")
+
+    queries: list[str] = []
+    for query in raw_queries:
+        if isinstance(query, dict):
+            text = query.get("text")
+        else:
+            text = query
+        if isinstance(text, str) and text.strip():
+            queries.append(text)
+    if not queries:
+        raise ValueError("queries must contain at least one non-empty text")
+
+    scope = request.get("scope") if isinstance(request.get("scope"), dict) else {}
+    filters = request.get("filters") if isinstance(request.get("filters"), dict) else {}
+    budget = request.get("budget") if isinstance(request.get("budget"), dict) else {}
+
+    return {
+        "request_id": request.get("request_id"),
+        "queries": queries,
+        "layers": _empty_list_as_none(filters.get("layers")),
+        "tags_all": _empty_list_as_none(filters.get("tags_all")),
+        "tags_any": _empty_list_as_none(filters.get("tags_any")),
+        "project_id": scope.get("project_id"),
+        "project_root_hash": scope.get("project_root_hash"),
+        "semantic_statuses": _empty_list_as_none(filters.get("semantic_statuses")),
+        "task_shape": scope.get("task_shape"),
+        "agent_role": scope.get("agent_role"),
+        "active_files": _empty_list_as_none(scope.get("active_files")),
+        "candidate_limit": _int_budget(budget.get("candidate_limit"), 20),
+        "selected_limit": _int_budget(budget.get("selected_limit"), 6),
+        "max_selected_chars": _int_budget(budget.get("max_selected_chars"), 3600),
+    }
+
+
+def _empty_list_as_none(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    values = [str(item) for item in value if str(item)]
+    return values or None
+
+
+def _int_budget(value: object, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _queue_stale_ingest_hook() -> bool:
@@ -546,6 +620,95 @@ def memory_search(query: str, layers: str | None, limit: int, as_json: bool, fas
             preview = _truncate_content(r["content"], width=width, full=full)
             click.echo(f"  [{r.get('source', '?')}] {r['item_id']}: {preview}")
     click.echo(f"[mnemos] Retrieved {len(results)} memories")
+
+
+@cli.command("recall")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output recall provider-contract JSON.")
+@click.option("--request-file", required=True, help="Recall request JSON file path, or '-' for stdin.")
+def recall_cmd(as_json: bool, request_file: str) -> None:
+    """Run read-only structured recall for host providers."""
+    if not as_json:
+        raise click.UsageError("mnemos recall currently requires --json.")
+
+    from core.provider import (
+        provider_error_from_exception,
+        recall_error_payload,
+        recall_response_payload,
+    )
+
+    started = time.perf_counter()
+    request_id = None
+    try:
+        request = _read_json_request_file(request_file)
+        request_id = request.get("request_id")
+    except ValueError as exc:
+        _exit_json(
+            recall_error_payload(
+                request_id=None,
+                code="invalid_json",
+                message=str(exc),
+                retryable=False,
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    try:
+        normalized = _normalize_recall_request(request)
+        request_id = normalized.get("request_id")
+    except ValueError as exc:
+        _exit_json(
+            recall_error_payload(
+                request_id=request_id if isinstance(request_id, str) else None,
+                code="validation_error",
+                message=str(exc),
+                retryable=False,
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    try:
+        gw = _get_gateway()
+        report = gw.recall(
+            queries=normalized["queries"],  # type: ignore[arg-type]
+            layers=normalized["layers"],  # type: ignore[arg-type]
+            tags_all=normalized["tags_all"],  # type: ignore[arg-type]
+            tags_any=normalized["tags_any"],  # type: ignore[arg-type]
+            project_id=normalized["project_id"] if isinstance(normalized["project_id"], str) else None,
+            project_root_hash=normalized["project_root_hash"] if isinstance(normalized["project_root_hash"], str) else None,
+            semantic_statuses=normalized["semantic_statuses"],  # type: ignore[arg-type]
+            task_shape=normalized["task_shape"] if isinstance(normalized["task_shape"], str) else None,
+            agent_role=normalized["agent_role"] if isinstance(normalized["agent_role"], str) else None,
+            active_files=normalized["active_files"],  # type: ignore[arg-type]
+            candidate_limit=int(normalized["candidate_limit"]),
+            selected_limit=int(normalized["selected_limit"]),
+            max_selected_chars=int(normalized["max_selected_chars"]),
+        )
+    except Exception as exc:
+        error = provider_error_from_exception(exc).get("error", {})
+        _exit_json(
+            recall_error_payload(
+                request_id=request_id if isinstance(request_id, str) else None,
+                code=str(error.get("code") or "backend_error"),
+                message=str(error.get("message") or exc),
+                retryable=bool(error.get("retryable")),
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    _echo_json(
+        recall_response_payload(
+            request_id=request_id if isinstance(request_id, str) else None,
+            report=report,
+            duration_ms=_duration_ms(started),
+        )
+    )
+
+
+def _duration_ms(started: float) -> int:
+    return max(0, int(round((time.perf_counter() - started) * 1000)))
 
 
 @cli.command("context")

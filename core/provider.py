@@ -12,6 +12,10 @@ CAPABILITIES: dict[str, bool | str] = {
     "capture_json": True,
     "search_json": True,
     "fast_search": True,
+    "recall_v1": True,
+    "recall_read_only": True,
+    "retrieval_score": True,
+    "project_scope_filter": True,
     "context_json": True,
     "context_render": True,
     "transcript_capture_json": True,
@@ -67,6 +71,10 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "capture_json": "mnemos capture --json emits a stable provider-contract JSON payload.",
     "search_json": "mnemos search --json emits stable JSON with query metadata and results.",
     "fast_search": "mnemos search --fast --json is the stable low-latency search entry point.",
+    "recall_v1": "mnemos recall --json --request-file emits the structured read-only recall provider contract.",
+    "recall_read_only": "Recall provider requests must declare read_only=true and use MemoryGateway.recall without mutating memory items.",
+    "retrieval_score": "Recall results expose operational retrieval_score when the core supplies a real retrieval score.",
+    "project_scope_filter": "Recall requests can filter by project_id and project_root_hash.",
     "context_json": "mnemos context --json emits bounded deterministic host-injectable context.",
     "context_render": "mnemos context --render emits bounded <mnemos-context> blocks.",
     "transcript_capture_json": "mnemos capture-transcript --json extracts and captures deterministic transcript insights.",
@@ -131,6 +139,12 @@ SCORE_SCALE = {
     "semantics": "Relative relevance within this response only; derived from returned result order.",
 }
 
+RECALL_SCORE_SEMANTICS = {
+    "rank_score": "Stable result-order score within this response; derived only from final result rank.",
+    "retrieval_score": "Operational retrieval score from Recall Core when available; null when unsupported or unavailable.",
+    "context_score": "Final selected-context score after deduplication and budget selection.",
+}
+
 
 def package_version() -> str:
     """Return the installed package version, or ``unknown`` in editable tests."""
@@ -151,6 +165,7 @@ def capabilities_payload() -> dict[str, Any]:
         "capability_status": dict(CAPABILITY_STATUS),
         "capability_descriptions": dict(CAPABILITY_DESCRIPTIONS),
         "host_capability_status": dict(HOST_CAPABILITY_STATUS),
+        "recall_scores": dict(RECALL_SCORE_SEMANTICS),
     }
 
 
@@ -163,6 +178,7 @@ def version_payload() -> dict[str, Any]:
         "status_values": CAPABILITY_STATUS_VALUES,
         "capabilities": dict(CAPABILITIES),
         "capability_status": dict(CAPABILITY_STATUS),
+        "recall_scores": dict(RECALL_SCORE_SEMANTICS),
     }
 
 
@@ -283,6 +299,174 @@ def search_payload(
     if retrieval_diagnostics:
         payload["retrieval_diagnostics"] = retrieval_diagnostics
     return payload
+
+
+def recall_response_payload(
+    *,
+    request_id: str | None,
+    report: Any,
+    duration_ms: int,
+) -> dict[str, Any]:
+    """Return the stable JSON payload for ``mnemos recall``."""
+    selected_ids = [str(getattr(item, "id", "")) for item in getattr(report, "selected", ())]
+    selected_id_set = set(selected_ids)
+    results = list(getattr(report, "candidates", ()))
+    count = len(results)
+    degraded_reasons = _recall_degraded_reasons(report)
+    partial_failure = bool(degraded_reasons)
+    diagnostics = _recall_diagnostics(report, duration_ms=duration_ms, degraded_reasons=degraded_reasons)
+
+    return {
+        "schema_version": "mnemos.recall.response.v1",
+        "provider": "mnemos",
+        "request_id": request_id,
+        "status": "degraded" if partial_failure else "ok",
+        "partial_failure": partial_failure,
+        "results": [
+            _recall_result_payload(
+                item,
+                index=index,
+                count=count,
+                selected=item_id in selected_id_set,
+            )
+            for index, item in enumerate(results)
+            for item_id in [str(getattr(item, "id", ""))]
+        ],
+        "selected_ids": selected_ids,
+        "diagnostics": diagnostics,
+    }
+
+
+def recall_error_payload(
+    *,
+    request_id: str | None,
+    code: str,
+    message: str,
+    retryable: bool = False,
+    duration_ms: int = 0,
+) -> dict[str, Any]:
+    """Return the stable JSON error payload for ``mnemos recall``."""
+    return {
+        "schema_version": "mnemos.recall.response.v1",
+        "provider": "mnemos",
+        "request_id": request_id,
+        "status": "error",
+        "partial_failure": False,
+        "results": [],
+        "selected_ids": [],
+        "diagnostics": {
+            "backends": [],
+            "fallback_used": False,
+            "duration_ms": duration_ms,
+            "degraded_reasons": [],
+        },
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+        },
+    }
+
+
+def _recall_result_payload(
+    item: Any,
+    *,
+    index: int,
+    count: int,
+    selected: bool,
+) -> dict[str, Any]:
+    retrieval_score = _optional_float(getattr(item, "score", None))
+    context_score = retrieval_score if selected else None
+    return {
+        "memory_id": getattr(item, "id", None),
+        "content": getattr(item, "content", ""),
+        "summary": getattr(item, "summary", None),
+        "layer": getattr(item, "layer", None),
+        "semantic_status": getattr(item, "semantic_status", None),
+        "tags": list(getattr(item, "tags", ()) or []),
+        "record_type": getattr(item, "record_type", None),
+        "task_shape": getattr(item, "task_shape", None),
+        "project_id": getattr(item, "project_id", None),
+        "project_root_hash": getattr(item, "project_root_hash", None),
+        "provenance": getattr(item, "provenance", None) or {},
+        "created_at": getattr(item, "created_at", None),
+        "updated_at": getattr(item, "updated_at", None),
+        "rank_score": _rank_score(index, count),
+        "retrieval_score": retrieval_score,
+        "context_score": context_score,
+        "score_components": getattr(item, "score_components", None) or {},
+        "match_reasons": list(getattr(item, "matched_queries", ()) or []),
+        "supersedes": list(getattr(item, "supersedes", ()) or []),
+        "superseded_by": getattr(item, "superseded_by", None),
+    }
+
+
+def _rank_score(index: int, count: int) -> float:
+    if count <= 1:
+        return 1.0 if count == 1 else 0.0
+    return round(1.0 - (index / (count - 1)), 6)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _recall_degraded_reasons(report: Any) -> list[str]:
+    reasons: list[str] = []
+    seen: set[str] = set()
+    diagnostics = getattr(report, "diagnostics", {}) or {}
+    for attempt in diagnostics.get("attempts", []) or []:
+        if attempt.get("partial_failure") and not attempt.get("degraded_reasons"):
+            _append_unique(reasons, seen, "retrieval_backend_partial_failure")
+        if attempt.get("fallback_used"):
+            _append_unique(reasons, seen, "retrieval_fallback_used")
+        for reason in attempt.get("degraded_reasons", []) or []:
+            _append_unique(reasons, seen, str(reason))
+
+    for item in getattr(report, "candidates", ()) or ():
+        if _optional_float(getattr(item, "score", None)) is None:
+            _append_unique(reasons, seen, "retrieval_score_unavailable")
+            break
+    return reasons
+
+
+def _recall_diagnostics(
+    report: Any,
+    *,
+    duration_ms: int,
+    degraded_reasons: list[str],
+) -> dict[str, Any]:
+    backends: list[dict[str, Any]] = []
+    fallback_used = False
+    seen_backends: set[tuple[str, str]] = set()
+    diagnostics = getattr(report, "diagnostics", {}) or {}
+    for attempt in diagnostics.get("attempts", []) or []:
+        fallback_used = fallback_used or bool(attempt.get("fallback_used"))
+        for backend in attempt.get("backends", []) or []:
+            key = (str(backend.get("name")), str(backend.get("status")))
+            if key in seen_backends:
+                continue
+            seen_backends.add(key)
+            backends.append(dict(backend))
+
+    return {
+        "backends": backends,
+        "fallback_used": fallback_used,
+        "duration_ms": duration_ms,
+        "degraded_reasons": degraded_reasons,
+    }
+
+
+def _append_unique(values: list[str], seen: set[str], value: str) -> None:
+    if value in seen:
+        return
+    seen.add(value)
+    values.append(value)
 
 
 def error_payload(
