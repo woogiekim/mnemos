@@ -16,6 +16,7 @@ CAPABILITIES: dict[str, bool | str] = {
     "recall_read_only": True,
     "retrieval_score": True,
     "project_scope_filter": True,
+    "feedback_v1": "supported",
     "context_json": True,
     "context_render": True,
     "transcript_capture_json": True,
@@ -75,6 +76,7 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
     "recall_read_only": "Recall provider requests must declare read_only=true and use MemoryGateway.recall without mutating memory items.",
     "retrieval_score": "Recall results expose operational retrieval_score when the core supplies a real retrieval score.",
     "project_scope_filter": "Recall requests can filter by project_id and project_root_hash.",
+    "feedback_v1": "mnemos feedback --json --request-file records idempotent memory usage events and updates a separate usage projection.",
     "context_json": "mnemos context --json emits bounded deterministic host-injectable context.",
     "context_render": "mnemos context --render emits bounded <mnemos-context> blocks.",
     "transcript_capture_json": "mnemos capture-transcript --json extracts and captures deterministic transcript insights.",
@@ -359,6 +361,51 @@ def recall_error_payload(
             "fallback_used": False,
             "duration_ms": duration_ms,
             "degraded_reasons": [],
+        },
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+        },
+    }
+
+
+def feedback_response_payload(
+    *,
+    result: dict[str, Any],
+    duration_ms: int,
+) -> dict[str, Any]:
+    """Return the stable JSON payload for ``mnemos feedback``."""
+    return {
+        "schema_version": "mnemos.feedback.response.v1",
+        "provider": "mnemos",
+        "status": "ok",
+        "event": result.get("event", {}),
+        "projection": result.get("projection", {}),
+        "diagnostics": {
+            "duration_ms": duration_ms,
+            "ledger_path": result.get("ledger_path"),
+            "projection_path": result.get("projection_path"),
+        },
+    }
+
+
+def feedback_error_payload(
+    *,
+    code: str,
+    message: str,
+    retryable: bool = False,
+    duration_ms: int = 0,
+) -> dict[str, Any]:
+    """Return the stable JSON error payload for ``mnemos feedback``."""
+    return {
+        "schema_version": "mnemos.feedback.response.v1",
+        "provider": "mnemos",
+        "status": "error",
+        "event": None,
+        "projection": None,
+        "diagnostics": {
+            "duration_ms": duration_ms,
         },
         "error": {
             "code": code,

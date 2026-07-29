@@ -707,6 +707,89 @@ def recall_cmd(as_json: bool, request_file: str) -> None:
     )
 
 
+@cli.command("feedback")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output feedback provider-contract JSON.")
+@click.option("--request-file", required=True, help="Feedback request JSON file path, or '-' for stdin.")
+def feedback_cmd(as_json: bool, request_file: str) -> None:
+    """Record structured memory usage feedback for host providers."""
+    if not as_json:
+        raise click.UsageError("mnemos feedback currently requires --json.")
+
+    from core.feedback import FeedbackStore, FeedbackValidationError, normalize_feedback_request
+    from core.provider import feedback_error_payload, feedback_response_payload, provider_error_from_exception
+
+    started = time.perf_counter()
+    try:
+        request = _read_json_request_file(request_file)
+    except ValueError as exc:
+        _exit_json(
+            feedback_error_payload(
+                code="invalid_json",
+                message=str(exc),
+                retryable=False,
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    try:
+        normalized = normalize_feedback_request(request)
+    except FeedbackValidationError as exc:
+        _exit_json(
+            feedback_error_payload(
+                code="validation_error",
+                message=str(exc),
+                retryable=False,
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    try:
+        gw = _get_gateway()
+        item = gw.peek(str(normalized["memory_id"]))
+    except Exception as exc:
+        _exit_json(
+            feedback_error_payload(
+                code="invalid_memory_id",
+                message=str(exc),
+                retryable=False,
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    try:
+        store = FeedbackStore(os.environ.get("MNEMOS_REPO_ROOT", "."))
+        result = store.record(
+            request,
+            legacy_access_count=int(item.get("access_count") or 0),
+        )
+    except FeedbackValidationError as exc:
+        _exit_json(
+            feedback_error_payload(
+                code="validation_error",
+                message=str(exc),
+                retryable=False,
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+    except Exception as exc:
+        error = provider_error_from_exception(exc).get("error", {})
+        _exit_json(
+            feedback_error_payload(
+                code=str(error.get("code") or "backend_error"),
+                message=str(error.get("message") or exc),
+                retryable=bool(error.get("retryable")),
+                duration_ms=_duration_ms(started),
+            ),
+            1,
+        )
+
+    _echo_json(feedback_response_payload(result=result, duration_ms=_duration_ms(started)))
+
+
 def _duration_ms(started: float) -> int:
     return max(0, int(round((time.perf_counter() - started) * 1000)))
 
