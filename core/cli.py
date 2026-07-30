@@ -96,6 +96,92 @@ def _echo_json(payload: object) -> None:
     click.echo(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
 
 
+def _sync_failure_payload(
+    *,
+    item_id: str | None,
+    layer: str,
+    failure: object,
+) -> dict[str, object]:
+    """Return JSON for a committed local capture whose remote sync is pending."""
+    return {
+        "provider": "mnemos",
+        "provider_contract_version": "1.0",
+        "status": "sync_pending",
+        "capture_status": "committed",
+        "sync_status": "failed",
+        "retryable": bool(getattr(failure, "retryable", True)),
+        "id": item_id,
+        "layer": layer,
+        "commit": getattr(failure, "commit", None),
+        "error_code": getattr(failure, "error_code", "git_sync_failed"),
+        "message": getattr(failure, "message", str(failure)),
+        "stderr": getattr(failure, "stderr", ""),
+        "recovery_command": getattr(
+            failure,
+            "recovery_command",
+            "mnemos sync pull && mnemos sync push",
+        ),
+    }
+
+
+def _capture_error_status_payload(
+    *,
+    exc: Exception,
+    item_id: str | None,
+    layer: str,
+    gw: MemoryGateway | None,
+) -> dict[str, object]:
+    """Return JSON that separates capture/write/commit failures from push failures."""
+    from core import git as _git
+    from core.provider import provider_error_from_exception
+    from core.sync import classify_git_sync_failure
+
+    error_code = "backend_error"
+    retryable = True
+    stderr = str(exc)
+    if isinstance(exc, _git.GitCommandError):
+        error_code, retryable = classify_git_sync_failure(exc)
+        stderr = exc.stderr or str(exc)
+
+    capture_status = "failed"
+    if item_id and gw is not None:
+        try:
+            gw._store.read(item_id)
+            capture_status = "written_uncommitted"
+        except Exception:
+            capture_status = "failed"
+
+    payload = provider_error_from_exception(exc)
+    payload.update(
+        {
+            "capture_status": capture_status,
+            "sync_status": "commit_failed" if capture_status == "written_uncommitted" else "failed",
+            "retryable": retryable,
+            "id": item_id,
+            "layer": layer,
+            "commit": None,
+            "error_code": error_code,
+            "stderr": stderr,
+        }
+    )
+    if isinstance(payload.get("error"), dict):
+        payload["error"]["code"] = error_code
+        payload["error"]["retryable"] = retryable
+    return payload
+
+
+def _warn_sync_pending(failure: object) -> None:
+    error_code = getattr(failure, "error_code", "git_sync_failed")
+    commit = getattr(failure, "commit", None)
+    recovery = getattr(failure, "recovery_command", "mnemos sync pull && mnemos sync push")
+    detail = f" commit={commit}" if commit else ""
+    click.echo(
+        f"warning: remote sync pending ({error_code}). Local capture is committed{detail}.",
+        err=True,
+    )
+    click.echo(f"warning: retry with: {recovery}", err=True)
+
+
 def _exit_json(payload: object, code: int) -> None:
     _echo_json(payload)
     raise click.exceptions.Exit(code)
@@ -326,9 +412,16 @@ def memory_capture(
             no_classify=no_classify,
         )
         effective_layer = layer or "ephemeral"
+        sync_failure = getattr(getattr(gw, "_store", None), "last_sync_failure", None)
         if as_json:
             status = "duplicate" if captured_id is None or gw.last_capture_was_duplicate else "captured"
             payload = {"status": status, "id": captured_id, "layer": effective_layer}
+            if sync_failure is not None and captured_id is not None:
+                payload = _sync_failure_payload(
+                    item_id=captured_id,
+                    layer=effective_layer,
+                    failure=sync_failure,
+                )
             if captured_id is not None:
                 try:
                     from core.provider import memory_item_payload
@@ -366,11 +459,14 @@ def memory_capture(
                     ),
                     color=not no_color,
                 )
+                if sync_failure is not None:
+                    _warn_sync_pending(sync_failure)
             else:
                 # --quiet: suppress everything (reserved for scripts / migrate flows).
                 # No captured: line, no notification. Used internally by hooks that
                 # want silent operation.
-                pass
+                if sync_failure is not None:
+                    _warn_sync_pending(sync_failure)
     except PolicyViolationError as exc:
         if as_json:
             from core.provider import error_payload
@@ -386,9 +482,15 @@ def memory_capture(
         sys.exit(1)
     except Exception as exc:
         if as_json:
-            from core.provider import provider_error_from_exception
-
-            _echo_json(provider_error_from_exception(exc))
+            effective_layer = layer or "ephemeral"
+            _echo_json(
+                _capture_error_status_payload(
+                    exc=exc,
+                    item_id=item_id,
+                    layer=effective_layer,
+                    gw=gw,
+                )
+            )
             sys.exit(1)
 
         click.echo(f"error: {exc}", err=True)

@@ -15,6 +15,7 @@ Public API
 - :func:`commit` — create a commit (idempotent — no-ops on clean tree)
 - :func:`push` — push to a remote branch
 - :func:`fetch` — fetch from a remote (optional single-branch mode)
+- :func:`head` — return the current commit hash
 - :func:`set_upstream` — set the upstream tracking branch
 - :func:`rebase_onto` — rebase current branch onto an explicit ref
 - :func:`rebase_continue` — continue an in-progress rebase
@@ -284,6 +285,14 @@ def push(path: str | Path, remote: str, branch: str) -> None:
     rc, _, stderr = _git("push", remote, branch, cwd=path)
     if rc != 0:
         raise GitCommandError(rc, stderr, ["git", "push", remote, branch])
+
+
+def head(path: str | Path) -> str:
+    """Return the current ``HEAD`` commit hash."""
+    rc, stdout, stderr = _git("rev-parse", "HEAD", cwd=path)
+    if rc != 0:
+        raise GitCommandError(rc, stderr, ["git", "rev-parse", "HEAD"])
+    return stdout.strip()
 
 
 def fetch(path: str | Path, remote: str, *, branch: str | None = None) -> None:

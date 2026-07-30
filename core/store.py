@@ -13,7 +13,7 @@ import frontmatter
 import core.git as git
 from core.config import SyncConfig
 from core.layers import LAYER_STATIC_PATHS, TRANSIENT_PATH
-from core.sync import GitSyncEngine, SyncConflictError
+from core.sync import GitSyncEngine, SyncConflictError, SyncFailureInfo
 
 # Re-exported so callers can ``from core.store import SyncConflictError`` and so
 # the symbol is available alongside the default backend that now raises it.
@@ -22,6 +22,7 @@ __all__ = [
     "SyncableBackend",
     "MemoryStore",
     "SyncConflictError",
+    "SyncFailureInfo",
 ]
 
 
@@ -231,6 +232,11 @@ class MemoryStore:
         """Continue after a manually-resolved rebase conflict."""
         self._sync_engine.sync_continue()
 
+    @property
+    def last_sync_failure(self) -> SyncFailureInfo | None:
+        """Return the most recent post-commit push failure for this store."""
+        return self._sync_engine.last_push_failure
+
     @staticmethod
     def canonical_filename(item_id: str) -> str:
         """Return a cross-platform safe filename for a logical memory ID."""
@@ -282,6 +288,8 @@ class MemoryStore:
         Writes outside ``wiki/`` (ephemeral / working / session / transient)
         are staged out by the wiki filter and therefore commit to nothing.
         """
+        self._sync_engine.clear_last_push_failure()
+
         # Hook 1 — pull before write (may raise SyncConflictError).
         self._sync_engine.hook_before_write()
 

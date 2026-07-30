@@ -156,10 +156,11 @@ push is skipped silently when:
   yet — local commits queue and ship on the next `sync_push` after
   the remote catches up).
 
-Failed pushes raise `GitCommandError` (a `RuntimeError` subclass) so
-callers can recover; the **local commit is never rolled back** on
-push failure.  The queued commit is shipped on the next successful
-push.
+For automatic capture sync, failed `git push` calls leave a structured
+`sync_pending` status on the capture response instead of making the
+capture look lost.  The **local commit is never rolled back** on push
+failure, and the queued commit is shipped on the next successful
+`mnemos sync pull && mnemos sync push`.
 
 ---
 
@@ -301,16 +302,18 @@ not supported.  Operators who need fan-out can post-process the
 pushed commits with their own `git push` step against a second
 remote.
 
-### No push retry or queueing
+### Push retry and pending sync
 
 When `git push` fails (network blip, auth failure, remote rejection),
-the engine surfaces the underlying `GitCommandError` and stops.  The
-local commit persists — the engine does **not** roll it back — and
-the next successful `mnemos sync push` ships it without duplication.
-There is no built-in retry loop or background queue; the operator
-decides when to retry.
+automatic capture reports local commit success separately from remote
+sync failure.  The local commit persists — the engine does **not** roll
+it back — and the next successful `mnemos sync pull && mnemos sync push`
+ships it without duplication.  Manual `mnemos sync push` still surfaces
+the underlying git failure so operators can see that the retry did not
+complete.
 
 This contract is validated by
+`tests/test_capture_sync_failure.py` and
 `tests/test_sync_hardening_79.py::TestAC6PartialFailureRecovery`.
 
 ---

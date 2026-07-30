@@ -38,6 +38,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -62,6 +63,20 @@ class SyncConflictError(RuntimeError):
         super().__init__(message)
 
 
+@dataclass(frozen=True)
+class SyncFailureInfo:
+    """Structured status for a local commit whose remote sync did not finish."""
+
+    error_code: str
+    message: str
+    stderr: str
+    retryable: bool
+    commit: str | None
+    remote: str
+    branch: str
+    recovery_command: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -75,6 +90,20 @@ def hash_path(path: Path | str) -> str:
 def _utc_timestamp() -> str:
     """Return the current UTC time as an ISO-8601 ``...Z`` string."""
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def classify_git_sync_failure(exc: _git.GitCommandError) -> tuple[str, bool]:
+    """Return ``(error_code, retryable)`` for common git sync failures."""
+    detail = f"{exc.stderr}\n{exc}".lower()
+    if "index.lock" in detail or "unable to create" in detail and ".git/index.lock" in detail:
+        return ("git_index_locked", True)
+    if "cannot lock ref" in detail and "expected" in detail:
+        return ("remote_ref_mismatch", True)
+    if "non-fast-forward" in detail or "fetch first" in detail or "[rejected]" in detail:
+        return ("non_fast_forward", True)
+    if "timeout" in detail or "timed out" in detail:
+        return ("timeout", True)
+    return ("git_sync_failed", True)
 
 
 # Default conflict-artefact filename (mirrors the Obsidian behaviour).
@@ -119,6 +148,7 @@ class GitSyncEngine:
         self._last_pull_ts: float = self._load_last_pull_ts()
         # Monotonic timestamp of the last successful push (process-local).
         self._last_push_ts: float = 0.0
+        self._last_push_failure: SyncFailureInfo | None = None
 
     # ------------------------------------------------------------------ #
     # Read-only accessors (used by sync_status)                           #
@@ -131,6 +161,13 @@ class GitSyncEngine:
     @property
     def last_push_ts(self) -> float:
         return self._last_push_ts
+
+    @property
+    def last_push_failure(self) -> SyncFailureInfo | None:
+        return self._last_push_failure
+
+    def clear_last_push_failure(self) -> None:
+        self._last_push_failure = None
 
     # ------------------------------------------------------------------ #
     # Pull-timestamp cache                                                #
@@ -300,6 +337,7 @@ class GitSyncEngine:
         with the target branch already exists.  Otherwise the push is skipped
         silently (local-only mode / empty remote).
         """
+        self._last_push_failure = None
         if not self._config.enabled:
             return
         if not committed:
@@ -312,7 +350,25 @@ class GitSyncEngine:
             self._root, self._config.remote, self._config.branch
         ):
             return
-        _git.push(self._root, remote=self._config.remote, branch=self._config.branch)
+        try:
+            _git.push(self._root, remote=self._config.remote, branch=self._config.branch)
+        except _git.GitCommandError as exc:
+            error_code, retryable = classify_git_sync_failure(exc)
+            try:
+                commit = _git.head(self._root)
+            except Exception:
+                commit = None
+            self._last_push_failure = SyncFailureInfo(
+                error_code=error_code,
+                message=str(exc),
+                stderr=exc.stderr,
+                retryable=retryable,
+                commit=commit,
+                remote=self._config.remote,
+                branch=self._config.branch,
+                recovery_command="mnemos sync pull && mnemos sync push",
+            )
+            return
         self._last_push_ts = time.monotonic()
 
     # ------------------------------------------------------------------ #
