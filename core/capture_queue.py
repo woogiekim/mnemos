@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import shutil
@@ -53,6 +54,7 @@ _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_RECOVERY_AFTER_SECONDS = 300.0
 _LOCK_INITIALIZATION_GRACE_SECONDS = 5.0
 _DETACHED_WORKERS: dict[int, subprocess.Popen] = {}
+_QUEUE_STATES = ("pending", "processing", "done", "failed")
 
 
 def _queue_root(repo_root: str | Path) -> Path:
@@ -228,14 +230,119 @@ def _recover_abandoned_jobs(
     return recovered
 
 
-def _isolate_malformed_job(processing_path: Path, failed_dir: Path, exc: Exception) -> None:
-    payload = {
-        "item_id": processing_path.stem,
+def _isolate_malformed_job(
+    processing_path: Path,
+    failed_dir: Path,
+    exc: Exception,
+    raw_payload: Any = None,
+) -> None:
+    item_id = raw_payload.get("item_id") if isinstance(raw_payload, dict) else None
+    job_id = raw_payload.get("job_id") if isinstance(raw_payload, dict) else None
+    receipt = {
+        "job_id": job_id if isinstance(job_id, str) and job_id else processing_path.stem,
+        "item_id": item_id if isinstance(item_id, str) and item_id else processing_path.stem,
+        "status": "failed",
         "failed_at": _now_iso(),
         "error_type": exc.__class__.__name__,
     }
-    _write_json_atomic(failed_dir / processing_path.name, payload)
+    _write_json_atomic(failed_dir / processing_path.name, receipt)
     processing_path.unlink(missing_ok=True)
+
+
+def _terminal_receipt(
+    payload: dict[str, Any],
+    *,
+    status: str,
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    try:
+        attempts = int(payload.get("attempts", 0))
+    except (TypeError, ValueError):
+        attempts = 0
+    receipt: dict[str, Any] = {
+        "job_id": str(payload.get("job_id") or "unknown"),
+        "item_id": str(payload.get("item_id") or "unknown"),
+        "status": status,
+        "attempts": attempts,
+        "completed_at": _now_iso(),
+    }
+    completed_phases = payload.get("completed_phases")
+    if isinstance(completed_phases, list):
+        receipt["completed_phases"] = [
+            phase for phase in completed_phases if isinstance(phase, str)
+        ]
+    if error_type is not None:
+        receipt["error_type"] = error_type
+    sync_failure = payload.get("sync_failure")
+    if status == "captured" and isinstance(sync_failure, dict):
+        receipt["status"] = "sync_pending"
+        receipt.update(sync_failure)
+    return receipt
+
+
+def _remember_sync_failure(gateway: Any, payload: dict[str, Any]) -> None:
+    failure = getattr(getattr(gateway, "_store", None), "last_sync_failure", None)
+    if failure is None:
+        return
+    payload["sync_failure"] = {
+        "capture_status": "committed",
+        "sync_status": "failed",
+        "retryable": bool(getattr(failure, "retryable", True)),
+        "commit": getattr(failure, "commit", None),
+        "error_code": getattr(failure, "error_code", "git_sync_failed"),
+        "remote": getattr(failure, "remote", None),
+        "branch": getattr(failure, "branch", None),
+        "recovery_command": getattr(
+            failure,
+            "recovery_command",
+            "mnemos sync pull && mnemos sync push",
+        ),
+    }
+
+
+def _move_terminal_receipt(
+    *,
+    processing_path: Path,
+    target_path: Path,
+    receipt: dict[str, Any],
+) -> None:
+    _write_json_atomic(processing_path, receipt)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    processing_path.replace(target_path)
+
+
+def _purge_tombstone_path(root: Path, item_id: str) -> Path:
+    item_key = hashlib.sha256(item_id.encode("utf-8")).hexdigest()
+    return root / "tombstones" / f"{item_key}.json"
+
+
+def _job_was_purged(root: Path, payload: dict[str, Any]) -> bool:
+    item_id = payload.get("item_id")
+    if not isinstance(item_id, str) or not item_id:
+        return False
+    try:
+        tombstone = json.loads(
+            _purge_tombstone_path(root, item_id).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(tombstone, dict):
+        return False
+    deleted_at = tombstone.get("deleted_at")
+    if not isinstance(deleted_at, str) or not deleted_at:
+        return False
+    queued_at = payload.get("queued_at")
+    return not isinstance(queued_at, str) or not queued_at or queued_at <= deleted_at
+
+
+def _delete_purged_capture(gateway: Any, item_id: str) -> None:
+    delete = getattr(gateway, "delete", None)
+    if not callable(delete):
+        return
+    try:
+        delete(item_id)
+    except FileNotFoundError:
+        pass
 
 
 def _handle_capture_failure(
@@ -260,10 +367,41 @@ def _handle_capture_failure(
         processing_path.replace(pending_dir / processing_path.name)
         return "retried"
 
-    payload["failed_at"] = _now_iso()
-    _write_json_atomic(failed_dir / processing_path.name, payload)
-    processing_path.unlink(missing_ok=True)
+    receipt = _terminal_receipt(
+        payload,
+        status="failed",
+        error_type=exc.__class__.__name__,
+    )
+    _move_terminal_receipt(
+        processing_path=processing_path,
+        target_path=failed_dir / processing_path.name,
+        receipt=receipt,
+    )
     return "failed"
+
+
+def purge_capture_jobs(*, repo_root: str | Path, item_id: str) -> int:
+    """Remove queue payloads and receipts associated with a hard-deleted item."""
+    removed = 0
+    root = _queue_root(repo_root)
+    _write_json_atomic(
+        _purge_tombstone_path(root, item_id),
+        {"deleted_at": _now_iso()},
+    )
+    for state in _QUEUE_STATES:
+        for path in (root / state).glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("item_id") != item_id:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            removed += 1
+    return removed
 
 
 def get_capture_queue_diagnostics(*, repo_root: str | Path) -> dict[str, Any]:
@@ -274,6 +412,14 @@ def get_capture_queue_diagnostics(*, repo_root: str | Path) -> dict[str, Any]:
     processing_paths = list((root / "processing").glob("*.json"))
     failed_paths = list((root / "failed").glob("*.json"))
     done_paths = list((root / "done").glob("*.json"))
+    sync_pending = 0
+    for path in done_paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("status") == "sync_pending":
+            sync_pending += 1
 
     oldest_age: float | None = None
     if pending_paths:
@@ -315,6 +461,7 @@ def get_capture_queue_diagnostics(*, repo_root: str | Path) -> dict[str, Any]:
         "processing": len(processing_paths),
         "failed": len(failed_paths),
         "done": len(done_paths),
+        "sync_pending": sync_pending,
         "oldest_pending_age_seconds": oldest_age,
         "worker": worker,
     }
@@ -392,11 +539,12 @@ def enqueue_capture(
 ) -> QueuedCapture:
     """Persist a capture job without materializing it into the memory store."""
     resolved_id = item_id or str(uuid.uuid4())
+    job_id = uuid.uuid4().hex
     pending_dir = _queue_root(repo_root) / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
-    job_path = pending_dir / f"{resolved_id}.json"
-    tmp_path = job_path.with_suffix(".json.tmp")
+    job_path = pending_dir / f"{job_id}.json"
     payload: dict[str, Any] = {
+        "job_id": job_id,
         "item_id": resolved_id,
         "content": content,
         "layer": layer,
@@ -409,8 +557,7 @@ def enqueue_capture(
         "attempts": 0,
     }
 
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(job_path)
+    _write_json_atomic(job_path, payload)
 
     try:
         worker = start_capture_worker(repo_root)
@@ -478,6 +625,7 @@ def process_pending_captures(
                 continue
 
             attempted += 1
+            payload: Any = None
             try:
                 payload = json.loads(processing_path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
@@ -489,24 +637,70 @@ def process_pending_captures(
                 if not isinstance(item_id, str) or not item_id:
                     raise ValueError("capture job item_id must be non-empty text")
             except Exception as exc:
-                _isolate_malformed_job(processing_path, failed_dir, exc)
+                _isolate_malformed_job(
+                    processing_path,
+                    failed_dir,
+                    exc,
+                    raw_payload=payload,
+                )
+                if isinstance(payload, dict) and _job_was_purged(root, payload):
+                    (failed_dir / processing_path.name).unlink(missing_ok=True)
                 failed += 1
                 continue
 
             try:
+                resume_store = bool(payload.get("materialization_started"))
                 if gateway is None:
                     gateway = MemoryGateway(repo_root=str(repo_root))
-                gateway.capture(
-                    content=content,
-                    layer=payload.get("layer"),
-                    tags=list(payload.get("tags") or []),
-                    quality_score=float(payload.get("quality_score", 0.8)),
-                    run_id=payload.get("run_id"),
-                    session_id=payload.get("session_id"),
-                    item_id=item_id,
-                    no_classify=bool(payload.get("no_classify", False)),
-                )
+                capture_kwargs = {
+                    "content": content,
+                    "layer": payload.get("layer"),
+                    "tags": list(payload.get("tags") or []),
+                    "quality_score": float(payload.get("quality_score", 0.8)),
+                    "run_id": payload.get("run_id"),
+                    "session_id": payload.get("session_id"),
+                    "item_id": item_id,
+                    "no_classify": bool(payload.get("no_classify", False)),
+                }
+                capture_with_progress = getattr(gateway, "capture_with_progress", None)
+                if callable(capture_with_progress):
+                    raw_completed_phases = payload.get("completed_phases") or []
+                    completed_phases = {
+                        str(phase)
+                        for phase in raw_completed_phases
+                        if isinstance(phase, str)
+                    }
+
+                    def record_phase(phase: str) -> None:
+                        phases = payload.setdefault("completed_phases", [])
+                        if phase not in phases:
+                            phases.append(phase)
+                            if phase == "store_write":
+                                _remember_sync_failure(gateway, payload)
+                            _write_json_atomic(processing_path, payload)
+
+                    def record_store_attempt() -> None:
+                        if payload.get("materialization_started"):
+                            return
+                        payload["materialization_started"] = True
+                        _write_json_atomic(processing_path, payload)
+
+                    capture_with_progress(
+                        completed_phases=completed_phases,
+                        on_phase=record_phase,
+                        on_store_attempt=record_store_attempt,
+                        resume_store=resume_store,
+                        **capture_kwargs,
+                    )
+                else:
+                    gateway.capture(**capture_kwargs)
+                _remember_sync_failure(gateway, payload)
             except Exception as exc:
+                if _job_was_purged(root, payload):
+                    if gateway is not None:
+                        _delete_purged_capture(gateway, item_id)
+                    processing_path.unlink(missing_ok=True)
+                    continue
                 outcome = _handle_capture_failure(
                     processing_path=processing_path,
                     pending_dir=pending_dir,
@@ -515,13 +709,34 @@ def process_pending_captures(
                     exc=exc,
                     max_attempts=max_attempts,
                 )
+                if _job_was_purged(root, payload):
+                    (pending_dir / processing_path.name).unlink(missing_ok=True)
+                    (failed_dir / processing_path.name).unlink(missing_ok=True)
+                    if gateway is not None:
+                        _delete_purged_capture(gateway, item_id)
+                    continue
                 if outcome == "retried":
                     retried += 1
                 else:
                     failed += 1
                 continue
 
-            processing_path.replace(done_dir / processing_path.name)
+            if _job_was_purged(root, payload):
+                _delete_purged_capture(gateway, item_id)
+                processing_path.unlink(missing_ok=True)
+                continue
+
+            receipt = _terminal_receipt(payload, status="captured")
+            done_path = done_dir / processing_path.name
+            _move_terminal_receipt(
+                processing_path=processing_path,
+                target_path=done_path,
+                receipt=receipt,
+            )
+            if _job_was_purged(root, payload):
+                done_path.unlink(missing_ok=True)
+                _delete_purged_capture(gateway, item_id)
+                continue
             processed += 1
     except Exception as exc:
         _write_worker_status(

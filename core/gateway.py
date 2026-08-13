@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from core.contracts import RecallMemory, RecallReport
 from core.policy import PolicyEngine, PolicyViolationError
@@ -48,6 +48,7 @@ def _timed_capture(method: Any) -> Any:
     def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
         self._capture_phase_timings = []
         self._capture_store_diagnostics = {"enabled": False, "phases": []}
+        self._last_capture_item_id = None
         qmd_enabled = bool(getattr(getattr(self, "_qmd_config", None), "enabled", False))
         self._qmd_refresh_diagnostics = {
             "enabled": qmd_enabled,
@@ -419,6 +420,7 @@ class MemoryGateway:
             "error_code": None,
         }
         self._capture_duration_ms: float = 0.0
+        self._last_capture_item_id: str | None = None
 
     # ------------------------------------------------------------------ #
     # Observability logger access                                           #
@@ -454,6 +456,11 @@ class MemoryGateway:
     def last_qmd_refresh_diagnostics(self) -> dict[str, Any]:
         """Return content-free status from the latest derived-index enqueue."""
         return dict(self._qmd_refresh_diagnostics)
+
+    @property
+    def last_capture_item_id(self) -> str | None:
+        """Return the ID allocated by the latest capture before storage began."""
+        return self._last_capture_item_id
 
     def _enqueue_qmd_refresh(self, reason: str) -> None:
         """Schedule optional derived indexing without affecting canonical work."""
@@ -804,6 +811,39 @@ class MemoryGateway:
         extra_metadata: dict[str, Any] | None = None,
         no_classify: bool = False,
     ) -> str | None:
+        """Capture a new memory item into the target layer."""
+        return self._capture(
+            content=content,
+            layer=layer,
+            item_id=item_id,
+            tags=tags,
+            quality_score=quality_score,
+            run_id=run_id,
+            session_id=session_id,
+            extra_metadata=extra_metadata,
+            no_classify=no_classify,
+            completed_phases=set(),
+            on_capture_phase=None,
+            on_store_attempt=None,
+            skip_dedup=False,
+        )
+
+    def _capture(
+        self,
+        content: str,
+        layer: str | None,
+        item_id: str | None,
+        tags: list[str] | None,
+        quality_score: float,
+        run_id: str | None,
+        session_id: str | None,
+        extra_metadata: dict[str, Any] | None,
+        no_classify: bool,
+        completed_phases: set[str],
+        on_capture_phase: Callable[[str], None] | None,
+        on_store_attempt: Callable[[], None] | None,
+        skip_dedup: bool,
+    ) -> str | None:
         """Capture a new memory item into the target layer.
 
         When *layer* is omitted it defaults to ``"ephemeral"``.  The
@@ -881,7 +921,7 @@ class MemoryGateway:
         # hooks) is never reached.
         content_hash = _capture_content_hash(content)
         dedup_key = (layer, content_hash)
-        if dedup_key in self._capture_dedup:
+        if not skip_dedup and dedup_key in self._capture_dedup:
             record_dedup_timing()
             return None
 
@@ -901,7 +941,7 @@ class MemoryGateway:
         hash_already_in_process = any(
             h == content_hash for (_, h) in self._capture_dedup
         )
-        if not hash_already_in_process:
+        if not skip_dedup and not hash_already_in_process:
             existing = self._find_existing_by_hash(content_hash)
             if existing is not None:
                 existing_id, _existing_layer = existing
@@ -918,6 +958,7 @@ class MemoryGateway:
             self._policy.validate_capture(layer=layer, item={"content": content})
 
         item_id = item_id or str(uuid.uuid4())
+        self._last_capture_item_id = item_id
         # Register in the dedup cache immediately — before the write — so that
         # a concurrent duplicate call in the same process is also blocked even
         # if the write is still in progress.
@@ -942,6 +983,9 @@ class MemoryGateway:
         if extra_metadata:
             metadata.update(extra_metadata)
 
+        if on_store_attempt is not None:
+            on_store_attempt()
+
         try:
             with _timed_phase(self._capture_phase_timings, "store_write"):
                 self._store.write(
@@ -958,50 +1002,188 @@ class MemoryGateway:
             if isinstance(store_diagnostics, dict):
                 self._capture_store_diagnostics = store_diagnostics
 
+        self._record_capture_phase(
+            "store_write",
+            completed_phases=completed_phases,
+            callback=on_capture_phase,
+        )
+        self._materialize_capture(
+            item_id=item_id,
+            content=content,
+            layer=layer,
+            tags=tags or [],
+            session_id=session_id,
+            no_classify=no_classify,
+            completed_phases=completed_phases,
+            callback=on_capture_phase,
+        )
+
+        return item_id
+
+    @_timed_capture
+    def capture_with_progress(
+        self,
+        *,
+        completed_phases: set[str],
+        on_phase: Callable[[str], None],
+        on_store_attempt: Callable[[], None] | None = None,
+        resume_store: bool = False,
+        **capture_kwargs: Any,
+    ) -> str | None:
+        """Capture or resume one queued item from its durable phase journal."""
+        phases = set(completed_phases)
+        if "store_write" not in phases:
+            return self._capture(
+                content=capture_kwargs["content"],
+                layer=capture_kwargs.get("layer"),
+                item_id=capture_kwargs.get("item_id"),
+                tags=capture_kwargs.get("tags"),
+                quality_score=float(
+                    capture_kwargs.get("quality_score", DEFAULT_QUALITY_SCORE)
+                ),
+                run_id=capture_kwargs.get("run_id"),
+                session_id=capture_kwargs.get("session_id"),
+                extra_metadata=capture_kwargs.get("extra_metadata"),
+                no_classify=bool(capture_kwargs.get("no_classify", False)),
+                completed_phases=phases,
+                on_capture_phase=on_phase,
+                on_store_attempt=on_store_attempt,
+                skip_dedup=resume_store,
+            )
+
+        item_id = capture_kwargs.get("item_id")
+        if not isinstance(item_id, str) or not item_id:
+            raise ValueError("queued capture requires a non-empty item_id")
+
+        return self._resume_capture_materialization(
+            item_id=item_id,
+            no_classify=bool(capture_kwargs.get("no_classify", False)),
+            completed_phases=phases,
+            on_phase=on_phase,
+        )
+
+    def _resume_capture_materialization(
+        self,
+        *,
+        item_id: str,
+        no_classify: bool,
+        completed_phases: set[str],
+        on_phase: Callable[[str], None],
+    ) -> str:
+        """Finish derived state and notifications for an already stored item."""
+        item = self._store.read(item_id)
+        self._materialize_capture(
+            item_id=item_id,
+            content=str(item.get("content", "")),
+            layer=str(item.get("layer") or _DEFAULT_LAYER),
+            tags=list(item.get("tags") or []),
+            session_id=item.get("session_id"),
+            no_classify=no_classify,
+            completed_phases=set(completed_phases),
+            callback=on_phase,
+        )
+
+        return item_id
+
+    @staticmethod
+    def _record_capture_phase(
+        phase: str,
+        *,
+        completed_phases: set[str],
+        callback: Callable[[str], None] | None,
+    ) -> None:
+        if phase in completed_phases:
+            return
+        completed_phases.add(phase)
+        if callback is not None:
+            callback(phase)
+
+    def _materialize_capture(
+        self,
+        *,
+        item_id: str,
+        content: str,
+        layer: str,
+        tags: list[str],
+        session_id: str | None,
+        no_classify: bool,
+        completed_phases: set[str],
+        callback: Callable[[str], None] | None,
+    ) -> None:
+        """Complete replay-safe post-store phases for a capture."""
+
+        def run_step(phase: str, action: Callable[[], None]) -> None:
+            if phase in completed_phases:
+                return
+            action()
+            self._record_capture_phase(
+                phase,
+                completed_phases=completed_phases,
+                callback=callback,
+            )
+
         with _timed_phase(self._capture_phase_timings, "fts_index"):
-            self._fts.index_item(
-                item_id=item_id,
-                content=content,
-                metadata={"layer": layer, "tags": tags or []},
+            run_step(
+                "fts_index",
+                lambda: self._fts.index_item(
+                    item_id=item_id,
+                    content=content,
+                    metadata={"layer": layer, "tags": tags},
+                ),
             )
 
         with _timed_phase(self._capture_phase_timings, "side_effects"):
-            self._logger.append(
-                operation="capture",
-                item_id=item_id,
-                layer=layer,
-                metadata={"tags": tags or []},
+            run_step(
+                "audit_log",
+                lambda: self._logger.append(
+                    operation="capture",
+                    item_id=item_id,
+                    layer=layer,
+                    metadata={"tags": tags},
+                ),
             )
             content_preview = content[:_CONTENT_PREVIEW_LENGTH]
-            self._hooks.fire("post-capture", {"item_id": item_id, "layer": layer})
-            self._event_bus.emit("post-capture", {
-                "item_id": item_id,
-                "content_preview": content_preview,
-                "layer": layer,
-            })
-
-            # Observability: record this capture event (async, non-blocking)
-            self._obs.log_capture(
-                memory_id=item_id,
-                layer=layer,
-                tags=tags or [],
-                session_id=session_id,
+            run_step(
+                "post_capture_hook",
+                lambda: self._hooks.fire(
+                    "post-capture",
+                    {"item_id": item_id, "layer": layer},
+                ),
+            )
+            run_step(
+                "post_capture_event",
+                lambda: self._event_bus.emit(
+                    "post-capture",
+                    {
+                        "item_id": item_id,
+                        "content_preview": content_preview,
+                        "layer": layer,
+                    },
+                ),
+            )
+            run_step(
+                "observability",
+                lambda: self._obs.log_capture(
+                    memory_id=item_id,
+                    layer=layer,
+                    tags=tags,
+                    session_id=session_id,
+                ),
             )
 
-        # Auto-classify: derive tags automatically after write, unless opted out.
-        # This runs after the observability log so the initial capture event
-        # reflects pre-classify state; classify adds tags in a separate update.
         with _timed_phase(self._capture_phase_timings, "classification"):
-            if not no_classify:
-                self.auto_classify(
+            run_step(
+                "classification",
+                lambda: None
+                if no_classify
+                else self.auto_classify(
                     item_id=item_id,
                     content=content,
                     schedule_qmd_refresh=False,
-                )
+                ),
+            )
 
-        self._enqueue_qmd_refresh("capture")
-
-        return item_id
+        run_step("qmd_refresh", lambda: self._enqueue_qmd_refresh("capture"))
 
     # ------------------------------------------------------------------ #
     # Classify                                                              #
@@ -1562,6 +1744,9 @@ class MemoryGateway:
 
         self._store.delete(item["_path"])
         self._fts.remove(item_id)
+        from core.capture_queue import purge_capture_jobs
+
+        purge_capture_jobs(repo_root=self._root, item_id=item_id)
 
         self._logger.append("forget", item_id, item.get("layer", "unknown"))
         self._enqueue_qmd_refresh("forget")
@@ -1588,6 +1773,9 @@ class MemoryGateway:
 
         self._store.delete(item["_path"])
         self._fts.remove(item_id)
+        from core.capture_queue import purge_capture_jobs
+
+        purge_capture_jobs(repo_root=self._root, item_id=item_id)
 
         self._logger.append("delete", item_id, layer)
         self._enqueue_qmd_refresh("delete")

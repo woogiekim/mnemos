@@ -564,6 +564,29 @@ class TestDelete:
         results = gateway.search("unique-fts-delete-probe-content-xyz")
         assert not any(r.get("item_id") == item_id for r in results)
 
+    def test_delete_purges_capture_queue_artifacts(self, gateway, repo_root):
+        """Hard delete must remove current receipts and legacy raw queue payloads."""
+        item_id = gateway.capture(
+            layer="global",
+            content="queue cleanup target",
+            run_id="run-test",
+            no_classify=True,
+        )
+        queue_root = repo_root / ".agent" / "state" / "capture-queue"
+        artifact_paths = []
+        for state in ["pending", "processing", "done", "failed"]:
+            path = queue_root / state / f"legacy-{state}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"item_id": item_id, "content": "legacy private text"}),
+                encoding="utf-8",
+            )
+            artifact_paths.append(path)
+
+        gateway.delete(item_id=item_id)
+
+        assert not any(path.exists() for path in artifact_paths)
+
 
 class TestAuditLog:
     def test_all_mutations_are_logged(self, gateway, repo_root):

@@ -152,6 +152,76 @@ def test_capture_json_reports_committed_capture_when_push_ref_race_fails(
     assert not any("local-race" in subject for subject in _remote_subjects(bare))
 
 
+def test_async_capture_receipt_reports_sync_pending_after_push_ref_race(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A background capture must durably expose local success and pending sync."""
+    bare = _make_bare(tmp_path / "async-memory.git")
+    repo = tmp_path / "async-memory-a"
+    _init_repo_with_main(repo, bare=bare)
+    _write_sync_config(repo, auto_pull_on_capture=False)
+    before_count = _commit_count(repo)
+
+    other = tmp_path / "async-memory-b"
+    subprocess.run(
+        ["git", "clone", str(bare), str(other)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git("config", "user.email", "test@mnemos.test", cwd=other)
+    _git("config", "user.name", "mnemos Test", cwd=other)
+    _git("config", "commit.gpgsign", "false", cwd=other)
+    (other / "wiki" / "projects").mkdir(parents=True, exist_ok=True)
+    (other / "wiki" / "projects" / "remote-async-first.md").write_text(
+        "---\nid: remote-async-first\nlayer: project\n---\nremote moved first\n",
+        encoding="utf-8",
+    )
+    _git("add", "wiki/projects/remote-async-first.md", cwd=other)
+    _git("commit", "-m", "remote async moves first", cwd=other)
+    _git("push", "origin", "main", cwd=other)
+
+    import core.capture_queue as capture_queue
+
+    monkeypatch.setattr(
+        capture_queue,
+        "start_capture_worker",
+        lambda _repo_root: capture_queue.WorkerStartResult(started=False),
+    )
+    queued = capture_queue.enqueue_capture(
+        repo_root=repo,
+        content="async local capture survives push race",
+        layer="project",
+        item_id="async-local-race",
+        no_classify=True,
+    )
+
+    result = capture_queue.process_pending_captures(repo_root=repo)
+
+    receipt = json.loads(
+        (queued.path.parent.parent / "done" / queued.path.name).read_text(
+            encoding="utf-8"
+        )
+    )
+    diagnostics = capture_queue.get_capture_queue_diagnostics(repo_root=repo)
+    assert result.processed == 1
+    assert result.failed == 0
+    assert receipt["status"] == "sync_pending"
+    assert receipt["capture_status"] == "committed"
+    assert receipt["sync_status"] == "failed"
+    assert receipt["retryable"] is True
+    assert receipt["error_code"] in {"remote_ref_mismatch", "non_fast_forward"}
+    assert receipt["commit"] == _head(repo)
+    assert receipt["recovery_command"] == "mnemos sync pull && mnemos sync push"
+    assert "content" not in receipt
+    assert "message" not in receipt
+    assert "stderr" not in receipt
+    assert diagnostics["sync_pending"] == 1
+    assert _commit_count(repo) == before_count + 1
+    assert not any("async-local-race" in subject for subject in _remote_subjects(bare))
+
+
 def test_capture_text_reports_sync_pending_after_push_ref_race(
     tmp_path: Path,
     monkeypatch,
@@ -249,3 +319,39 @@ def test_capture_json_reports_retryable_index_lock_without_claiming_commit(
     assert "index.lock" in payload["stderr"]
     assert lock_path.exists(), "mnemos must not remove index.lock without safe ownership proof"
     assert (repo / "wiki" / "projects" / "lock-case.md").exists()
+
+
+def test_capture_json_reports_generated_id_when_commit_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """An auto-generated ID remains addressable when write succeeds before commit."""
+    bare = _make_bare(tmp_path / "memory.git")
+    repo = tmp_path / "memory-generated-lock"
+    _init_repo_with_main(repo, bare=bare)
+    _write_sync_config(repo, auto_pull_on_capture=False)
+    lock_path = repo / ".git" / "index.lock"
+    lock_path.write_text("held by another git process\n", encoding="utf-8")
+
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo))
+    from core.cli import cli
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "capture",
+            "generated ID survives commit failure",
+            "--json",
+            "--layer",
+            "project",
+            "--no-classify",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["capture_status"] == "written_uncommitted"
+    assert payload["sync_status"] == "commit_failed"
+    assert payload["error_code"] == "git_index_locked"
+    assert isinstance(payload["id"], str) and payload["id"]
+    assert (repo / "wiki" / "projects" / f"{payload['id']}.md").exists()

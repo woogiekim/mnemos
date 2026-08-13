@@ -498,10 +498,11 @@ def memory_capture(
     except Exception as exc:
         if as_json:
             effective_layer = layer or "ephemeral"
+            error_item_id = item_id or getattr(gw, "last_capture_item_id", None)
             _echo_json(
                 _capture_error_status_payload(
                     exc=exc,
-                    item_id=item_id,
+                    item_id=error_item_id,
                     layer=effective_layer,
                     gw=gw,
                 )
@@ -536,6 +537,7 @@ def capture_worker(limit: int | None, status_only: bool, as_json: bool) -> None:
                     f"pending={diagnostics['pending']}",
                     f"processing={diagnostics['processing']}",
                     f"failed={diagnostics['failed']}",
+                    f"sync_pending={diagnostics['sync_pending']}",
                     f"worker={diagnostics['worker']['state']}",
                 ]
             )

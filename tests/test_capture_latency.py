@@ -68,13 +68,62 @@ def test_async_capture_enqueue_writes_durable_job_without_gateway_capture(
         no_classify=True,
     )
 
-    job_path = tmp_path / ".agent" / "state" / "capture-queue" / "pending" / f"{queued.item_id}.json"
+    job_path = queued.path
     assert queued.status == "queued"
     assert job_path.exists()
     payload = json.loads(job_path.read_text(encoding="utf-8"))
     assert payload["item_id"] == queued.item_id
     assert payload["content"] == "queued content"
     assert payload["no_classify"] is True
+
+
+def test_boundary_case_async_queue_path_does_not_trust_item_id(
+    tmp_path: Path,
+) -> None:
+    """A caller-controlled item ID must never become a queue filesystem path."""
+    from core.capture_queue import enqueue_capture
+
+    outside_queue = tmp_path / "outside-queue"
+    outside_queue.mkdir()
+    item_id = str(outside_queue / "escaped")
+
+    queued = enqueue_capture(
+        repo_root=tmp_path,
+        content="path isolation",
+        layer="session",
+        item_id=item_id,
+    )
+
+    pending_dir = tmp_path / ".agent" / "state" / "capture-queue" / "pending"
+    assert queued.item_id == item_id
+    assert queued.path.parent == pending_dir
+    assert queued.path.exists()
+    assert not (outside_queue / "escaped.json").exists()
+
+
+def test_boundary_case_async_queue_preserves_jobs_with_same_item_id(
+    tmp_path: Path,
+) -> None:
+    """Logical IDs identify memories, while independent job IDs identify queue files."""
+    from core.capture_queue import enqueue_capture
+
+    first = enqueue_capture(
+        repo_root=tmp_path,
+        content="first payload",
+        layer="session",
+        item_id="shared-item",
+    )
+    second = enqueue_capture(
+        repo_root=tmp_path,
+        content="second payload",
+        layer="session",
+        item_id="shared-item",
+    )
+
+    assert first.path != second.path
+    assert first.path.exists()
+    assert second.path.exists()
+    assert len(list(first.path.parent.glob("*.json"))) == 2
 
 
 def test_success_case_async_enqueue_starts_worker_after_durable_job_exists(
@@ -252,8 +301,8 @@ def test_capture_worker_materializes_pending_jobs(tmp_path: Path, monkeypatch) -
             "no_classify": True,
         }
     ]
-    assert not (tmp_path / ".agent" / "state" / "capture-queue" / "pending" / f"{queued.item_id}.json").exists()
-    assert (tmp_path / ".agent" / "state" / "capture-queue" / "done" / f"{queued.item_id}.json").exists()
+    assert not queued.path.exists()
+    assert (queued.path.parent.parent / "done" / queued.path.name).exists()
 
 
 def test_success_case_capture_worker_single_flight_prevents_duplicate_processing(
@@ -447,6 +496,131 @@ def test_success_case_capture_worker_retries_transient_failure_without_losing_jo
     assert (queued.path.parent.parent / "done" / queued.path.name).exists()
 
 
+def test_success_case_capture_worker_resumes_materialization_after_store_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A derived-index failure must resume after canonical storage, not dedup away."""
+    from core.capture_queue import enqueue_capture, process_pending_captures
+    from core.fts import FTSIndex
+    from core.gateway import MemoryGateway
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    source_policy = Path(__file__).parents[1] / "repo" / "wiki" / "policy.yaml"
+    (wiki / "policy.yaml").write_text(
+        source_policy.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    original_index_item = FTSIndex.index_item
+    attempts = 0
+
+    def fail_first_index(self: FTSIndex, *args: Any, **kwargs: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("fts temporarily unavailable")
+        original_index_item(self, *args, **kwargs)
+
+    monkeypatch.setattr(FTSIndex, "index_item", fail_first_index)
+    queued = enqueue_capture(
+        repo_root=tmp_path,
+        content="materialization recovery sentinel",
+        layer="session",
+        no_classify=True,
+    )
+
+    first = process_pending_captures(repo_root=tmp_path, max_attempts=2)
+    retry_payload = json.loads(queued.path.read_text(encoding="utf-8"))
+    second = process_pending_captures(repo_root=tmp_path, max_attempts=2)
+
+    assert first.retried == 1
+    assert retry_payload["completed_phases"] == ["store_write"]
+    assert second.processed == 1
+    assert attempts == 2
+
+    gateway = MemoryGateway(repo_root=str(tmp_path))
+    assert [
+        result["item_id"]
+        for result in gateway._fts.search("materialization recovery sentinel")
+    ] == [queued.item_id]
+    audit_entries = [
+        json.loads(line)
+        for line in (wiki / "log.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert [
+        entry
+        for entry in audit_entries
+        if entry["operation"] == "capture" and entry["item_id"] == queued.item_id
+    ]
+
+
+def test_success_case_capture_worker_replays_store_when_phase_journal_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash window after storage must not let persistent dedup skip recovery."""
+    import core.capture_queue as capture_queue
+    from core.gateway import MemoryGateway
+
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    source_policy = Path(__file__).parents[1] / "repo" / "wiki" / "policy.yaml"
+    (wiki / "policy.yaml").write_text(
+        source_policy.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    original_record = MemoryGateway._record_capture_phase
+    failed_once = False
+
+    def fail_first_store_phase(
+        phase: str,
+        *,
+        completed_phases: set[str],
+        callback: Any,
+    ) -> None:
+        nonlocal failed_once
+        if phase == "store_write" and not failed_once:
+            failed_once = True
+            raise RuntimeError("phase journal unavailable")
+        original_record(
+            phase,
+            completed_phases=completed_phases,
+            callback=callback,
+        )
+
+    monkeypatch.setattr(
+        MemoryGateway,
+        "_record_capture_phase",
+        staticmethod(fail_first_store_phase),
+    )
+    queued = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="store replay sentinel",
+        layer="session",
+        no_classify=True,
+    )
+
+    first = capture_queue.process_pending_captures(
+        repo_root=tmp_path,
+        max_attempts=2,
+    )
+    second = capture_queue.process_pending_captures(
+        repo_root=tmp_path,
+        max_attempts=2,
+    )
+
+    gateway = MemoryGateway(repo_root=str(tmp_path))
+    assert first.retried == 1
+    assert second.processed == 1
+    assert [
+        result["item_id"] for result in gateway._fts.search("store replay sentinel")
+    ] == [queued.item_id]
+
+
 def test_success_case_capture_worker_drain_retries_until_job_completes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -614,6 +788,216 @@ def test_failure_case_capture_worker_isolates_malformed_job_and_continues(
     assert "content" not in failed_payload
 
 
+def test_failure_case_malformed_capture_receipt_preserves_logical_item_id(
+    tmp_path: Path,
+) -> None:
+    """A schema-invalid job remains discoverable by hard-delete cleanup."""
+    import core.capture_queue as capture_queue
+
+    pending = capture_queue._queue_root(tmp_path) / "pending"
+    pending.mkdir(parents=True)
+    pending_path = pending / "bad-job.json"
+    pending_path.write_text(
+        json.dumps({"item_id": "victim", "content": "", "layer": "session"}),
+        encoding="utf-8",
+    )
+
+    result = capture_queue.process_pending_captures(repo_root=tmp_path)
+
+    failed_path = pending.parent / "failed" / pending_path.name
+    receipt = json.loads(failed_path.read_text(encoding="utf-8"))
+    assert result.failed == 1
+    assert receipt["item_id"] == "victim"
+    assert "content" not in receipt
+    assert capture_queue.purge_capture_jobs(
+        repo_root=tmp_path,
+        item_id="victim",
+    ) == 1
+    assert not failed_path.exists()
+
+
+def test_security_case_terminal_capture_receipts_do_not_retain_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal queue states retain operational metadata but drop memory text."""
+    import core.capture_queue as capture_queue
+
+    class Gateway:
+        def __init__(self, repo_root: str) -> None:
+            self.repo_root = repo_root
+
+        def capture(self, **kwargs: Any) -> str:
+            if kwargs["content"] == "failed secret":
+                raise RuntimeError("terminal failure")
+            return kwargs["item_id"]
+
+    monkeypatch.setattr(capture_queue, "MemoryGateway", Gateway)
+    succeeded = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="completed secret",
+        layer="session",
+    )
+    failed = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="failed secret",
+        layer="session",
+    )
+
+    result = capture_queue.process_pending_captures(
+        repo_root=tmp_path,
+        max_attempts=1,
+    )
+
+    root = succeeded.path.parent.parent
+    done_receipt = json.loads(
+        (root / "done" / succeeded.path.name).read_text(encoding="utf-8")
+    )
+    failed_receipt = json.loads(
+        (root / "failed" / failed.path.name).read_text(encoding="utf-8")
+    )
+    assert result.processed == 1
+    assert result.failed == 1
+    assert done_receipt["status"] == "captured"
+    assert failed_receipt["status"] == "failed"
+    assert done_receipt["item_id"] == succeeded.item_id
+    assert failed_receipt["item_id"] == failed.item_id
+    assert failed_receipt["error_type"] == "RuntimeError"
+    assert "content" not in done_receipt
+    assert "content" not in failed_receipt
+
+
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_concurrency_case_hard_delete_prevents_terminal_receipt_recreation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_fails: bool,
+) -> None:
+    """An active worker cannot recreate a receipt after its item was purged."""
+    import core.capture_queue as capture_queue
+
+    entered = threading.Event()
+    release = threading.Event()
+    deleted: list[str] = []
+
+    class SlowGateway:
+        def __init__(self, repo_root: str) -> None:
+            self.repo_root = repo_root
+
+        def capture(self, **kwargs: Any) -> str:
+            entered.set()
+            release.wait(timeout=5)
+            if capture_fails:
+                raise RuntimeError("capture failed after purge")
+            return kwargs["item_id"]
+
+        def delete(self, item_id: str) -> None:
+            deleted.append(item_id)
+
+    monkeypatch.setattr(capture_queue, "MemoryGateway", SlowGateway)
+    queued = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="purged while active",
+        layer="session",
+        item_id="victim",
+    )
+    worker = threading.Thread(
+        target=capture_queue.process_pending_captures,
+        kwargs={"repo_root": tmp_path},
+    )
+
+    worker.start()
+    assert entered.wait(timeout=5)
+    capture_queue.purge_capture_jobs(repo_root=tmp_path, item_id="victim")
+    release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not queued.path.exists()
+    assert not (queued.path.parent.parent / "processing" / queued.path.name).exists()
+    assert not (queued.path.parent.parent / "done" / queued.path.name).exists()
+    assert not (queued.path.parent.parent / "failed" / queued.path.name).exists()
+    assert deleted == ["victim"]
+
+
+def test_concurrency_case_purge_after_failure_check_removes_recreated_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A purge between failure check and retry move still wins the race."""
+    import core.capture_queue as capture_queue
+
+    class FailingGateway:
+        def __init__(self, repo_root: str) -> None:
+            self.repo_root = repo_root
+
+        def capture(self, **_kwargs: Any) -> None:
+            raise RuntimeError("retry race")
+
+        def delete(self, _item_id: str) -> None:
+            return None
+
+    monkeypatch.setattr(capture_queue, "MemoryGateway", FailingGateway)
+    queued = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="retry must stay deleted",
+        layer="session",
+        item_id="victim",
+    )
+    original_check = capture_queue._job_was_purged
+    checks = 0
+
+    def purge_after_first_check(root: Path, payload: dict[str, Any]) -> bool:
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            capture_queue.purge_capture_jobs(repo_root=tmp_path, item_id="victim")
+            return False
+        return original_check(root, payload)
+
+    monkeypatch.setattr(capture_queue, "_job_was_purged", purge_after_first_check)
+
+    result = capture_queue.process_pending_captures(repo_root=tmp_path)
+
+    queue_root = queued.path.parent.parent
+    assert result.retried == 0
+    assert not any((queue_root / state / queued.path.name).exists() for state in [
+        "pending",
+        "processing",
+        "done",
+        "failed",
+    ])
+
+
+def test_boundary_case_capture_queued_after_delete_cutoff_is_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delete tombstone cancels old jobs without banning a future same-ID job."""
+    import core.capture_queue as capture_queue
+
+    class Gateway:
+        def __init__(self, repo_root: str) -> None:
+            self.repo_root = repo_root
+
+        def capture(self, **kwargs: Any) -> str:
+            return kwargs["item_id"]
+
+    monkeypatch.setattr(capture_queue, "MemoryGateway", Gateway)
+    capture_queue.purge_capture_jobs(repo_root=tmp_path, item_id="reusable")
+    queued = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="new generation",
+        layer="session",
+        item_id="reusable",
+    )
+
+    result = capture_queue.process_pending_captures(repo_root=tmp_path)
+
+    assert result.processed == 1
+    assert (queued.path.parent.parent / "done" / queued.path.name).exists()
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_error"),
     [
@@ -687,6 +1071,39 @@ def test_failure_case_capture_worker_normalizes_invalid_retry_counter(
     assert failed["error_type"] == "RuntimeError"
 
 
+def test_boundary_case_capture_worker_normalizes_invalid_success_counter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corrupt optional retry metadata cannot prevent a successful receipt."""
+    import core.capture_queue as capture_queue
+
+    class Gateway:
+        def __init__(self, repo_root: str) -> None:
+            self.repo_root = repo_root
+
+        def capture(self, **kwargs: Any) -> str:
+            return kwargs["item_id"]
+
+    monkeypatch.setattr(capture_queue, "MemoryGateway", Gateway)
+    queued = capture_queue.enqueue_capture(
+        repo_root=tmp_path,
+        content="valid capture",
+        layer="session",
+    )
+    payload = json.loads(queued.path.read_text(encoding="utf-8"))
+    payload["attempts"] = "invalid"
+    queued.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = capture_queue.process_pending_captures(repo_root=tmp_path)
+
+    receipt = json.loads(
+        (queued.path.parent.parent / "done" / queued.path.name).read_text()
+    )
+    assert result.processed == 1
+    assert receipt["attempts"] == 0
+
+
 def test_failure_case_capture_worker_records_unexpected_queue_crash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -745,6 +1162,7 @@ def test_success_case_capture_queue_diagnostics_report_depth_age_and_worker_heal
         "processing": 1,
         "failed": 1,
         "done": 0,
+        "sync_pending": 0,
         "oldest_pending_age_seconds": 100.0,
         "worker": {"state": "idle", "pid": None, "error_code": None},
     }
@@ -929,7 +1347,9 @@ def test_success_case_capture_worker_cli_text_modes_report_bounded_status(
 
     # then
     assert status.exit_code == 0
-    assert status.output == "pending=0 processing=0 failed=0 worker=idle\n"
+    assert status.output == (
+        "pending=0 processing=0 failed=0 sync_pending=0 worker=idle\n"
+    )
     assert process.exit_code == 0
     assert process.output == "processed=0 failed=0 retried=0 recovered=0\n"
 
