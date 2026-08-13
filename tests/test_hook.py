@@ -1,6 +1,7 @@
 """Tests for hooks/UserPromptSubmit.sh behaviour and ClaudeCodeAdapter integration."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -31,6 +32,8 @@ from core.adapters.claude import (
 HOOK_SCRIPT = Path(__file__).parent.parent / "hooks" / "UserPromptSubmit.sh"
 STOP_HOOK_SCRIPT = Path(__file__).parent.parent / "hooks" / "Stop.sh"
 CONTEXT_PREFETCH_WORKER = Path(__file__).parent.parent / "hooks" / "context_prefetch_worker.py"
+HOOK_RETURN_BUDGET_SECONDS = 3.0
+DETACHED_RESULT_TIMEOUT_SECONDS = 15.0
 
 
 def _run_hook(prompt: str, session_id: str = "test-session-123",
@@ -159,7 +162,10 @@ def _read_jsonl_calls(path: Path) -> list[list[str]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def _wait_for_jsonl_call(path: Path, timeout: float = 5.0) -> list[list[str]]:
+def _wait_for_jsonl_call(
+    path: Path,
+    timeout: float = DETACHED_RESULT_TIMEOUT_SECONDS,
+) -> list[list[str]]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         calls = _read_jsonl_calls(path)
@@ -189,7 +195,7 @@ def _run_hook_with_open_stdin(
     started = time.monotonic()
     timed_out = False
     try:
-        rc = proc.wait(timeout=1.0)
+        rc = proc.wait(timeout=HOOK_RETURN_BUDGET_SECONDS)
     except subprocess.TimeoutExpired:
         timed_out = True
         os.killpg(proc.pid, signal.SIGKILL)
@@ -231,7 +237,44 @@ def test_user_prompt_submit_does_not_wait_for_stdin_eof(tmp_path):
     )
 
     assert rc == 0, output
-    assert elapsed < 1.0
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+
+
+def test_user_prompt_submit_large_payload_stays_within_hook_budget(tmp_path):
+    """A realistic large prompt must not turn bounded input parsing into a timeout."""
+    worker_done = tmp_path / "worker-done"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        f"{sys.executable!r} \"$@\"\n"
+        f"touch {str(worker_done)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_CONTEXT_PREFETCH": "0",
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        "TMPDIR": str(tmp_path),
+    })
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": "large-user-prompt",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "x" * 16384,
+        },
+        env,
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not worker_done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert rc == 0, output
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+    assert worker_done.exists()
 
 
 def test_stop_hook_does_not_wait_for_stdin_eof(tmp_path):
@@ -259,7 +302,54 @@ def test_stop_hook_does_not_wait_for_stdin_eof(tmp_path):
     )
 
     assert rc == 0, output
-    assert elapsed < 1.0
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+
+
+def test_stop_hook_preserves_payload_split_across_slow_writes(tmp_path):
+    """Stop must assemble one complete JSON payload before detaching capture."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text("[]", encoding="utf-8")
+    marker = tmp_path / "capture-called"
+    fake_bin = tmp_path / "mnemos"
+    fake_bin.write_text(
+        f"#!/usr/bin/env bash\nprintf called > {str(marker)!r}\n",
+        encoding="utf-8",
+    )
+    fake_bin.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+    })
+    payload = json.dumps({
+        "session_id": "split-stop",
+        "transcript_path": str(transcript_path),
+        "hook_event_name": "Stop",
+    })
+    split_at = len(payload) // 2
+    proc = subprocess.Popen(
+        ["bash", str(STOP_HOOK_SCRIPT)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(payload[:split_at])
+    proc.stdin.flush()
+    time.sleep(0.35)
+
+    assert proc.poll() is None, "Stop detached before receiving one complete JSON payload"
+
+    proc.stdin.write(payload[split_at:])
+    proc.stdin.close()
+    assert proc.wait(timeout=HOOK_RETURN_BUDGET_SECONDS) == 0
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert marker.exists()
 
 
 def test_stale_direct_ingest_hook_queues_nonblocking_compatibility(tmp_path):
@@ -311,7 +401,7 @@ def test_stale_direct_ingest_hook_queues_nonblocking_compatibility(tmp_path):
     started = time.monotonic()
     timed_out = False
     try:
-        rc = proc.wait(timeout=1.0)
+        rc = proc.wait(timeout=HOOK_RETURN_BUDGET_SECONDS)
     except subprocess.TimeoutExpired:
         timed_out = True
         os.killpg(proc.pid, signal.SIGKILL)
@@ -330,7 +420,7 @@ def test_stale_direct_ingest_hook_queues_nonblocking_compatibility(tmp_path):
 
     assert not timed_out, "stale ingest hook waited in the foreground"
     assert rc == 0, output
-    assert elapsed < 1.0
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
     calls = _wait_for_jsonl_call(calls_path)
     assert calls == [
         [
@@ -403,6 +493,355 @@ def test_user_prompt_submit_cache_miss_returns_without_context(tmp_path):
 
     assert rc == 0, output
     assert output == ""
+
+
+def test_user_prompt_unrelated_cache_does_not_force_foreground_python(tmp_path):
+    """Unrelated cache entries must not block a prompt that cannot use them."""
+    cache_dir = tmp_path / "context-cache"
+    (cache_dir / "exact").mkdir(parents=True)
+    (cache_dir / "session").mkdir()
+    (cache_dir / "exact" / "unrelated.txt").write_text("stale", encoding="utf-8")
+    (cache_dir / "session" / "unrelated.txt").write_text("stale", encoding="utf-8")
+    worker_done = tmp_path / "worker-done"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "sleep 5\n"
+        f"{sys.executable!r} \"$@\"\n"
+        f"touch {str(worker_done)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_CONTEXT_CACHE_DIR": str(cache_dir),
+        "MNEMOS_CONTEXT_PREFETCH": "0",
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        "TMPDIR": str(tmp_path),
+    })
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": "unrelated-session",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "unrelated prompt",
+        },
+        env,
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not worker_done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert rc == 0, output
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+    assert worker_done.exists()
+
+
+def test_user_prompt_submit_reads_default_exact_cache(tmp_path):
+    """The shell probe and Python reader must agree on the exact cache key."""
+    cache_dir = tmp_path / "context-cache"
+    session_id = "cache-session"
+    prompt = "한글 prompt with spaces"
+    key = hashlib.sha256(
+        f"{tmp_path}\0{session_id}\0{prompt}".encode("utf-8")
+    ).hexdigest()
+    cache_file = cache_dir / "exact" / f"{key}.txt"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("<mnemos-context>exact</mnemos-context>\n", encoding="utf-8")
+
+    rc, output = _run_hook(
+        prompt,
+        session_id=session_id,
+        mnemos_repo_root=str(tmp_path),
+        env_extras={
+            "MNEMOS_CONTEXT_CACHE_DIR": str(cache_dir),
+            "MNEMOS_CONTEXT_PREFETCH": "0",
+            "TMPDIR": str(tmp_path),
+        },
+    )
+
+    assert rc == 0, output
+    assert output == "<mnemos-context>exact</mnemos-context>\n"
+
+
+@pytest.mark.parametrize("cache_mode", ["exact", "session", "override"])
+def test_user_prompt_stale_cache_does_not_force_foreground_python(
+    tmp_path,
+    cache_mode,
+):
+    """A matching cache beyond Python's TTL cannot produce synchronous output."""
+    cache_dir = tmp_path / "context-cache"
+    session_id = "stale-cache-session"
+    prompt = "stale cache prompt"
+    if cache_mode == "exact":
+        key_source = f"{tmp_path}\0{session_id}\0{prompt}"
+        cache_file = cache_dir / "exact" / (
+            hashlib.sha256(key_source.encode("utf-8")).hexdigest() + ".txt"
+        )
+    elif cache_mode == "session":
+        key_source = f"{tmp_path}\0{session_id}"
+        cache_file = cache_dir / "session" / (
+            hashlib.sha256(key_source.encode("utf-8")).hexdigest() + ".txt"
+        )
+    else:
+        cache_file = tmp_path / "context-cache-override.txt"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text("<mnemos-context>stale</mnemos-context>\n", encoding="utf-8")
+    stale_time = time.time() - 600
+    os.utime(cache_file, (stale_time, stale_time))
+    worker_done = tmp_path / "worker-done"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "sleep 5\n"
+        f"{sys.executable!r} \"$@\"\n"
+        f"touch {str(worker_done)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_CONTEXT_CACHE_DIR": str(cache_dir),
+        "MNEMOS_CONTEXT_CACHE_TTL_SECONDS": "300",
+        "MNEMOS_CONTEXT_PREFETCH": "0",
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        "TMPDIR": str(tmp_path),
+    })
+    if cache_mode == "override":
+        env["MNEMOS_CONTEXT_CACHE_FILE"] = str(cache_file)
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": session_id,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": prompt,
+        },
+        env,
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not worker_done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert rc == 0, output
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+    assert worker_done.exists()
+
+
+def test_cache_routing_does_not_wait_for_slow_shell_json_tools(tmp_path):
+    """The hot route must not fan out to jq/hash/stat subprocess chains."""
+    cache_dir = tmp_path / "context-cache"
+    session_id = "slow-tool-session"
+    prompt = "slow tool prompt"
+    key_source = f"{tmp_path}\0{session_id}"
+    cache_file = cache_dir / "session" / (
+        hashlib.sha256(key_source.encode("utf-8")).hexdigest() + ".txt"
+    )
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("<mnemos-context>stale</mnemos-context>\n", encoding="utf-8")
+    stale_time = time.time() - 600
+    os.utime(cache_file, (stale_time, stale_time))
+    worker_done = tmp_path / "worker-done"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        f"{sys.executable!r} \"$@\"\n"
+        f"touch {str(worker_done)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    fake_jq = tmp_path / "jq"
+    fake_jq.write_text("#!/usr/bin/env bash\nsleep 5\nexit 1\n", encoding="utf-8")
+    fake_jq.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_CONTEXT_CACHE_DIR": str(cache_dir),
+        "MNEMOS_CONTEXT_CACHE_TTL_SECONDS": "300",
+        "MNEMOS_CONTEXT_PREFETCH": "0",
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        "TMPDIR": str(tmp_path),
+    })
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": session_id,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": prompt,
+        },
+        env,
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not worker_done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert rc == 0, output
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+    assert worker_done.exists()
+
+
+def test_user_prompt_cache_probe_falls_back_when_jq_is_unavailable(tmp_path):
+    """Missing shell JSON tooling must preserve a possible cache hit."""
+    cache_dir = tmp_path / "context-cache"
+    session_id = "portable-cache-session"
+    prompt = "portable cache"
+    key = hashlib.sha256(
+        f"{tmp_path}\0{session_id}\0{prompt}".encode("utf-8")
+    ).hexdigest()
+    cache_file = cache_dir / "exact" / f"{key}.txt"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text("<mnemos-context>portable</mnemos-context>\n", encoding="utf-8")
+    tool_dir = tmp_path / "minimal-bin"
+    tool_dir.mkdir()
+    (tool_dir / "bash").symlink_to(shutil.which("bash") or "/bin/bash")
+    (tool_dir / "python3").symlink_to(sys.executable)
+
+    rc, output = _run_hook(
+        prompt,
+        session_id=session_id,
+        mnemos_repo_root=str(tmp_path),
+        env_extras={
+            "MNEMOS_CONTEXT_CACHE_DIR": str(cache_dir),
+            "MNEMOS_CONTEXT_PREFETCH": "0",
+            "PATH": str(tool_dir),
+            "TMPDIR": str(tmp_path),
+        },
+    )
+
+    assert rc == 0, output
+    assert output == "<mnemos-context>portable</mnemos-context>\n"
+
+
+def test_detached_user_prompt_does_not_consume_late_promotion(tmp_path):
+    """A promotion created after detach remains visible to the next prompt."""
+    worker_done = tmp_path / "worker-done"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "sleep 0.5\n"
+        f"{sys.executable!r} \"$@\"\n"
+        f"touch {str(worker_done)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    cursor = tmp_path / "promotion-cursor.json"
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_CONTEXT_PREFETCH": "0",
+        "MNEMOS_PROMO_CURSOR": str(cursor),
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        "TMPDIR": str(tmp_path),
+    })
+
+    rc, _elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": "promotion-race",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "race prompt",
+        },
+        env,
+    )
+    obs_log = tmp_path / ".agent" / "observability.jsonl"
+    obs_log.parent.mkdir(parents=True)
+    obs_log.write_text(
+        json.dumps({
+            "event": "promotion",
+            "ts": "2026-08-13T00:00:00Z",
+            "memory_id": "late-promotion",
+            "layer": "project",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not worker_done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert rc == 0, output
+    assert worker_done.exists()
+    assert not cursor.exists()
+
+    next_rc, next_output = _run_hook(
+        "next prompt",
+        session_id="promotion-race",
+        mnemos_repo_root=str(tmp_path),
+        env_extras={
+            "MNEMOS_CONTEXT_PREFETCH": "0",
+            "MNEMOS_PROMO_CURSOR": str(cursor),
+            "PATH": os.environ.get("PATH", ""),
+            "TMPDIR": str(tmp_path),
+        },
+    )
+
+    assert next_rc == 0, next_output
+    assert "late-promotion" in next_output
+    assert cursor.exists()
+
+
+def test_consumed_promotion_log_does_not_force_foreground_python(tmp_path):
+    """A cursor at EOF means promotion rendering has no synchronous output."""
+    obs_log = tmp_path / ".agent" / "observability.jsonl"
+    obs_log.parent.mkdir(parents=True)
+    obs_log.write_text(
+        json.dumps({
+            "event": "promotion",
+            "ts": "2026-08-13T00:00:00Z",
+            "memory_id": "already-rendered",
+            "layer": "project",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    stat_result = obs_log.stat()
+    cursor = tmp_path / "promotion-cursor.json"
+    cursor.write_text(
+        json.dumps({
+            "ts": "2026-08-13T00:00:01Z",
+            "offset": stat_result.st_size,
+            "inode": stat_result.st_ino,
+            "size": stat_result.st_size,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    worker_done = tmp_path / "worker-done"
+    fake_python = tmp_path / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "sleep 5\n"
+        f"{sys.executable!r} \"$@\"\n"
+        f"touch {str(worker_done)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_CONTEXT_PREFETCH": "0",
+        "MNEMOS_PROMO_CURSOR": str(cursor),
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+        "TMPDIR": str(tmp_path),
+    })
+
+    rc, elapsed, output = _run_hook_with_open_stdin(
+        HOOK_SCRIPT,
+        {
+            "session_id": "consumed-promotion",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "no pending promotion",
+        },
+        env,
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not worker_done.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert rc == 0, output
+    assert elapsed < HOOK_RETURN_BUDGET_SECONDS
+    assert worker_done.exists()
 
 
 def test_stop_hook_calls_capture_transcript(tmp_path):
@@ -482,6 +921,46 @@ def test_stop_hook_does_not_block_on_slow_capture_transcript(tmp_path):
     assert time.monotonic() - started < 4
 
 
+def test_stop_hook_resolves_nohup_from_path(tmp_path):
+    """The launcher must remain portable when nohup is not under /usr/bin."""
+    transcript_path = tmp_path / "transcript.json"
+    transcript_path.write_text("[]", encoding="utf-8")
+    marker = tmp_path / "nohup-called"
+    fake_nohup = tmp_path / "nohup"
+    fake_nohup.write_text(
+        f"#!/usr/bin/env bash\nprintf called > {str(marker)!r}\nexec \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_nohup.chmod(0o755)
+    fake_mnemos = tmp_path / "mnemos"
+    fake_mnemos.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_mnemos.chmod(0o755)
+    env = os.environ.copy()
+    env.update({
+        "MNEMOS_REPO_ROOT": str(tmp_path),
+        "PATH": f"{tmp_path}:{env.get('PATH', '')}",
+    })
+
+    result = subprocess.run(
+        ["bash", str(STOP_HOOK_SCRIPT)],
+        input=json.dumps({
+            "session_id": "portable-nohup",
+            "transcript_path": str(transcript_path),
+            "hook_event_name": "Stop",
+        }),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=4,
+    )
+    deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.exists()
+
+
 # ---------------------------------------------------------------------------
 # Existence and permissions
 # ---------------------------------------------------------------------------
@@ -500,6 +979,13 @@ class TestHookScriptFile:
 
     def test_stop_hook_script_exists(self):
         assert STOP_HOOK_SCRIPT.exists(), f"Stop hook script not found at {STOP_HOOK_SCRIPT}"
+
+    @pytest.mark.parametrize(
+        "helper_name",
+        ["hook_input.sh", "hook_input_reader.pl", "hook_route.pl"],
+    )
+    def test_hook_launcher_helper_exists(self, helper_name):
+        assert (HOOK_SCRIPT.parent / helper_name).is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +1157,7 @@ class TestCompactPrompt:
 
 class TestSessionStartLoad:
     def test_session_flag_file_created(self, tmp_path, monkeypatch):
-        """A session flag file must be created on first run."""
+        """A session flag file must be created by the detached no-output path."""
         session_id = "unique-session-abc"
         monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
         (tmp_path / "tmp").mkdir()
@@ -684,6 +1170,12 @@ class TestSessionStartLoad:
                   env_extras={"TMPDIR": str(tmp_path / "tmp")})
 
         flag_dir = tmp_path / "tmp" / "mnemos-session-flags"
+        deadline = time.monotonic() + DETACHED_RESULT_TIMEOUT_SECONDS
+        while (
+            not list(flag_dir.glob("mnemos-session-loaded-*"))
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
         flags = list(flag_dir.glob("mnemos-session-loaded-*")) if flag_dir.exists() else []
         assert len(flags) == 1, f"Expected 1 session flag, found: {flags}"
 

@@ -197,6 +197,33 @@ def test_post_tool_hook_does_not_wait_for_stdin_eof(tmp_path: Path) -> None:
     assert stdout == ""
 
 
+def test_post_tool_hook_does_not_wait_for_python_startup(tmp_path: Path) -> None:
+    env, _ = hook_env(tmp_path)
+    Path(env["MNEMOS_BG_TS_FILE"]).touch()
+    slow_python = tmp_path / "bin" / "python3"
+    slow_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "sleep 2\n",
+        encoding="utf-8",
+    )
+    slow_python.chmod(0o755)
+
+    started = time.monotonic()
+    result = subprocess.run(
+        ["bash", str(HOOK)],
+        input=json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read"}),
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=3,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stderr
+    assert elapsed < 1.0
+
+
 def test_concurrent_hooks_launch_one_nonblocking_worker(tmp_path: Path) -> None:
     env, calls = hook_env(tmp_path)
     env["MNEMOS_TEST_SLEEP"] = "5"
@@ -241,6 +268,24 @@ def test_stale_lock_is_recovered(tmp_path: Path) -> None:
     assert result.returncode == 0
     wait_for(Path(env["MNEMOS_BG_RESULT_FILE"]))
     assert calls.read_text(encoding="utf-8").splitlines() == ["run"]
+
+
+def test_background_worker_ignores_slow_site_customization(tmp_path: Path) -> None:
+    env, _ = hook_env(tmp_path)
+    env["MNEMOS_TEST_SLEEP"] = "0"
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    (site_dir / "sitecustomize.py").write_text(
+        "import time\n"
+        "time.sleep(4)\n",
+        encoding="utf-8",
+    )
+    env["PYTHONPATH"] = str(site_dir)
+
+    result = run_hook(env)
+
+    assert result.returncode == 0
+    wait_for(Path(env["MNEMOS_BG_RESULT_FILE"]))
 
 
 def test_timed_out_worker_releases_lock_for_retry(tmp_path: Path) -> None:

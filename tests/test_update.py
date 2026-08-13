@@ -469,7 +469,10 @@ class TestSyncSourceToInstall:
             tmp_path,
             {
                 "hooks": [
+                    "hook_input.sh",
                     "hook_input.py",
+                    "hook_input_reader.pl",
+                    "hook_route.pl",
                     "user_prompt_submit.py",
                     "stop_hook.py",
                 ]
@@ -481,7 +484,10 @@ class TestSyncSourceToInstall:
         synced = sync_source_to_install(str(repo), install_root=install_root)
 
         assert synced == ["hooks"]
+        assert (install_root / "hooks" / "hook_input.sh").exists()
         assert (install_root / "hooks" / "hook_input.py").exists()
+        assert (install_root / "hooks" / "hook_input_reader.pl").exists()
+        assert (install_root / "hooks" / "hook_route.pl").exists()
         assert (install_root / "hooks" / "user_prompt_submit.py").exists()
         assert (install_root / "hooks" / "stop_hook.py").exists()
 

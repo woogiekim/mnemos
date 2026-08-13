@@ -89,12 +89,13 @@ def main() -> int:
     lock_file = os.environ.get("MNEMOS_BG_LOCK_DIR", f"/tmp/mnemos-bg-check-{uid}.lock")
     result_file = Path(os.environ.get("MNEMOS_BG_RESULT_FILE", f"/tmp/mnemos-bg-check-{uid}.result"))
 
-    _drain_result(result_file)
+    if os.environ.get("MNEMOS_POST_TOOL_DRAIN_RESULT", "1") != "0":
+        _drain_result(result_file)
 
     script_dir = Path(__file__).resolve().parent
     try:
         subprocess.Popen(
-            [sys.executable, str(script_dir / "post_tool_worker.py")],
+            [sys.executable, "-S", str(script_dir / "post_tool_worker.py")],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

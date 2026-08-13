@@ -183,7 +183,8 @@ def main() -> int:
     ttl = int(float(os.environ.get("MNEMOS_CONTEXT_CACHE_TTL_SECONDS", "300")))
     exact, last = _cache_paths(repo_root, session_id, prompt)
     _print_fresh_cache(exact, last, ttl)
-    _render_promotions(repo_root)
+    if os.environ.get("MNEMOS_RENDER_PROMOTIONS", "1") != "0":
+        _render_promotions(repo_root)
 
     if os.environ.get("MNEMOS_CONTEXT_PREFETCH", "1") != "0":
         script_dir = Path(__file__).resolve().parent

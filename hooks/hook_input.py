@@ -26,6 +26,7 @@ def is_complete_json(payload: bytearray) -> bool:
 def read_available_stdin(
     idle_seconds: float = DEFAULT_IDLE_SECONDS,
     max_bytes: int = MAX_BYTES,
+    max_seconds: float | None = None,
 ) -> bytes:
     """Return delivered stdin bytes after EOF or a short idle window."""
     try:
@@ -43,12 +44,16 @@ def read_available_stdin(
         pass
 
     payload = bytearray()
-    idle_until = time.monotonic() + idle_seconds
+    started_at = time.monotonic()
+    idle_until = started_at + idle_seconds
+    deadline = started_at + max_seconds if max_seconds is not None else None
     while len(payload) < max_bytes:
         try:
             chunk = os.read(fd, min(READ_SIZE, max_bytes - len(payload)))
         except BlockingIOError:
             remaining = idle_until - time.monotonic()
+            if deadline is not None:
+                remaining = min(remaining, deadline - time.monotonic())
             if remaining <= 0:
                 break
             try:
@@ -70,3 +75,16 @@ def read_available_stdin(
         idle_until = time.monotonic() + idle_seconds
 
     return bytes(payload)
+
+
+def main() -> int:
+    payload = read_available_stdin(idle_seconds=1.0, max_seconds=3.0)
+    if not payload or not is_complete_json(bytearray(payload)):
+        return 1
+
+    sys.stdout.buffer.write(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
