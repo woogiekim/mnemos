@@ -164,6 +164,9 @@ def _capture_error_status_payload(
             "stderr": stderr,
         }
     )
+    capture_diagnostics = getattr(gw, "last_capture_diagnostics", None) if gw is not None else None
+    if isinstance(capture_diagnostics, dict):
+        payload["capture_diagnostics"] = capture_diagnostics
     if isinstance(payload.get("error"), dict):
         payload["error"]["code"] = error_code
         payload["error"]["retryable"] = retryable
@@ -393,7 +396,16 @@ def memory_capture(
         )
         effective_layer = layer or "ephemeral"
         if as_json:
-            _echo_json({"status": "queued", "id": queued.item_id, "layer": effective_layer})
+            _echo_json({
+                "status": "queued",
+                "id": queued.item_id,
+                "layer": effective_layer,
+                "worker": {
+                    "started": queued.worker_started,
+                    "pid": queued.worker_pid,
+                    "error_code": queued.worker_error_code,
+                },
+            })
             return
         if not quiet:
             click.echo(f"queued: {queued.item_id}")
@@ -428,6 +440,9 @@ def memory_capture(
                     payload["item"] = memory_item_payload(gw._store.read(captured_id))
                 except Exception:
                     payload["item"] = None
+            capture_diagnostics = getattr(gw, "last_capture_diagnostics", None)
+            if isinstance(capture_diagnostics, dict):
+                payload["capture_diagnostics"] = capture_diagnostics
             _echo_json(payload)
             return
 
@@ -499,18 +514,199 @@ def memory_capture(
 
 @cli.command("capture-worker")
 @click.option("--limit", default=None, type=int, help="Maximum queued captures to process.")
+@click.option("--status", "status_only", is_flag=True, default=False, help="Report queue status without processing jobs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output JSON result.")
-def capture_worker(limit: int | None, as_json: bool) -> None:
+def capture_worker(limit: int | None, status_only: bool, as_json: bool) -> None:
     """Process queued async capture jobs."""
-    from core.capture_queue import process_pending_captures
+    from core.capture_queue import (
+        drain_pending_captures,
+        get_capture_queue_diagnostics,
+        process_pending_captures,
+    )
 
     repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
-    result = process_pending_captures(repo_root=repo_root, limit=limit)
-    payload = {"processed": result.processed, "failed": result.failed}
+    if status_only:
+        diagnostics = get_capture_queue_diagnostics(repo_root=repo_root)
+        if as_json:
+            _echo_json({"queue": diagnostics})
+            return
+        click.echo(
+            " ".join(
+                [
+                    f"pending={diagnostics['pending']}",
+                    f"processing={diagnostics['processing']}",
+                    f"failed={diagnostics['failed']}",
+                    f"worker={diagnostics['worker']['state']}",
+                ]
+            )
+        )
+        return
+
+    if limit is None:
+        result = drain_pending_captures(repo_root=repo_root)
+    else:
+        result = process_pending_captures(repo_root=repo_root, limit=limit)
+    payload = {
+        "processed": result.processed,
+        "failed": result.failed,
+        "retried": result.retried,
+        "recovered": result.recovered,
+        "skipped_locked": result.skipped_locked,
+        "queue": get_capture_queue_diagnostics(repo_root=repo_root),
+    }
     if as_json:
         _echo_json(payload)
         return
-    click.echo(f"processed={result.processed} failed={result.failed}")
+    click.echo(
+        f"processed={result.processed} failed={result.failed} "
+        f"retried={result.retried} recovered={result.recovered}"
+    )
+
+
+@cli.command("qmd-index-worker")
+@click.option(
+    "--status",
+    "status_only",
+    is_flag=True,
+    default=False,
+    help="Report QMD refresh queue status without processing jobs.",
+)
+@click.option(
+    "--retry-failed",
+    "retry_failed",
+    is_flag=True,
+    default=False,
+    help="Requeue terminal failures and signal a detached worker.",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output JSON result.")
+def qmd_index_worker(status_only: bool, retry_failed: bool, as_json: bool) -> None:
+    """Process queued updates for the optional derived QMD index."""
+    from core.qmd_queue import (
+        drain_qmd_refresh,
+        get_qmd_refresh_diagnostics,
+        retry_failed_qmd_refresh,
+        start_qmd_index_worker,
+    )
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    if status_only and retry_failed:
+        raise click.UsageError("--status and --retry-failed are mutually exclusive")
+    if status_only:
+        diagnostics = get_qmd_refresh_diagnostics(repo_root=repo_root)
+        if as_json:
+            _echo_json({"queue": diagnostics})
+            return
+        click.echo(
+            " ".join(
+                [
+                    f"pending={diagnostics['pending']}",
+                    f"processing={diagnostics['processing']}",
+                    f"failed={diagnostics['failed']}",
+                    f"worker={diagnostics['worker']['state']}",
+                ]
+            )
+        )
+        return
+
+    if retry_failed:
+        requeued = retry_failed_qmd_refresh(repo_root=repo_root)
+        worker = start_qmd_index_worker(repo_root) if requeued else None
+        payload = {
+            "requeued": requeued,
+            "worker": {
+                "started": bool(worker and worker.started),
+                "pid": worker.pid if worker else None,
+                "error_code": worker.error_code if worker else None,
+            },
+            "queue": get_qmd_refresh_diagnostics(repo_root=repo_root),
+        }
+        if as_json:
+            _echo_json(payload)
+            return
+        click.echo(
+            f"requeued={requeued} worker_started={payload['worker']['started']}"
+        )
+        return
+
+    result = drain_qmd_refresh(repo_root=repo_root)
+    payload = {
+        "processed": result.processed,
+        "failed": result.failed,
+        "retried": result.retried,
+        "recovered": result.recovered,
+        "skipped_locked": result.skipped_locked,
+        "queue": get_qmd_refresh_diagnostics(repo_root=repo_root),
+    }
+    if as_json:
+        _echo_json(payload)
+        return
+    click.echo(
+        f"processed={result.processed} failed={result.failed} "
+        f"retried={result.retried} recovered={result.recovered}"
+    )
+
+
+@cli.command("qmd-evaluate")
+@click.option(
+    "--fixture",
+    "fixture_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Labelled retrieval fixture JSON.",
+)
+@click.option("--top-k", default=5, type=click.IntRange(min=1), help="Recall cutoff.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output JSON result.")
+def qmd_evaluate(fixture_path: Path, top_k: int, as_json: bool) -> None:
+    """Evaluate labelled synthetic or operator-provided retrieval rankings."""
+    from core.qmd_benchmark import BenchmarkFixtureError, evaluate_fixture
+
+    try:
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+        report = evaluate_fixture(payload, top_k=top_k)
+    except (OSError, json.JSONDecodeError, BenchmarkFixtureError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if as_json:
+        _echo_json(report)
+        return
+    click.echo(
+        f"evidence={report['evidence_type']} cases={report['case_count']} "
+        f"top_k={report['top_k']}"
+    )
+    for backend in ("lexical", "qmd"):
+        metrics = report[backend]
+        click.echo(
+            f"{backend}: recall@{top_k}={metrics[f'recall_at_{top_k}']:.6f} "
+            f"mrr={metrics['mrr']:.6f} p95_ms={metrics['p95_latency_ms']:.6f}"
+        )
+    click.echo(report["claim_boundary"])
+
+
+@cli.command("qmd-prepare")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Output JSON result.")
+def qmd_prepare(as_json: bool) -> None:
+    """Write repo-local QMD configuration without invoking QMD or models."""
+    from core.qmd_queue import _build_qmd_adapter
+
+    repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+    try:
+        adapter, collections = _build_qmd_adapter(repo_root)
+        config_path = adapter.prepare_index_config(collections)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    payload = {
+        "prepared": True,
+        "config_path": str(config_path),
+        "collection_count": len(collections),
+    }
+    if as_json:
+        _echo_json(payload)
+        return
+    click.echo(
+        f"prepared={payload['prepared']} collections={payload['collection_count']} "
+        f"config={payload['config_path']}"
+    )
 
 
 @cli.command("classify")

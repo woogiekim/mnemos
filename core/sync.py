@@ -149,6 +149,7 @@ class GitSyncEngine:
         # Monotonic timestamp of the last successful push (process-local).
         self._last_push_ts: float = 0.0
         self._last_push_failure: SyncFailureInfo | None = None
+        self._write_phase_timings: list[dict[str, object]] = []
 
     # ------------------------------------------------------------------ #
     # Read-only accessors (used by sync_status)                           #
@@ -168,6 +169,25 @@ class GitSyncEngine:
 
     def clear_last_push_failure(self) -> None:
         self._last_push_failure = None
+
+    def begin_write_trace(self) -> None:
+        """Reset privacy-safe timings for the next backend write."""
+        self._write_phase_timings = []
+
+    @property
+    def last_write_diagnostics(self) -> dict[str, object]:
+        return {
+            "enabled": self._config.enabled,
+            "phases": [dict(phase) for phase in self._write_phase_timings],
+        }
+
+    def _record_write_phase(self, name: str, started: float) -> None:
+        self._write_phase_timings.append(
+            {
+                "name": name,
+                "duration_ms": round(max(0.0, time.perf_counter() - started) * 1000, 3),
+            }
+        )
 
     # ------------------------------------------------------------------ #
     # Pull-timestamp cache                                                #
@@ -264,11 +284,15 @@ class GitSyncEngine:
         On pull failure (conflict) writes the conflict artefact and raises
         :exc:`SyncConflictError`.
         """
-        if not self._config.enabled:
-            return
-        if not self.should_pull():
-            return
-        self._do_pull_rebase()
+        started = time.perf_counter()
+        try:
+            if not self._config.enabled:
+                return
+            if not self.should_pull():
+                return
+            self._do_pull_rebase()
+        finally:
+            self._record_write_phase("sync_before_write", started)
 
     def write_conflict_artefacts(self, error_detail: str) -> None:
         """Write the conflict-notice artefact at the configured root."""
@@ -313,22 +337,26 @@ class GitSyncEngine:
         restricts commits to a sub-tree (e.g. ``wiki/``) never stages anything
         outside it.  Returns ``True`` if a commit was actually created.
         """
-        if not self._config.enabled:
-            return False
-        if not changed_paths:
-            return False
-        stageable = self._stage_filter(list(changed_paths))
-        if not stageable:
-            # All changed paths were filtered out (e.g. a non-wiki write on the
-            # default backend) — nothing to commit.
-            return False
-        _git.add(self._root, [str(p) for p in stageable])
-        message = self._config.commit_message_template.format(
-            layer=layer,
-            id=item_id,
-            timestamp=_utc_timestamp(),
-        )
-        return _git.commit(self._root, message)
+        started = time.perf_counter()
+        try:
+            if not self._config.enabled:
+                return False
+            if not changed_paths:
+                return False
+            stageable = self._stage_filter(list(changed_paths))
+            if not stageable:
+                # All changed paths were filtered out (e.g. a non-wiki write on the
+                # default backend) — nothing to commit.
+                return False
+            _git.add(self._root, [str(p) for p in stageable])
+            message = self._config.commit_message_template.format(
+                layer=layer,
+                id=item_id,
+                timestamp=_utc_timestamp(),
+            )
+            return _git.commit(self._root, message)
+        finally:
+            self._record_write_phase("sync_commit", started)
 
     def hook_after_commit(self, committed: bool) -> None:
         """Hook 3 — push after a successful commit.
@@ -337,39 +365,43 @@ class GitSyncEngine:
         with the target branch already exists.  Otherwise the push is skipped
         silently (local-only mode / empty remote).
         """
-        self._last_push_failure = None
-        if not self._config.enabled:
-            return
-        if not committed:
-            return
-        if not self._config.auto_push_after_commit:
-            return
-        if not self.has_remote():
-            return
-        if not _git.remote_has_branch(
-            self._root, self._config.remote, self._config.branch
-        ):
-            return
+        started = time.perf_counter()
         try:
-            _git.push(self._root, remote=self._config.remote, branch=self._config.branch)
-        except _git.GitCommandError as exc:
-            error_code, retryable = classify_git_sync_failure(exc)
+            self._last_push_failure = None
+            if not self._config.enabled:
+                return
+            if not committed:
+                return
+            if not self._config.auto_push_after_commit:
+                return
+            if not self.has_remote():
+                return
+            if not _git.remote_has_branch(
+                self._root, self._config.remote, self._config.branch
+            ):
+                return
             try:
-                commit = _git.head(self._root)
-            except Exception:
-                commit = None
-            self._last_push_failure = SyncFailureInfo(
-                error_code=error_code,
-                message=str(exc),
-                stderr=exc.stderr,
-                retryable=retryable,
-                commit=commit,
-                remote=self._config.remote,
-                branch=self._config.branch,
-                recovery_command="mnemos sync pull && mnemos sync push",
-            )
-            return
-        self._last_push_ts = time.monotonic()
+                _git.push(self._root, remote=self._config.remote, branch=self._config.branch)
+            except _git.GitCommandError as exc:
+                error_code, retryable = classify_git_sync_failure(exc)
+                try:
+                    commit = _git.head(self._root)
+                except Exception:
+                    commit = None
+                self._last_push_failure = SyncFailureInfo(
+                    error_code=error_code,
+                    message=str(exc),
+                    stderr=exc.stderr,
+                    retryable=retryable,
+                    commit=commit,
+                    remote=self._config.remote,
+                    branch=self._config.branch,
+                    recovery_command="mnemos sync pull && mnemos sync push",
+                )
+                return
+            self._last_push_ts = time.monotonic()
+        finally:
+            self._record_write_phase("sync_push", started)
 
     # ------------------------------------------------------------------ #
     # Public sync API                                                     #

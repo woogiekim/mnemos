@@ -184,7 +184,7 @@ def test_capture_text_reports_sync_pending_after_push_ref_race(
     monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo))
     from core.cli import cli
 
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         cli,
         [
             "capture",

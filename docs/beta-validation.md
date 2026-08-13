@@ -165,3 +165,24 @@ detected and fully recovered (23 → 46).
 runs with the same seed produce a byte-identical normalized report — this is
 asserted by `tests/test_beta_harness.py::test_same_seed_byte_identical`. The
 harness never reads wall-clock time and never touches the network.
+
+---
+
+## Optional QMD retrieval evaluation
+
+The multi-day harness above measures Mnemos lifecycle behavior. Optional QMD
+retrieval has a separate 30-case Korean paraphrase fixture so synthetic adapter
+evidence is not mixed with lifecycle evidence or presented as live model
+performance:
+
+```bash
+mnemos qmd-evaluate \
+  --fixture benchmarks/qmd-korean-paraphrases.json \
+  --json
+```
+
+The tracked synthetic report records lexical `Recall@5=0.333333`,
+`MRR=0.222222` and deterministic QMD-result `Recall@5=1.0`, `MRR=1.0`.
+Fixture p95 values are labelled inputs, not measured runtime latency. See the
+[QMD integration guide](./qmd-integration.md) for the readiness gate, an
+explicit live-model procedure, fallback behavior, and recovery commands.

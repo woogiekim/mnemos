@@ -79,7 +79,9 @@ class OperationalRetrievalRanker:
         updated_at = _first_text(candidate.get("updated_at"), metadata.get("updated_at"))
         content = str(candidate.get("content") or "")
 
-        semantic = _semantic_score(query, content, tags)
+        lexical_semantic = _semantic_score(query, content, tags)
+        external_semantic = _clamp_float(candidate.get("semantic_score"), 0.0)
+        semantic = max(lexical_semantic, external_semantic)
         recency = _recency_score(updated_at or created_at, self._policy.decay_after_days)
         trust_score = TRUST_RANK[trust] / max(TRUST_RANK.values())
         workflow = _workflow_score(query, tags, workflow_tags, metadata)

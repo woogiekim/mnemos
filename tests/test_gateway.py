@@ -1,5 +1,6 @@
 """Tests for MemoryGateway."""
 import hashlib
+import json
 import pytest
 import yaml
 from pathlib import Path
@@ -118,6 +119,246 @@ class TestCapture:
             run_id="run-test",
         )
         assert item_id == "explicit-001"
+
+
+def test_success_case_capture_diagnostics_report_privacy_safe_phase_timings(gateway) -> None:
+    """TC-010: removing a blocking phase or leaking content must break this test."""
+    # given
+    private_content = "private capture timing sentinel"
+    sut = gateway
+
+    # when
+    sut.capture(
+        layer="session",
+        content=private_content,
+        session_id="timing-session",
+        no_classify=True,
+    )
+    diagnostics = sut.last_capture_diagnostics
+
+    # then
+    assert diagnostics["duration_ms"] >= 0.0
+    assert [phase["name"] for phase in diagnostics["phases"]] == [
+        "dedup_lookup",
+        "policy_validation",
+        "store_write",
+        "fts_index",
+        "side_effects",
+        "classification",
+    ]
+    assert [phase["name"] for phase in diagnostics["store"]["phases"]] == [
+        "sync_before_write",
+        "sync_commit",
+        "sync_push",
+    ]
+    assert private_content not in json.dumps(diagnostics)
+
+
+def test_success_case_capture_enqueues_qmd_refresh_after_canonical_write(
+    gateway,
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful canonical capture must durably schedule derived indexing."""
+    from core.config import QmdConfig
+    from core.qmd_queue import WorkerStartResult
+
+    # given
+    gateway._qmd_config = QmdConfig(enabled=True)
+    monkeypatch.setattr(
+        "core.qmd_queue.start_qmd_index_worker",
+        lambda _repo_root: WorkerStartResult(
+            started=False,
+            error_code="worker_start_failed",
+        ),
+    )
+
+    # when
+    item_id = gateway.capture(
+        layer="project",
+        content="QMD durable refresh integration",
+        no_classify=True,
+    )
+
+    # then
+    assert gateway.peek(str(item_id))["content"] == "QMD durable refresh integration"
+    pending = list(
+        (repo_root / ".agent" / "state" / "qmd-refresh" / "pending").glob("*.json")
+    )
+    assert len(pending) == 1
+    assert json.loads(pending[0].read_text())["reason"] == "capture"
+
+
+def test_failure_case_qmd_enqueue_failure_never_rolls_back_canonical_capture(
+    gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A derived-index scheduling failure must remain outside canonical success."""
+    from core.config import QmdConfig
+
+    # given
+    gateway._qmd_config = QmdConfig(enabled=True)
+    enqueue_attempts = 0
+
+    def fail_enqueue(**_kwargs) -> None:
+        nonlocal enqueue_attempts
+        enqueue_attempts += 1
+        raise OSError("derived queue unavailable")
+
+    monkeypatch.setattr("core.qmd_queue.enqueue_qmd_refresh", fail_enqueue)
+
+    # when
+    item_id = gateway.capture(
+        layer="project",
+        content="Canonical capture survives QMD failure",
+        no_classify=True,
+    )
+
+    # then
+    assert gateway.peek(str(item_id))["content"] == "Canonical capture survives QMD failure"
+    assert enqueue_attempts == 1
+    assert gateway.last_qmd_refresh_diagnostics == {
+        "enabled": True,
+        "operation": "capture",
+        "status": "enqueue_failed",
+        "queued": False,
+        "worker_started": False,
+        "error_code": "OSError",
+    }
+    assert gateway.last_capture_diagnostics["qmd_refresh"] == (
+        gateway.last_qmd_refresh_diagnostics
+    )
+    assert "derived queue unavailable" not in json.dumps(
+        gateway.last_capture_diagnostics
+    )
+
+
+def test_success_case_public_memory_mutations_schedule_qmd_refresh(
+    gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every public mutation that changes searchable state schedules a refresh."""
+    # given
+    item_id = gateway.capture(
+        layer="project",
+        content="QMD mutation lifecycle",
+        no_classify=True,
+    )
+    reasons: list[str] = []
+    monkeypatch.setattr(gateway, "_enqueue_qmd_refresh", reasons.append)
+
+    # when
+    gateway.update(str(item_id), "QMD mutation lifecycle updated")
+    gateway.classify(str(item_id), "qmd")
+    gateway.promote(str(item_id), target_layer="global", force=True)
+    gateway.demote(str(item_id), target_layer="project")
+    gateway.archive(str(item_id))
+    gateway.delete(str(item_id))
+
+    # then
+    assert reasons == ["update", "classify", "promote", "demote", "archive", "delete"]
+
+
+def test_success_case_forget_schedules_qmd_refresh(
+    gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy-gated hard-delete path also refreshes the derived index."""
+    # given
+    item_id = gateway.capture(
+        layer="project",
+        content="QMD forget lifecycle",
+        no_classify=True,
+    )
+    gateway.archive(str(item_id))
+    reasons: list[str] = []
+    monkeypatch.setattr(gateway, "_enqueue_qmd_refresh", reasons.append)
+
+    # when
+    gateway.forget(str(item_id))
+
+    # then
+    assert reasons == ["forget"]
+
+
+def test_success_case_auto_classify_schedules_qmd_refresh_once(
+    gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct bulk-classification writes must converge the derived index."""
+    # given
+    item_id = gateway.capture(
+        layer="project",
+        content="QMD auto classification lifecycle",
+        no_classify=True,
+    )
+    reasons: list[str] = []
+    monkeypatch.setattr(gateway, "_enqueue_qmd_refresh", reasons.append)
+
+    # when
+    tags = gateway.auto_classify(
+        str(item_id),
+        "performance benchmark for deployment workflow",
+    )
+
+    # then
+    assert tags
+    assert reasons == ["auto_classify"]
+
+
+def test_success_case_capture_coalesces_internal_auto_classify_refresh(
+    gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capture-owned classification must emit one final derived-index signal."""
+    # given
+    reasons: list[str] = []
+    monkeypatch.setattr(gateway, "_enqueue_qmd_refresh", reasons.append)
+
+    # when
+    gateway.capture(
+        layer="project",
+        content="QMD performance classification capture",
+    )
+
+    # then
+    assert reasons == ["capture"]
+
+
+def test_failure_case_capture_diagnostics_keep_store_timings_when_write_fails(gateway) -> None:
+    """TC-010: a failing sync/store phase must remain visible to diagnostics."""
+    # given
+    expected_store_diagnostics = {
+        "enabled": True,
+        "phases": [{"name": "sync_before_write", "duration_ms": 25.0}],
+    }
+
+    class FakeSyncEngine:
+        last_write_diagnostics = expected_store_diagnostics
+
+    class FailingStore:
+        _sync_engine = FakeSyncEngine()
+
+        def find_by_content_hash(self, _content_hash: str):
+            return None
+
+        def write(self, **_kwargs) -> None:
+            raise RuntimeError("store unavailable")
+
+    gateway._store = FailingStore()
+    sut = gateway
+
+    # when
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        sut.capture(
+            layer="session",
+            content="store failure timing",
+            session_id="timing-failure",
+            no_classify=True,
+        )
+
+    # then
+    assert sut.last_capture_diagnostics["store"] == expected_store_diagnostics
 
     def test_capture_front_matter_structure(self, gateway, repo_root):
         """Captured item must have correct YAML front-matter fields."""

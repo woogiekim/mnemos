@@ -31,7 +31,10 @@ class SearchMiddleware:
     ) -> None:
         self._root = Path(repo_root)
         self._fts = fts_index or FTSIndex(db_path=str(self._root / ".agent" / "state" / "fts.db"))
-        self._vector = vector_backend or VectorBackend()
+        self._vector = vector_backend or VectorBackend(
+            repo_root=self._root,
+            store=store,
+        )
         self._store = store
         self._last_diagnostics: dict[str, Any] = _empty_search_diagnostics()
 

@@ -288,6 +288,7 @@ class MemoryStore:
         Writes outside ``wiki/`` (ephemeral / working / session / transient)
         are staged out by the wiki filter and therefore commit to nothing.
         """
+        self._sync_engine.begin_write_trace()
         self._sync_engine.clear_last_push_failure()
 
         # Hook 1 — pull before write (may raise SyncConflictError).

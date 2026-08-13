@@ -587,6 +587,8 @@ class ObsidianBackend:
         2. Commits the changed file after writing.
         3. Pushes the commit if ``auto_push_after_commit`` is set.
         """
+        self._sync_engine.begin_write_trace()
+
         # Hook 1 — pull before write (may raise SyncConflictError)
         self._hook_before_write()
 

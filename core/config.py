@@ -173,6 +173,24 @@ class AppConfig:
 
 
 @dataclass
+class QmdConfig:
+    """Resolved settings for the optional local QMD retrieval backend."""
+
+    enabled: bool = False
+    executable: str = "qmd"
+    index_name: str = "mnemos"
+    mode: str = "search"
+    timeout_seconds: float = 15.0
+    update_timeout_seconds: float = 120.0
+    embed_on_update: bool = False
+    embed_model: str | None = None
+    model_ready: bool = False
+
+
+_QMD_SEARCH_MODES = {"query", "vsearch", "search"}
+
+
+@dataclass
 class BackendConfig:
     """Resolved backend configuration."""
 
@@ -318,6 +336,129 @@ def _parse_live_update_config(raw: Any) -> LiveUpdateConfig:
         debounce = 300
 
     return LiveUpdateConfig(enabled=enabled, debounce_ms=debounce)
+
+
+def _parse_qmd_config(raw: Any) -> QmdConfig:
+    """Parse optional ``retrieval.qmd`` settings without implicit opt-in."""
+    if not isinstance(raw, dict):
+        return QmdConfig()
+
+    enabled = raw.get("enabled", False)
+    enabled = enabled if isinstance(enabled, bool) else False
+    embed_on_update = raw.get("embed_on_update", False)
+    embed_on_update = embed_on_update if isinstance(embed_on_update, bool) else False
+
+    mode = str(raw.get("mode", "search")).strip().lower()
+    if mode not in _QMD_SEARCH_MODES:
+        mode = "search"
+
+    model_ready = raw.get("model_ready", False)
+    model_ready = model_ready if isinstance(model_ready, bool) else False
+
+    return QmdConfig(
+        enabled=enabled,
+        executable=_non_empty_text(raw.get("executable"), "qmd"),
+        index_name=_qmd_index_name(raw.get("index_name"), "mnemos"),
+        mode=mode,
+        timeout_seconds=_positive_float(raw.get("timeout_seconds"), 15.0),
+        update_timeout_seconds=_positive_float(raw.get("update_timeout_seconds"), 120.0),
+        embed_on_update=embed_on_update,
+        embed_model=_optional_text(raw.get("embed_model")),
+        model_ready=model_ready,
+    )
+
+
+def get_qmd_config(repo_root: str | None = None) -> QmdConfig:
+    """Resolve the optional QMD backend from repo config and environment."""
+    config = _load_yaml_config(repo_root)
+    retrieval_raw = config.get("retrieval")
+    retrieval = retrieval_raw if isinstance(retrieval_raw, dict) else {}
+    resolved = _parse_qmd_config(retrieval.get("qmd"))
+
+    enabled_env = _optional_bool(os.environ.get("MNEMOS_QMD_ENABLED"))
+    if enabled_env is not None:
+        resolved.enabled = enabled_env
+    if os.environ.get("MNEMOS_VECTOR_BACKEND", "").strip().lower() == "qmd":
+        resolved.enabled = True
+
+    executable = os.environ.get("MNEMOS_QMD_EXECUTABLE")
+    index_name = os.environ.get("MNEMOS_QMD_INDEX")
+    mode = os.environ.get("MNEMOS_QMD_MODE")
+    timeout = os.environ.get("MNEMOS_QMD_TIMEOUT_SECONDS")
+    update_timeout = os.environ.get("MNEMOS_QMD_UPDATE_TIMEOUT_SECONDS")
+    embed_on_update = _optional_bool(os.environ.get("MNEMOS_QMD_EMBED_ON_UPDATE"))
+    embed_model = os.environ.get("MNEMOS_QMD_EMBED_MODEL")
+    model_ready = _optional_bool(os.environ.get("MNEMOS_QMD_MODEL_READY"))
+
+    if executable and executable.strip():
+        resolved.executable = executable.strip()
+    if index_name and index_name.strip():
+        resolved.index_name = _qmd_index_name(index_name, resolved.index_name)
+    if mode and mode.strip().lower() in _QMD_SEARCH_MODES:
+        resolved.mode = mode.strip().lower()
+    if timeout is not None:
+        resolved.timeout_seconds = _positive_float(timeout, resolved.timeout_seconds)
+    if update_timeout is not None:
+        resolved.update_timeout_seconds = _positive_float(
+            update_timeout,
+            resolved.update_timeout_seconds,
+        )
+    if embed_on_update is not None:
+        resolved.embed_on_update = embed_on_update
+    if embed_model is not None:
+        resolved.embed_model = _optional_text(embed_model)
+    if model_ready is not None:
+        resolved.model_ready = model_ready
+
+    return resolved
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
+def _positive_float(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _non_empty_text(value: Any, default: str) -> str:
+    if value is None:
+        return default
+    parsed = str(value).strip()
+    return parsed or default
+
+
+def _qmd_index_name(value: Any, default: str) -> str:
+    """Return a QMD config basename that cannot escape its local directory."""
+    parsed = _non_empty_text(value, default)
+    if parsed in {".", ".."}:
+        return default
+    if not parsed.isascii():
+        return default
+    if not all(character.isalnum() or character in "._-" for character in parsed):
+        return default
+    return parsed
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    parsed = str(value).strip()
+    return parsed or None
 
 
 def get_backend_config(repo_root: str | None = None) -> BackendConfig:

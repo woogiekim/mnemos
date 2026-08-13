@@ -4,11 +4,14 @@ from __future__ import annotations
 import datetime
 import hashlib
 import os
+import time
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from core.contracts import RecallMemory, RecallReport
 from core.policy import PolicyEngine, PolicyViolationError
@@ -19,11 +22,51 @@ from core.events import EventBus
 from core.fts import FTSIndex
 from core.observability import ObservabilityLogger
 from core.search import SearchMiddleware
-from core.config import get_backend_config
+from core.config import get_backend_config, get_qmd_config
 
 
 DEFAULT_QUALITY_SCORE = 0.8
 _CONTENT_PREVIEW_LENGTH = 60
+
+
+@contextmanager
+def _timed_phase(phases: list[dict[str, Any]], name: str) -> Iterator[None]:
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        phases.append(
+            {
+                "name": name,
+                "duration_ms": round(max(0.0, time.perf_counter() - started) * 1000, 3),
+            }
+        )
+
+
+def _timed_capture(method: Any) -> Any:
+    @wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        self._capture_phase_timings = []
+        self._capture_store_diagnostics = {"enabled": False, "phases": []}
+        qmd_enabled = bool(getattr(getattr(self, "_qmd_config", None), "enabled", False))
+        self._qmd_refresh_diagnostics = {
+            "enabled": qmd_enabled,
+            "operation": "capture",
+            "status": "not_requested" if qmd_enabled else "disabled",
+            "queued": False,
+            "worker_started": False,
+            "error_code": None,
+        }
+        started = time.perf_counter()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._capture_duration_ms = round(
+                max(0.0, time.perf_counter() - started) * 1000,
+                3,
+            )
+
+    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +350,7 @@ class MemoryGateway:
         # Priority: MNEMOS_BACKEND env var > mnemos.yml storage.backend > default
         # The default backend (MemoryStore) is unchanged and remains opt-in.
         backend_cfg = get_backend_config(repo_root=self._root)
+        self._qmd_config = get_qmd_config(repo_root=self._root)
         if backend_cfg.backend == "obsidian":
             from core.obsidian import ObsidianBackend
             vault_path = backend_cfg.vault_path
@@ -361,6 +405,20 @@ class MemoryGateway:
         # call. The CLI reads this flag to emit "(existing) <uuid>" instead of
         # the normal "captured: <uuid>" line.
         self.last_capture_was_duplicate: bool = False
+        self._capture_phase_timings: list[dict[str, Any]] = []
+        self._capture_store_diagnostics: dict[str, Any] = {
+            "enabled": False,
+            "phases": [],
+        }
+        self._qmd_refresh_diagnostics: dict[str, Any] = {
+            "enabled": self._qmd_config.enabled,
+            "operation": None,
+            "status": "not_requested" if self._qmd_config.enabled else "disabled",
+            "queued": False,
+            "worker_started": False,
+            "error_code": None,
+        }
+        self._capture_duration_ms: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Observability logger access                                           #
@@ -374,6 +432,71 @@ class MemoryGateway:
         and write to this logger directly.
         """
         return self._obs
+
+    @property
+    def last_capture_diagnostics(self) -> dict[str, Any]:
+        """Return content-free timings from the most recent capture call."""
+        return {
+            "duration_ms": self._capture_duration_ms,
+            "phases": [dict(phase) for phase in self._capture_phase_timings],
+            "store": {
+                "enabled": bool(self._capture_store_diagnostics.get("enabled")),
+                "phases": [
+                    dict(phase)
+                    for phase in self._capture_store_diagnostics.get("phases", [])
+                    if isinstance(phase, dict)
+                ],
+            },
+            "qmd_refresh": dict(self._qmd_refresh_diagnostics),
+        }
+
+    @property
+    def last_qmd_refresh_diagnostics(self) -> dict[str, Any]:
+        """Return content-free status from the latest derived-index enqueue."""
+        return dict(self._qmd_refresh_diagnostics)
+
+    def _enqueue_qmd_refresh(self, reason: str) -> None:
+        """Schedule optional derived indexing without affecting canonical work."""
+        if not self._qmd_config.enabled:
+            self._qmd_refresh_diagnostics = {
+                "enabled": False,
+                "operation": reason,
+                "status": "disabled",
+                "queued": False,
+                "worker_started": False,
+                "error_code": None,
+            }
+            return
+        try:
+            from core.qmd_queue import enqueue_qmd_refresh
+
+            result = enqueue_qmd_refresh(
+                repo_root=self._root,
+                reason=reason,
+                config=self._qmd_config,
+            )
+        except Exception as exc:
+            self._qmd_refresh_diagnostics = {
+                "enabled": True,
+                "operation": reason,
+                "status": "enqueue_failed",
+                "queued": False,
+                "worker_started": False,
+                "error_code": exc.__class__.__name__,
+            }
+            return
+
+        queued = bool(getattr(result, "queued", False))
+        worker_started = bool(getattr(result, "worker_started", False))
+        worker_error_code = getattr(result, "worker_error_code", None)
+        self._qmd_refresh_diagnostics = {
+            "enabled": True,
+            "operation": reason,
+            "status": "queued" if queued else "not_queued",
+            "queued": queued,
+            "worker_started": worker_started,
+            "error_code": str(worker_error_code) if worker_error_code else None,
+        }
 
     # ------------------------------------------------------------------ #
     # Event bus access                                                      #
@@ -551,7 +674,13 @@ class MemoryGateway:
     # Auto-classify                                                         #
     # ------------------------------------------------------------------ #
 
-    def auto_classify(self, item_id: str, content: str) -> list[str]:
+    def auto_classify(
+        self,
+        item_id: str,
+        content: str,
+        *,
+        schedule_qmd_refresh: bool = True,
+    ) -> list[str]:
         """Derive and assign at least one tag automatically from *content*.
 
         Tags are derived from simple keyword matching across several
@@ -654,12 +783,15 @@ class MemoryGateway:
                     content=item.get("content", ""),
                     metadata={"layer": item.get("layer", ""), "tags": all_tags},
                 )
+                if schedule_qmd_refresh:
+                    self._enqueue_qmd_refresh("auto_classify")
             except Exception:
                 # Auto-classify is best-effort — never fail a capture
                 pass
 
         return new_tags
 
+    @_timed_capture
     def capture(
         self,
         content: str,
@@ -712,6 +844,19 @@ class MemoryGateway:
         different processes — this matches the requirement:
         ``dedup_scope: Cross-layer``.
         """
+        dedup_started = time.perf_counter()
+
+        def record_dedup_timing() -> None:
+            self._capture_phase_timings.append(
+                {
+                    "name": "dedup_lookup",
+                    "duration_ms": round(
+                        max(0.0, time.perf_counter() - dedup_started) * 1000,
+                        3,
+                    ),
+                }
+            )
+
         # Reset the duplicate flag for this call
         self.last_capture_was_duplicate = False
 
@@ -737,6 +882,7 @@ class MemoryGateway:
         content_hash = _capture_content_hash(content)
         dedup_key = (layer, content_hash)
         if dedup_key in self._capture_dedup:
+            record_dedup_timing()
             return None
 
         # ------------------------------------------------------------------
@@ -763,9 +909,13 @@ class MemoryGateway:
                 # fast (no second scan) and return None per the in-process contract.
                 self._capture_dedup[dedup_key] = existing_id
                 self.last_capture_was_duplicate = True
+                record_dedup_timing()
                 return existing_id
 
-        self._policy.validate_capture(layer=layer, item={"content": content})
+        record_dedup_timing()
+
+        with _timed_phase(self._capture_phase_timings, "policy_validation"):
+            self._policy.validate_capture(layer=layer, item={"content": content})
 
         item_id = item_id or str(uuid.uuid4())
         # Register in the dedup cache immediately — before the write — so that
@@ -792,48 +942,64 @@ class MemoryGateway:
         if extra_metadata:
             metadata.update(extra_metadata)
 
-        self._store.write(
-            layer=layer,
-            item_id=item_id,
-            content=content,
-            metadata=metadata,
-            run_id=run_id,
-            session_id=session_id,
-        )
+        try:
+            with _timed_phase(self._capture_phase_timings, "store_write"):
+                self._store.write(
+                    layer=layer,
+                    item_id=item_id,
+                    content=content,
+                    metadata=metadata,
+                    run_id=run_id,
+                    session_id=session_id,
+                )
+        finally:
+            sync_engine = getattr(self._store, "_sync_engine", None)
+            store_diagnostics = getattr(sync_engine, "last_write_diagnostics", None)
+            if isinstance(store_diagnostics, dict):
+                self._capture_store_diagnostics = store_diagnostics
 
-        self._fts.index_item(
-            item_id=item_id,
-            content=content,
-            metadata={"layer": layer, "tags": tags or []},
-        )
+        with _timed_phase(self._capture_phase_timings, "fts_index"):
+            self._fts.index_item(
+                item_id=item_id,
+                content=content,
+                metadata={"layer": layer, "tags": tags or []},
+            )
 
-        self._logger.append(
-            operation="capture",
-            item_id=item_id,
-            layer=layer,
-            metadata={"tags": tags or []},
-        )
-        content_preview = content[:_CONTENT_PREVIEW_LENGTH]
-        self._hooks.fire("post-capture", {"item_id": item_id, "layer": layer})
-        self._event_bus.emit("post-capture", {
-            "item_id": item_id,
-            "content_preview": content_preview,
-            "layer": layer,
-        })
+        with _timed_phase(self._capture_phase_timings, "side_effects"):
+            self._logger.append(
+                operation="capture",
+                item_id=item_id,
+                layer=layer,
+                metadata={"tags": tags or []},
+            )
+            content_preview = content[:_CONTENT_PREVIEW_LENGTH]
+            self._hooks.fire("post-capture", {"item_id": item_id, "layer": layer})
+            self._event_bus.emit("post-capture", {
+                "item_id": item_id,
+                "content_preview": content_preview,
+                "layer": layer,
+            })
 
-        # Observability: record this capture event (async, non-blocking)
-        self._obs.log_capture(
-            memory_id=item_id,
-            layer=layer,
-            tags=tags or [],
-            session_id=session_id,
-        )
+            # Observability: record this capture event (async, non-blocking)
+            self._obs.log_capture(
+                memory_id=item_id,
+                layer=layer,
+                tags=tags or [],
+                session_id=session_id,
+            )
 
         # Auto-classify: derive tags automatically after write, unless opted out.
         # This runs after the observability log so the initial capture event
         # reflects pre-classify state; classify adds tags in a separate update.
-        if not no_classify:
-            self.auto_classify(item_id=item_id, content=content)
+        with _timed_phase(self._capture_phase_timings, "classification"):
+            if not no_classify:
+                self.auto_classify(
+                    item_id=item_id,
+                    content=content,
+                    schedule_qmd_refresh=False,
+                )
+
+        self._enqueue_qmd_refresh("capture")
 
         return item_id
 
@@ -854,6 +1020,7 @@ class MemoryGateway:
             tags.append(tag)
         self._store.update(item["_path"], metadata_updates={"tags": tags, "stage": "classified"})
         self._logger.append("classify", item_id, item.get("layer", "unknown"), {"tag": tag})
+        self._enqueue_qmd_refresh("classify")
 
     # ------------------------------------------------------------------ #
     # Search                                                                #
@@ -1241,6 +1408,7 @@ class MemoryGateway:
             metadata={"layer": item.get("layer", "")},
         )
         self._logger.append("update", item_id, item.get("layer", "unknown"))
+        self._enqueue_qmd_refresh("update")
 
     # ------------------------------------------------------------------ #
     # Promote                                                               #
@@ -1301,6 +1469,7 @@ class MemoryGateway:
             target_layer,
             {"from_layer": current_layer},
         )
+        self._enqueue_qmd_refresh("promote")
         content_preview = content[:_CONTENT_PREVIEW_LENGTH]
         self._hooks.fire("post-promote", {"item_id": item_id, "layer": target_layer})
         self._event_bus.emit("post-promote", {
@@ -1366,6 +1535,7 @@ class MemoryGateway:
             target_layer,
             {"from_layer": current_layer},
         )
+        self._enqueue_qmd_refresh("demote")
         return item_id
 
     # ------------------------------------------------------------------ #
@@ -1377,6 +1547,7 @@ class MemoryGateway:
         item = self._store.read(item_id)
         self._store.update(item["_path"], metadata_updates={"stage": "archived"})
         self._logger.append("archive", item_id, item.get("layer", "unknown"))
+        self._enqueue_qmd_refresh("archive")
         self._hooks.fire("post-archive", {"item_id": item_id})
         self._event_bus.emit("post-archive", {"item_id": item_id, "layer": item.get("layer", "unknown")})
 
@@ -1393,6 +1564,7 @@ class MemoryGateway:
         self._fts.remove(item_id)
 
         self._logger.append("forget", item_id, item.get("layer", "unknown"))
+        self._enqueue_qmd_refresh("forget")
         self._hooks.fire("post-forget", {"item_id": item_id})
         self._event_bus.emit("post-forget", {"item_id": item_id})
 
@@ -1418,6 +1590,7 @@ class MemoryGateway:
         self._fts.remove(item_id)
 
         self._logger.append("delete", item_id, layer)
+        self._enqueue_qmd_refresh("delete")
         self._hooks.fire("post-delete", {"item_id": item_id})
         self._event_bus.emit("post-delete", {"item_id": item_id, "layer": layer})
 

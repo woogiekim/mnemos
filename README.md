@@ -266,7 +266,9 @@ mnemos/
 | `core/store.py` | Filesystem Store — read/write memory items as Markdown with YAML front-matter |
 | `core/search.py` | Search Middleware — three-stage pipeline: FTS5 → vector → pathlib grep |
 | `core/fts.py` | SQLite FTS5 index for full-text search |
-| `core/vector.py` | Optional vector search backend (Qdrant / Chroma; graceful fallback) |
+| `core/vector.py` | Optional vector search backend (Qdrant / Chroma / QMD; graceful fallback) |
+| `core/qmd.py` | Bounded argv/JSON adapter for repo-local QMD retrieval and index refresh |
+| `core/qmd_queue.py` | Durable coalescing worker queue for derived QMD index consistency |
 | `core/contracts.py` | Runtime-independent persistent memory protocol and retrieval contracts |
 | `core/lifecycle.py` | Managed lifecycle policy for summarize, compress, promote, archive, and expire decisions |
 | `core/compression.py` | Continuity-aware compression that preserves memory identity and relationships |
@@ -308,6 +310,10 @@ mnemos/
 | `mnemos demote` | Demote to a lower layer |
 | `mnemos archive` | Soft-delete (retain content) |
 | `mnemos forget` | Hard-delete (requires archived state; use `--force` to skip prompt) |
+| `mnemos qmd-prepare --json` | Prepare repo-local QMD config without invoking QMD |
+| `mnemos qmd-index-worker --status --json` | Inspect the QMD refresh queue without consuming it |
+| `mnemos qmd-index-worker --retry-failed --json` | Requeue failed QMD refresh jobs and signal a worker |
+| `mnemos qmd-evaluate --fixture FILE --json` | Evaluate labelled offline retrieval rankings |
 | `mnemos log` | Manually append or view audit log entries |
 | `mnemos capabilities --json` | Print stable machine-readable provider features |
 | `mnemos version --json` | Print version and compatibility metadata |
@@ -479,12 +485,20 @@ Set `MNEMOS_REPO_ROOT` to point to your repo root. Default is the current direct
 Optional vector backend:
 - `MNEMOS_VECTOR_BACKEND=qdrant` + `MNEMOS_QDRANT_URL=http://localhost:6333`
 - `MNEMOS_VECTOR_BACKEND=chroma` + `MNEMOS_CHROMA_PATH=.agent/state/chroma`
+- QMD is configured under `retrieval.qmd` in `mnemos.yml`; it is disabled by
+  default and keeps config/cache state repo-local under `.agent/state/qmd/`.
 
 Install with vector extras:
 
 ```bash
 pip install -e ".[vector]"
 ```
+
+QMD remains an optional external executable and is never installed or allowed
+to download models implicitly by Mnemos. See the
+[QMD integration and recovery guide](docs/qmd-integration.md) for model-free
+setup, explicit Korean/Qwen3 readiness, queue diagnostics, and offline
+evaluation.
 
 ## Remote sync
 
