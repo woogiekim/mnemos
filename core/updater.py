@@ -160,7 +160,12 @@ def pipx_reinstall() -> None:
     _run(["pipx", "reinstall", "mnemos"])
 
 
-def _run_updated_process(repo_root: str) -> int:
+def _run_updated_process(
+    repo_root: str,
+    *,
+    with_qmd: bool = False,
+    qmd_package_manager: str = "auto",
+) -> int:
     """Finish the update in a process that imports the refreshed source tree."""
     env = os.environ.copy()
     env[_UPDATE_REEXEC_ENV] = "1"
@@ -181,6 +186,8 @@ def _run_updated_process(repo_root: str) -> int:
         "--skip-git-pull",
         "--skip-pipx",
     ]
+    if with_qmd:
+        command.extend(["--with-qmd", "--qmd-package-manager", qmd_package_manager])
     result = subprocess.run(command, cwd=repo_root, env=env)
     return result.returncode
 
@@ -467,6 +474,9 @@ def run_update(
     skip_git_pull: bool = False,
     skip_pipx: bool = False,
     home: Optional[Path] = None,
+    *,
+    with_qmd: bool = False,
+    qmd_package_manager: str = "auto",
 ) -> int:
     """Run the full update sequence.  Returns exit code (0 = success)."""
     from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
@@ -557,7 +567,11 @@ def run_update(
         print("\n── continuing with refreshed runtime ───────────────────────────")
         sys.stdout.flush()
         sys.stderr.flush()
-        return _run_updated_process(repo_root)
+        return _run_updated_process(
+            repo_root,
+            with_qmd=with_qmd,
+            qmd_package_manager=qmd_package_manager,
+        )
 
     # -- 3. Replace managed blocks via adapters (run ALL — not filtered by is_present) --
     print("\n── updating managed config blocks ───────────────────────────────")
@@ -595,7 +609,22 @@ def run_update(
     except Exception as exc:
         print(f"warning: policy migration failed — {exc}", file=sys.stderr)
 
-    # -- 5. Run non-mutating bg-check --quiet -------------------------------
+    # -- 5. Optional QMD bootstrap ------------------------------------------
+    if with_qmd:
+        print("\n── preparing optional QMD backend ───────────────────────────────")
+        try:
+            from core.qmd_bootstrap import bootstrap_qmd
+
+            result = bootstrap_qmd(repo_root, package_manager=qmd_package_manager)
+            print(
+                f"qmd: installed={result['installed']} prepared={result['prepared']} "
+                f"config={result['config_path']}"
+            )
+        except Exception as exc:
+            print(f"warning: qmd bootstrap failed — {exc}", file=sys.stderr)
+            exit_code = 1
+
+    # -- 6. Run non-mutating bg-check --quiet -------------------------------
     # This step runs silently so the update summary stays readable. It must
     # not drain write-heavy maintenance because update is an install workflow.
     # Failures are non-fatal — they are reported as warnings and do not change exit_code.

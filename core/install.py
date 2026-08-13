@@ -6,6 +6,8 @@ from typing import Optional
 
 import yaml
 
+from core.qmd_bootstrap import bootstrap_qmd
+
 _WIKI_DIRS = [
     "wiki/global",
     "wiki/projects",
@@ -111,7 +113,13 @@ parameter to scope ephemeral/working memory.
 """
 
 
-def install(path: Path, home: Optional[Path] = None) -> None:
+def install(
+    path: Path,
+    home: Optional[Path] = None,
+    *,
+    with_qmd: bool = False,
+    qmd_package_manager: str = "auto",
+) -> None:
     """Scaffold a mnemos wiki repo at *path* and configure detected host adapters.
 
     Args:
@@ -119,6 +127,8 @@ def install(path: Path, home: Optional[Path] = None) -> None:
         home: The user's home directory.  Defaults to Path.home().
               Adapters are only run when their host is detected via
               ``adapter.is_present(home)``.
+        with_qmd: Install/prepare the optional QMD derived index.
+        qmd_package_manager: ``auto``, ``npm``, or ``bun`` when ``with_qmd`` is set.
     """
     from core.adapters import ClaudeCodeAdapter, CodexAdapter, CursorAdapter
 
@@ -167,6 +177,13 @@ def install(path: Path, home: Optional[Path] = None) -> None:
             messages = adapter.install(home)
             for msg in messages:
                 print(msg)
+
+    if with_qmd:
+        result = bootstrap_qmd(path, package_manager=qmd_package_manager)
+        print(
+            f"qmd: installed={result['installed']} prepared={result['prepared']} "
+            f"config={result['config_path']}"
+        )
 
 
 def migrate_policy_transient(repo_root: Path) -> bool:

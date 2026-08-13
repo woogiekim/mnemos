@@ -43,6 +43,13 @@ This clones the repository to `~/.mnemos`, installs the package via pipx, and
 scaffolds the wiki directory structure. `mnemos` is available in every new
 terminal with no activation step required.
 
+To install and prepare the optional QMD derived retrieval index in the same
+run, make the external package-manager step explicit:
+
+```bash
+curl -s https://raw.githubusercontent.com/woogiekim/mnemos/main/install.sh | bash -s -- --with-qmd
+```
+
 ### Option B — Local clone
 
 ```bash
@@ -53,7 +60,9 @@ cd mnemos
 
 `install.sh` handles everything: it installs pipx if needed, runs
 `pipx install -e .`, and scaffolds the wiki directory structure. No manual
-`pip install`, venv creation, or activation is needed.
+`pip install`, venv creation, or activation is needed. Add `--with-qmd` when
+you also want the optional QMD executable installed and the repo-local QMD
+config prepared.
 
 Once installed, the `mnemos` CLI is available:
 
@@ -297,6 +306,7 @@ mnemos/
 | Command | Description |
 |---|---|
 | `mnemos install [PATH]` | Scaffold a wiki repo structure at PATH (default: current directory) |
+| `mnemos install --with-qmd [PATH]` | Also install/prepare the optional model-free QMD derived index |
 | `mnemos capture` | Capture a new memory item into a target layer |
 | `mnemos classify` | Classify/tag a captured item |
 | `mnemos search` | Search across memory layers without changing memory state |
@@ -494,8 +504,10 @@ Install with vector extras:
 pip install -e ".[vector]"
 ```
 
-QMD remains an optional external executable and is never installed or allowed
-to download models implicitly by Mnemos. See the
+QMD remains an optional external executable. Mnemos installs and prepares it
+only when `mnemos install --with-qmd`, `mnemos update --with-qmd`, or
+`install.sh --with-qmd` is explicitly requested; model downloads are still never
+implicit. See the
 [QMD integration and recovery guide](docs/qmd-integration.md) for model-free
 setup, explicit Korean/Qwen3 readiness, queue diagnostics, and offline
 evaluation.

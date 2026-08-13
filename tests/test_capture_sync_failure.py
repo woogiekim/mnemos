@@ -271,9 +271,10 @@ def test_capture_text_reports_sync_pending_after_push_ref_race(
 
     assert result.exit_code == 0, result.output
     assert "captured: local-text-race" in result.stdout
-    assert "remote sync pending" in result.stderr
-    assert "mnemos sync pull && mnemos sync push" in result.stderr
-    assert "success" not in result.stderr.lower()
+    stderr_text = result.stderr if result.stderr_bytes is not None else result.output
+    assert "remote sync pending" in stderr_text
+    assert "mnemos sync pull && mnemos sync push" in stderr_text
+    assert "success" not in stderr_text.lower()
     assert (repo / "wiki" / "projects" / "local-text-race.md").exists()
 
 

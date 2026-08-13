@@ -160,6 +160,39 @@ def test_install_cli_command(tmp_path):
     assert (tmp_path / "mnemos.yml").exists()
 
 
+def test_install_cli_does_not_bootstrap_qmd_by_default(tmp_path, monkeypatch):
+    called = False
+
+    def fake_bootstrap(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("core.install.bootstrap_qmd", fake_bootstrap)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["install", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert called is False
+
+
+def test_install_cli_with_qmd_bootstraps_qmd(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_bootstrap(repo_root, *, package_manager):
+        calls.append((repo_root, package_manager))
+        return {"installed": True, "prepared": True, "config_path": str(tmp_path / "qmd.yml")}
+
+    monkeypatch.setattr("core.install.bootstrap_qmd", fake_bootstrap)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["install", "--with-qmd", "--qmd-package-manager", "npm", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(tmp_path.resolve(), "npm")]
+    assert "qmd: installed=True prepared=True" in result.output
+
+
 def test_install_cli_default_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()

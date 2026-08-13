@@ -599,6 +599,63 @@ class TestSyncSourceToInstall:
 
         assert exit_code == 0, "sync failure must not change update exit code"
 
+    def test_run_update_does_not_bootstrap_qmd_by_default(self, tmp_path, monkeypatch):
+        """QMD bootstrap must remain an explicit update choice."""
+        from core import updater as updater_module
+
+        called = False
+
+        def fake_bootstrap(*args, **kwargs):
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr(updater_module, "sync_source_to_install", lambda *args, **kwargs: [])
+        monkeypatch.setattr(updater_module, "pipx_reinstall", lambda: None)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+        monkeypatch.setattr("core.qmd_bootstrap.bootstrap_qmd", fake_bootstrap)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=True,
+            skip_pipx=True,
+            home=tmp_path / "home",
+        )
+
+        assert exit_code == 0
+        assert called is False
+
+    def test_run_update_with_qmd_bootstraps_after_policy_migration(self, tmp_path, monkeypatch):
+        """Explicit QMD update must install/prepare the derived index after repo config exists."""
+        from core import updater as updater_module
+
+        call_order: list[str] = []
+
+        def fake_migrate_policy_transient(repo_root):
+            call_order.append("policy")
+            return False
+
+        def fake_bootstrap(repo_root, *, package_manager):
+            call_order.append(f"qmd:{package_manager}:{repo_root}")
+            return {"installed": False, "prepared": True, "config_path": str(tmp_path / "qmd.yml")}
+
+        monkeypatch.setattr(updater_module, "sync_source_to_install", lambda *args, **kwargs: [])
+        monkeypatch.setattr(updater_module, "pipx_reinstall", lambda: None)
+        monkeypatch.setattr(updater_module, "_run_bg_check_quiet", lambda: None)
+        monkeypatch.setattr("core.install.migrate_policy_transient", fake_migrate_policy_transient)
+        monkeypatch.setattr("core.qmd_bootstrap.bootstrap_qmd", fake_bootstrap)
+
+        exit_code = updater_module.run_update(
+            repo_root=str(tmp_path),
+            skip_git_pull=True,
+            skip_pipx=True,
+            home=tmp_path / "home",
+            with_qmd=True,
+            qmd_package_manager="bun",
+        )
+
+        assert exit_code == 0
+        assert call_order == ["policy", f"qmd:bun:{tmp_path}"]
+
     def test_run_update_hands_off_to_refreshed_runtime_after_pull(
         self, tmp_path, monkeypatch
     ):
@@ -630,8 +687,8 @@ class TestSyncSourceToInstall:
             lambda: call_order.append("pipx"),
         )
 
-        def fake_handoff(repo_root: str) -> int:
-            call_order.append(f"handoff:{repo_root}")
+        def fake_handoff(repo_root: str, *, with_qmd: bool, qmd_package_manager: str) -> int:
+            call_order.append(f"handoff:{repo_root}:{with_qmd}:{qmd_package_manager}")
             return 23
 
         monkeypatch.setattr(
@@ -650,6 +707,8 @@ class TestSyncSourceToInstall:
             skip_git_pull=False,
             skip_pipx=False,
             home=tmp_path,
+            with_qmd=True,
+            qmd_package_manager="npm",
         )
 
         assert exit_code == 23
@@ -657,7 +716,7 @@ class TestSyncSourceToInstall:
             "pull",
             "sync",
             "pipx",
-            f"handoff:{tmp_path}",
+            f"handoff:{tmp_path}:True:npm",
         ]
 
     def test_run_update_does_not_handoff_when_pull_keeps_same_revision(
@@ -710,7 +769,11 @@ class TestSyncSourceToInstall:
         monkeypatch.setattr(updater_module.subprocess, "run", fake_run)
         monkeypatch.setenv("PYTHONPATH", "/existing/pythonpath")
 
-        exit_code = updater_module._run_updated_process(str(tmp_path))
+        exit_code = updater_module._run_updated_process(
+            str(tmp_path),
+            with_qmd=True,
+            qmd_package_manager="bun",
+        )
 
         assert exit_code == 19
         assert captured["cwd"] == str(tmp_path)
@@ -723,6 +786,9 @@ class TestSyncSourceToInstall:
             str(tmp_path),
             "--skip-git-pull",
             "--skip-pipx",
+            "--with-qmd",
+            "--qmd-package-manager",
+            "bun",
         ]
         env = captured["env"]
         assert isinstance(env, dict)
@@ -764,12 +830,21 @@ class TestUpdateCliCommand:
         # Monkey-patch run_update to use our tmp home
         original_run_update = updater_module.run_update
 
-        def patched_run_update(repo_root=None, skip_git_pull=False, skip_pipx=False, home=None):
+        def patched_run_update(
+            repo_root=None,
+            skip_git_pull=False,
+            skip_pipx=False,
+            home=None,
+            with_qmd=False,
+            qmd_package_manager="auto",
+        ):
             return original_run_update(
                 repo_root=repo_root,
                 skip_git_pull=skip_git_pull,
                 skip_pipx=skip_pipx,
                 home=tmp_path / "home",
+                with_qmd=with_qmd,
+                qmd_package_manager=qmd_package_manager,
             )
 
         updater_module.run_update = patched_run_update

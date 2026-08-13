@@ -1,9 +1,49 @@
 #!/usr/bin/env bash
 # install.sh — one-touch mnemos installer (pipx edition)
-# Usage (local):  ./install.sh
-# Usage (remote): curl -s https://raw.githubusercontent.com/woogiekim/mnemos/main/install.sh | bash
+# Usage (local):  ./install.sh [--with-qmd] [--qmd-package-manager auto|npm|bun]
+# Usage (remote): curl -s https://raw.githubusercontent.com/woogiekim/mnemos/main/install.sh | bash -s -- [--with-qmd]
 # No manual venv activation required — pipx handles PATH registration automatically.
 set -euo pipefail
+
+WITH_QMD="${MNEMOS_INSTALL_QMD:-0}"
+QMD_PACKAGE_MANAGER="${MNEMOS_QMD_PACKAGE_MANAGER:-auto}"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --with-qmd)
+            WITH_QMD=1
+            shift
+            ;;
+        --qmd-package-manager)
+            if [ "$#" -lt 2 ]; then
+                echo "error: --qmd-package-manager requires auto, npm, or bun" >&2
+                exit 1
+            fi
+            QMD_PACKAGE_MANAGER="$2"
+            shift 2
+            ;;
+        --qmd-package-manager=*)
+            QMD_PACKAGE_MANAGER="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: ./install.sh [--with-qmd] [--qmd-package-manager auto|npm|bun]"
+            exit 0
+            ;;
+        *)
+            echo "error: unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+case "$QMD_PACKAGE_MANAGER" in
+    auto|npm|bun) ;;
+    *)
+        echo "error: --qmd-package-manager must be auto, npm, or bun" >&2
+        exit 1
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 1. Find a suitable Python interpreter (>= 3.11)
@@ -93,7 +133,11 @@ fi
 # 5. Scaffold the wiki repo structure
 # ---------------------------------------------------------------------------
 echo "Scaffolding mnemos wiki structure at $REPO_ROOT ..."
-mnemos install "$REPO_ROOT"
+if [ "$WITH_QMD" = "1" ] || [ "$WITH_QMD" = "true" ]; then
+    mnemos install --with-qmd --qmd-package-manager "$QMD_PACKAGE_MANAGER" "$REPO_ROOT"
+else
+    mnemos install "$REPO_ROOT"
+fi
 
 # ---------------------------------------------------------------------------
 # 5b. Export MNEMOS_REPO_ROOT to ~/.zshrc (idempotent)

@@ -5,8 +5,9 @@ owner, and recall filter. QMD is an optional local derived index behind the
 existing FTS -> vector -> grep retrieval pipeline. A QMD failure cannot roll
 back a canonical memory mutation.
 
-QMD is not installed by Mnemos. Its current upstream requirements, commands,
-config schema, and model behavior are documented in the
+QMD is not installed by default. Mnemos can install and prepare it only when the
+operator explicitly requests `--with-qmd`; its current upstream requirements,
+commands, config schema, and model behavior are documented in the
 [official QMD README](https://github.com/tobi/qmd/blob/main/README.md). In
 particular, current QMD requires Node.js 22+ or Bun, and model-backed commands
 can download GGUF files from Hugging Face on first use.
@@ -14,7 +15,19 @@ can download GGUF files from Hugging Face on first use.
 ## Default: model-free QMD search
 
 Install QMD only after explicitly approving the network and global-package
-changes. Mnemos itself does not run either command:
+changes. Mnemos can run the model-free bootstrap for you:
+
+```bash
+mnemos install --with-qmd .
+# or, after an existing install:
+mnemos update --with-qmd
+```
+
+The bootstrap installs `@tobilu/qmd` with `npm` or `bun` when `qmd` is missing,
+enables `retrieval.qmd` in `mnemos.yml`, and runs `mnemos qmd-prepare --json`.
+It does not embed models.
+
+Manual installation is still supported:
 
 ```bash
 npm install -g @tobilu/qmd
@@ -37,9 +50,9 @@ retrieval:
     model_ready: false
 ```
 
-`mode: search` is QMD's BM25-only mode and is the Mnemos default because it
-does not require model work. Prepare the repo-local QMD config without invoking
-QMD:
+`mode: search` is QMD's BM25-only mode and is the Mnemos bootstrap default
+because it does not require model work. Prepare the repo-local QMD config
+without invoking QMD:
 
 ```bash
 mnemos qmd-prepare --json

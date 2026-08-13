@@ -1485,10 +1485,23 @@ def doctor_cmd() -> None:
 
 @cli.command("install")
 @click.argument("path", default=".", type=click.Path())
-def install_cmd(path: str) -> None:
+@click.option(
+    "--with-qmd",
+    is_flag=True,
+    default=False,
+    help="Install and prepare the optional QMD derived retrieval index.",
+)
+@click.option(
+    "--qmd-package-manager",
+    type=click.Choice(["auto", "npm", "bun"]),
+    default="auto",
+    show_default=True,
+    help="Package manager used by --with-qmd.",
+)
+def install_cmd(path: str, with_qmd: bool, qmd_package_manager: str) -> None:
     """Scaffold a mnemos wiki repo structure at PATH (default: current directory)."""
     from core.install import install
-    install(Path(path))
+    install(Path(path), with_qmd=with_qmd, qmd_package_manager=qmd_package_manager)
     click.echo(f"mnemos installed at {path}")
 
 
@@ -1580,7 +1593,26 @@ def version_cmd(as_json: bool) -> None:
     default=False,
     help="Skip 'pipx reinstall mnemos'.",
 )
-def update_cmd(repo_root: str | None, skip_git_pull: bool, skip_pipx: bool) -> None:
+@click.option(
+    "--with-qmd",
+    is_flag=True,
+    default=False,
+    help="Install and prepare the optional QMD derived retrieval index.",
+)
+@click.option(
+    "--qmd-package-manager",
+    type=click.Choice(["auto", "npm", "bun"]),
+    default="auto",
+    show_default=True,
+    help="Package manager used by --with-qmd.",
+)
+def update_cmd(
+    repo_root: str | None,
+    skip_git_pull: bool,
+    skip_pipx: bool,
+    with_qmd: bool,
+    qmd_package_manager: str,
+) -> None:
     """Self-update mnemos: pull latest source, reinstall, and refresh managed config blocks.
 
     \b
@@ -1606,6 +1638,8 @@ def update_cmd(repo_root: str | None, skip_git_pull: bool, skip_pipx: bool) -> N
         repo_root=repo_root,
         skip_git_pull=skip_git_pull,
         skip_pipx=skip_pipx,
+        with_qmd=with_qmd,
+        qmd_package_manager=qmd_package_manager,
     )
     sys.exit(exit_code)
 
