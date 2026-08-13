@@ -10,6 +10,9 @@ import pytest
 import yaml
 
 
+_FAKE_QMD_COMPLETION_TIMEOUT_SECONDS = 5.0
+
+
 def _write_fake_qmd(path: Path) -> Path:
     script = """#!/usr/bin/env python3
 import json
@@ -462,8 +465,16 @@ def test_failure_case_qmd_index_update_normalizes_process_failures(
     ("environment", "timeout_seconds", "expected_status"),
     [
         ({"FAKE_QMD_SLEEP": "1.0"}, 0.05, "timeout"),
-        ({"FAKE_QMD_OUTPUT": "not-json"}, 1.0, "invalid_output"),
-        ({"FAKE_QMD_EXIT": "3"}, 1.0, "error"),
+        (
+            {"FAKE_QMD_OUTPUT": "not-json"},
+            _FAKE_QMD_COMPLETION_TIMEOUT_SECONDS,
+            "invalid_output",
+        ),
+        (
+            {"FAKE_QMD_EXIT": "3"},
+            _FAKE_QMD_COMPLETION_TIMEOUT_SECONDS,
+            "error",
+        ),
     ],
 )
 def test_failure_case_qmd_process_failures_are_bounded_and_content_free(
@@ -857,7 +868,7 @@ def test_success_case_qmd_index_update_is_bounded_and_embedding_is_explicit(
         enabled=True,
         executable=str(executable),
         index_name="mnemos-test",
-        update_timeout_seconds=1.0,
+        update_timeout_seconds=_FAKE_QMD_COMPLETION_TIMEOUT_SECONDS,
         embed_on_update=True,
         embed_model="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/model.gguf",
         model_ready=True,
@@ -891,7 +902,11 @@ def test_failure_case_qmd_index_update_reports_content_free_failure(
     # given
     executable = _write_fake_qmd(tmp_path / "fake-qmd")
     monkeypatch.setenv("FAKE_QMD_EXIT", "9")
-    config = QmdConfig(enabled=True, executable=str(executable), update_timeout_seconds=1.0)
+    config = QmdConfig(
+        enabled=True,
+        executable=str(executable),
+        update_timeout_seconds=_FAKE_QMD_COMPLETION_TIMEOUT_SECONDS,
+    )
     sut = QmdAdapter(repo_root=tmp_path, store=_FileStore({}), config=config)
 
     # when
