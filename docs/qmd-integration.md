@@ -68,6 +68,10 @@ The generated config and index cache are isolated under:
 Mnemos owns those directory boundaries; the filenames QMD creates inside its
 cache remain an upstream implementation detail.
 
+The generated QMD collection excludes `**/domain-*.md` by default. Those files
+are generated domain-distillation summaries and can explode into very large
+embedding batches; canonical search can still reach them through FTS/grep.
+
 Canonical capture, update, classification, promotion, demotion, archive, and
 deletion enqueue content-free jobs under `.agent/state/qmd-refresh/`. A
 detached one-shot worker coalesces each claimed batch into one `qmd update`.
@@ -103,19 +107,23 @@ qmd --index mnemos embed
 ```
 
 Those QMD commands may download models. Set `model_ready: true` only after they
-complete. `mode: vsearch` then enables semantic retrieval. `mode: query` also
-uses query expansion and reranking; pre-run an explicit `qmd query` under the
-same environment before attesting readiness because it can require additional
-models. Set `embed_on_update: true` only when automatic background embedding
-after each coalesced index refresh is desired.
+complete. `mode: vsearch` then enables semantic retrieval. Mnemos invokes this
+as a typed `qmd query` vector query with `--no-rerank` so recall does not
+implicitly download QMD's generation or reranking models. `mode: query` uses
+QMD's full query expansion and reranking path; pre-run an explicit `qmd query`
+under the same environment before attesting readiness because it can require
+additional models. Set `embed_on_update: true` only when automatic background
+embedding after each coalesced index refresh is desired.
 
 Mnemos currently invokes QMD through its CLI adapter. The UserPrompt hook does
 not wait for that process: it returns a fresh context cache when available and
 starts the next context prefetch in a detached background process. A slow first
 model load can therefore delay cache freshness for a later prompt, but it does
-not extend the foreground hook. QMD also documents a shared HTTP MCP transport
-that keeps models loaded across requests; that transport is not used or
-installed by this integration.
+not extend the foreground hook. If a `qmd embed` process is already active for
+the same index, model-backed recall reports `busy` and uses canonical
+FTS/grep fallbacks instead of waiting on a competing QMD model process. QMD
+also documents a shared HTTP MCP transport that keeps models loaded across
+requests; that transport is not used or installed by this integration.
 
 Environment overrides are available for automation:
 
@@ -140,7 +148,7 @@ mnemos qmd-index-worker --status --json
 ```
 
 The response reports `pending`, `processing`, `failed`, `done`, oldest pending
-age, and worker state. Search diagnostics report `missing`, `timeout`,
+age, and worker state. Search diagnostics report `missing`, `busy`, `timeout`,
 `invalid_output`, `model_not_ready`, or `stale` while retaining canonical
 fallback results. Diagnostics contain counts and error classes/codes, not full
 memory content or queries.

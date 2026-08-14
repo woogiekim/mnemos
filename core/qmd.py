@@ -14,6 +14,74 @@ from core.config import QmdConfig, _qmd_index_name
 
 
 _SEARCH_COMMANDS = {"query", "vsearch", "search"}
+_MODEL_BACKED_SEARCH_COMMANDS = {"query", "vsearch"}
+_DEFAULT_COLLECTION_IGNORE = ("**/domain-*.md",)
+
+
+def _typed_vector_query(query: str) -> str:
+    """Build a single typed QMD vector query without invoking expansion."""
+    one_line = " ".join(line.strip() for line in query.splitlines()).strip()
+
+    return f"vec: {one_line}"
+
+
+def _qmd_embed_is_active(index_name: str, config_dir: Path) -> bool:
+    """Return True when a foreground QMD search would compete with embedding."""
+    try:
+        completed = subprocess.run(
+            ["ps", "-eo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    if completed.returncode != 0:
+        return False
+
+    candidate_pids: list[str] = []
+    for line in completed.stdout.splitlines():
+        command_text = f" {line} "
+        if not ("/qmd " in command_text or " qmd " in command_text or "qmd.js " in command_text):
+            continue
+        if _qmd_embed_command_matches(line, index_name):
+            pid = line.strip().split(maxsplit=1)[0]
+            if pid.isdigit():
+                candidate_pids.append(pid)
+
+    return any(_qmd_process_uses_config_dir(pid, config_dir) for pid in candidate_pids)
+
+
+def _qmd_embed_command_matches(command: str, index_name: str) -> bool:
+    needle = f"--index {index_name} embed"
+    alternate = f"--index={index_name} embed"
+
+    return needle in command or alternate in command
+
+
+def _qmd_process_uses_config_dir(pid: str, config_dir: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["ps", "eww", "-p", pid, "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    if completed.returncode != 0:
+        return False
+
+    config_marker = f"QMD_CONFIG_DIR={config_dir}"
+    for line in completed.stdout.splitlines():
+        if config_marker in line:
+            return True
+
+    return False
 
 
 class QmdCommandError(RuntimeError):
@@ -60,6 +128,7 @@ class QmdAdapter:
             resolved_collections[name] = {
                 "path": str(path),
                 "pattern": "**/*.md",
+                "ignore": list(_DEFAULT_COLLECTION_IGNORE),
                 "includeByDefault": True,
             }
 
@@ -96,6 +165,18 @@ class QmdAdapter:
                 result_count=0,
             )
             return []
+        if (
+            self._config.mode in _MODEL_BACKED_SEARCH_COMMANDS
+            and _qmd_embed_is_active(self._index_name, self._config_dir)
+        ):
+            self._last_diagnostics = self._diagnostics_payload(
+                status="busy",
+                available=True,
+                degraded=True,
+                reason="qmd embedding is active",
+                result_count=0,
+            )
+            return []
         if not self._index_config_path.is_file():
             self._last_diagnostics = self._diagnostics_payload(
                 status="not_configured",
@@ -118,17 +199,24 @@ class QmdAdapter:
             return []
 
         command = self._config.mode if self._config.mode in _SEARCH_COMMANDS else "search"
+        qmd_query = query
+        extra_args: list[str] = []
+        if command == "vsearch":
+            command = "query"
+            qmd_query = _typed_vector_query(query)
+            extra_args.append("--no-rerank")
         argv = [
             executable,
             "--index",
             self._index_name,
             command,
+            *extra_args,
             "--format",
             "json",
             "--full-path",
             "-n",
             str(max(1, int(limit))),
-            query,
+            qmd_query,
         ]
         try:
             completed = subprocess.run(

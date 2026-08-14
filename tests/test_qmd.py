@@ -97,7 +97,7 @@ def test_success_case_qmd_search_uses_argv_json_and_maps_stable_memory_id(
         executable=str(executable),
         index_name="mnemos-test",
         mode="query",
-        timeout_seconds=3.0,
+        timeout_seconds=_FAKE_QMD_COMPLETION_TIMEOUT_SECONDS,
         model_ready=True,
     )
     store = _FileStore({
@@ -148,6 +148,106 @@ def test_success_case_qmd_search_uses_argv_json_and_maps_stable_memory_id(
     assert sut.diagnostics()["status"] == "available"
 
 
+def test_success_case_qmd_vsearch_uses_typed_vec_query_without_expansion_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QMD vsearch expands queries via a generation model; Mnemos must not."""
+    from core.config import QmdConfig
+    from core.qmd import QmdAdapter
+
+    # given
+    executable = _write_fake_qmd(tmp_path / "fake-qmd")
+    argv_log = tmp_path / "argv.json"
+    memory_path = tmp_path / "vault" / "project" / "semantic.md"
+    memory_path.parent.mkdir(parents=True)
+    memory_path.write_text("canonical", encoding="utf-8")
+    monkeypatch.setenv("FAKE_QMD_ARGV_LOG", str(argv_log))
+    monkeypatch.setenv(
+        "FAKE_QMD_OUTPUT",
+        json.dumps([{"file": str(memory_path), "score": 0.88}]),
+    )
+    monkeypatch.setattr(
+        "core.qmd._qmd_embed_is_active",
+        lambda _index_name, _config_dir: False,
+    )
+    config = QmdConfig(
+        enabled=True,
+        executable=str(executable),
+        index_name="mnemos-test",
+        mode="vsearch",
+        timeout_seconds=3.0,
+        model_ready=True,
+    )
+    store = _FileStore({
+        memory_path: {
+            "id": "semantic-memory-id",
+            "content": "canonical content",
+            "layer": "project",
+            "_path": str(memory_path),
+        }
+    })
+    sut = QmdAdapter(repo_root=tmp_path, store=store, config=config)
+    sut.prepare_index_config({"mnemos-project": memory_path.parent})
+
+    # when
+    results = sut.search("첫 줄\n둘째 줄", limit=3)
+
+    # then
+    assert results[0]["item_id"] == "semantic-memory-id"
+    argv = json.loads(argv_log.read_text(encoding="utf-8"))["argv"]
+    assert argv == [
+        "--index",
+        "mnemos-test",
+        "query",
+        "--no-rerank",
+        "--format",
+        "json",
+        "--full-path",
+        "-n",
+        "3",
+        "vec: 첫 줄 둘째 줄",
+    ]
+
+
+def test_boundary_case_model_backed_qmd_search_skips_while_embedding_is_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Foreground recall must not wait on QMD while an embedding job is active."""
+    from core.config import QmdConfig
+    from core.qmd import QmdAdapter
+
+    # given
+    executable = _write_fake_qmd(tmp_path / "fake-qmd")
+    calls_log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_QMD_CALLS_LOG", str(calls_log))
+    monkeypatch.setattr(
+        "core.qmd._qmd_embed_is_active",
+        lambda _index_name, _config_dir: True,
+    )
+    config = QmdConfig(
+        enabled=True,
+        executable=str(executable),
+        index_name="mnemos-test",
+        mode="vsearch",
+        model_ready=True,
+    )
+    sut = QmdAdapter(repo_root=tmp_path, store=_FileStore({}), config=config)
+    sut.prepare_index_config({"mnemos-project": tmp_path / "vault"})
+
+    # when
+    results = sut.search("semantic recall", limit=3)
+
+    # then
+    assert results == []
+    assert not calls_log.exists()
+    diagnostics = sut.diagnostics()
+    assert diagnostics["status"] == "busy"
+    assert diagnostics["degraded"] is True
+    assert diagnostics["reason"] == "qmd embedding is active"
+
+
 def test_success_case_qmd_bm25_scores_are_monotonic_and_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -193,6 +293,28 @@ def test_success_case_qmd_bm25_scores_are_monotonic_and_bounded(
     assert results[0]["semantic_score"] == pytest.approx(25.0 / 26.0)
     assert results[1]["semantic_score"] == pytest.approx(5.0 / 6.0)
     assert results[0]["semantic_score"] > results[1]["semantic_score"]
+
+
+def test_success_case_qmd_index_config_ignores_generated_domain_distillations(
+    tmp_path: Path,
+) -> None:
+    """Generated domain summaries are too large/noisy for semantic bootstrap."""
+    from core.config import QmdConfig
+    from core.qmd import QmdAdapter
+
+    # given
+    sut = QmdAdapter(
+        repo_root=tmp_path,
+        store=_FileStore({}),
+        config=QmdConfig(enabled=True),
+    )
+
+    # when
+    config_path = sut.prepare_index_config({"mnemos-project": tmp_path / "vault"})
+
+    # then
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert payload["collections"]["mnemos-project"]["ignore"] == ["**/domain-*.md"]
 
 
 def test_failure_case_qmd_missing_binary_returns_explicit_degraded_diagnostics(
@@ -752,6 +874,10 @@ def test_success_case_qmd_search_is_read_only_and_respects_layer_filter(
     monkeypatch.setenv(
         "FAKE_QMD_OUTPUT",
         json.dumps([{"docid": "#semantic", "score": 0.96, "file": str(memory_path)}]),
+    )
+    monkeypatch.setattr(
+        "core.qmd._qmd_embed_is_active",
+        lambda _index_name, _config_dir: False,
     )
     config = QmdConfig(
         enabled=True,
