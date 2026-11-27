@@ -304,3 +304,12 @@ def expand_query(
     if raw_stripped and raw_stripped != preprocessed and raw_stripped not in variants:
         variants.append(raw_stripped)
     return variants
+
+
+def recall_candidate_query(question: str) -> str:
+    """Build a bounded disjunction of Korean keywords for Recall candidate discovery."""
+    words = re.findall(r"[가-힣]{2,}", question)
+    common = {"어떻게", "무엇", "같은", "다른", "경우", "어떤", "확인", "검증"}
+    terms = dict.fromkeys(strip_particles(word) for word in words)
+    keywords = [term for term in terms if len(term) >= 2 and term not in common][:12]
+    return " OR ".join(keywords) if len(keywords) >= 2 else ""

@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import os
+import sqlite3
 import time
 import unicodedata
 import uuid
@@ -13,13 +14,14 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from core.contracts import RecallMemory, RecallReport
+from core.contracts import RecallMemory, RecallReport, project_evidence_tags
 from core.policy import PolicyEngine, PolicyViolationError
 from core.store import MemoryStore, StorageBackend
 from core.log import AuditLogger
 from core.hooks import HookDispatcher
 from core.events import EventBus
 from core.fts import FTSIndex
+from core.korean import recall_candidate_query
 from core.observability import ObservabilityLogger
 from core.search import SearchMiddleware
 from core.config import get_backend_config, get_qmd_config
@@ -203,6 +205,32 @@ def _recall_score_without_legacy_history(result: dict[str, Any]) -> float:
     return max(0.0, score - (legacy_historical * 0.1))
 
 
+def _recall_usage_components(usage: dict[str, Any], usage_score: float, item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "historical": usage_score,
+        "validated_usage": usage_score,
+        "applied_count": int(usage.get("applied_count") or 0),
+        "validated_use_count": int(usage.get("validated_use_count") or 0),
+        "distinct_validated_task_count": int(usage.get("distinct_validated_task_count") or 0),
+        "retrieval_count": int(usage.get("retrieval_count") or 0),
+        "selected_count": int(usage.get("selected_count") or 0),
+        "legacy_access_count": int(usage.get("legacy_access_count") or item.get("access_count") or 0),
+    }
+
+
+def _reused_source_binding(question: str, item: dict[str, Any], usage: dict[str, Any]) -> str | None:
+    bindings = usage.get("reviewed_source_bindings")
+    if not isinstance(bindings, list) or not bindings or item.get("sourceType") != "project_context_section" or item.get("layer") != "project":
+        return None
+    values = [question, item.get("id")]
+    values.extend(item.get(key) for key in ("project_id", "project_root_hash", "source_path", "source_section", "source_content_hash"))
+    values.extend(project_evidence_tags(_as_tuple(item.get("tags"))))
+    if not all(isinstance(value, str) and value and "\0" not in value for value in values):
+        return None
+    digest = hashlib.sha256("\0".join(values).encode("utf-8")).hexdigest()
+    return digest if digest in bindings else None
+
+
 def _as_tuple(values: Any) -> tuple[str, ...]:
     if values is None:
         return ()
@@ -255,6 +283,7 @@ def _recall_memory(
         source_revision=item.get("source_revision"),
         source_path=item.get("source_path"),
         source_section=item.get("source_section"),
+        source_content_hash=item.get("source_content_hash"),
         provenance=dict(item.get("provenance") or {}),
         record_type=item.get("record_type") or item.get("sourceType"),
         score_components=dict(item.get("score_components") or {}),
@@ -810,8 +839,10 @@ class MemoryGateway:
         session_id: str | None = None,
         extra_metadata: dict[str, Any] | None = None,
         no_classify: bool = False,
+        *,
+        skip_dedup: bool = False,
     ) -> str | None:
-        """Capture a new memory item into the target layer."""
+        """Capture a new memory item, optionally bypassing content deduplication."""
         return self._capture(
             content=content,
             layer=layer,
@@ -825,7 +856,7 @@ class MemoryGateway:
             completed_phases=set(),
             on_capture_phase=None,
             on_store_attempt=None,
-            skip_dedup=False,
+            skip_dedup=skip_dedup,
         )
 
     def _capture(
@@ -1312,6 +1343,7 @@ class MemoryGateway:
         tags_any: list[str] | None = None,
         project_id: str | None = None,
         project_root_hash: str | None = None,
+        project_context_scope: tuple[str, str] | None = None,
         semantic_statuses: list[str] | None = None,
         task_shape: str | None = None,
         agent_role: str | None = None,
@@ -1349,6 +1381,16 @@ class MemoryGateway:
         usage_projection = FeedbackStore(self._root).read_projection()
         by_id: dict[str, dict[str, Any]] = {}
         diagnostics: list[dict[str, Any]] = []
+
+        def eligible(item: dict[str, Any], usage: dict[str, Any]) -> bool:
+            return not (
+                item.get("superseded_by") or item.get("semantic_status") == "invalidated" or is_recall_suppressed(usage)
+            ) and self._matches_recall_filters(
+                item, layers=layers, tags_all=tags_all, tags_any=tags_any,
+                project_id=project_id, project_root_hash=project_root_hash, project_context_scope=project_context_scope,
+                semantic_statuses=semantic_statuses, task_shape=task_shape, agent_role=agent_role, active_files=active_files,
+            )
+
         for query in normalized_queries:
             results = self.search_for_context(
                 query=query,
@@ -1369,38 +1411,22 @@ class MemoryGateway:
                 result_metadata = result.get("metadata") or {}
                 if result_metadata.get("score_components"):
                     item["score_components"] = dict(result_metadata.get("score_components") or {})
-                if not self._matches_recall_filters(
-                    item,
-                    layers=layers,
-                    tags_all=tags_all,
-                    tags_any=tags_any,
-                    project_id=project_id,
-                    project_root_hash=project_root_hash,
-                    semantic_statuses=semantic_statuses,
-                    task_shape=task_shape,
-                    agent_role=agent_role,
-                    active_files=active_files,
-                ):
-                    continue
                 usage = usage_projection.get(item_id, {})
-                if item.get("superseded_by") or item.get("semantic_status") == "invalidated" or is_recall_suppressed(usage):
+                if not eligible(item, usage):
                     continue
 
                 result_metadata = result.get("metadata") or {}
                 result_components = dict(result_metadata.get("score_components") or {})
+                result_components.pop("reviewed_source_binding", None)
                 usage_score = validated_usage_score(usage)
                 score = min(1.0, _recall_score_without_legacy_history(result) + (usage_score * 0.1))
                 item["score_components"] = {
                     **result_components,
-                    "historical": usage_score,
-                    "validated_usage": usage_score,
-                    "applied_count": int(usage.get("applied_count") or 0),
-                    "validated_use_count": int(usage.get("validated_use_count") or 0),
-                    "distinct_validated_task_count": int(usage.get("distinct_validated_task_count") or 0),
-                    "retrieval_count": int(usage.get("retrieval_count") or 0),
-                    "selected_count": int(usage.get("selected_count") or 0),
-                    "legacy_access_count": int(usage.get("legacy_access_count") or item.get("access_count") or 0),
+                    **_recall_usage_components(usage, usage_score, item),
                 }
+                binding = _reused_source_binding(normalized_queries[0], item, usage)
+                if binding:
+                    item["score_components"]["reviewed_source_binding"] = binding
                 existing = by_id.get(item_id)
                 if existing is None:
                     by_id[item_id] = {
@@ -1433,15 +1459,59 @@ class MemoryGateway:
             max_selected_chars=max_selected_chars,
         )
 
+        expanded: list[tuple[float, float, RecallMemory]] = []
+        remaining_slots = candidate_limit - len(candidates)
+        scope = project_context_scope or ((project_id, project_root_hash) if project_id and project_root_hash else None)
+        if remaining_slots > 0 and scope and (layers is None or "project" in layers):
+            keywords = recall_candidate_query(normalized_queries[0])
+            if keywords:
+                try:
+                    keyword_results = self._fts.search(keywords, limit=max(fetch_limit, 32), project_scope=scope)
+                except sqlite3.Error:
+                    diagnostics.append({"partial_failure": True, "degraded_reasons": ["korean_candidate_index_unavailable"]})
+                    keyword_results = []
+                for result in keyword_results:
+                    item_id = result["item_id"]
+                    if item_id in by_id:
+                        continue
+                    try:
+                        item = dict(self.peek(item_id))
+                    except Exception:
+                        continue
+                    usage = usage_projection.get(item_id, {})
+                    if (
+                        (item.get("project_id"), item.get("project_root_hash")) != scope
+                        or item.get("layer") != "project"
+                        or item.get("sourceType") != "project_context_section"
+                        or not item.get("source_path") or not item.get("source_section")
+                        or item.get("semantic_status") != "active"
+                        or not eligible(item, usage)
+                    ):
+                        continue
+                    # SQLite orders BM25 from the most negative (best) value upward.
+                    strength = max(0.0, -_recall_score(result))
+                    usage_score = validated_usage_score(usage, include_applied=False)
+                    item["score_components"] = _recall_usage_components(usage, usage_score, item)
+                    binding = _reused_source_binding(normalized_queries[0], item, usage)
+                    if binding:
+                        item["score_components"]["reviewed_source_binding"] = binding
+                    candidate = _recall_memory(
+                        item, score=strength / (1 + strength),
+                        matched_queries=(keywords,), source="fts",
+                    )
+                    expanded.append((strength, usage_score, candidate))
+                expanded.sort(key=lambda entry: (-entry[0], -entry[1]))
+        expanded_candidates = [candidate for _, _, candidate in expanded[:remaining_slots]]
+
         return RecallReport(
             queries=normalized_queries,
-            candidates=tuple(candidates),
+            candidates=tuple(candidates + expanded_candidates),
             selected=tuple(selected),
             candidate_limit=candidate_limit,
             selected_limit=selected_limit,
             max_selected_chars=max_selected_chars,
             used_chars=used_chars,
-            diagnostics={"attempts": diagnostics},
+            diagnostics={"attempts": diagnostics, "korean_candidate_count": len(expanded_candidates)},
         )
 
     def evaluate_feedback_promotion(self, memory_id: str) -> bool:
@@ -1506,7 +1576,10 @@ class MemoryGateway:
         task_shape: str | None,
         agent_role: str | None,
         active_files: list[str] | None,
+        project_context_scope: tuple[str, str] | None = None,
     ) -> bool:
+        if item.get("stage") == "archived":
+            return False
         if layers is not None and item.get("layer") not in layers:
             return False
 
@@ -1516,15 +1589,33 @@ class MemoryGateway:
         if tags_any and not any(tag in item_tags for tag in tags_any):
             return False
 
-        if project_id is not None and item.get("project_id") != project_id:
-            return False
-        if project_root_hash is not None and item.get("project_root_hash") != project_root_hash:
-            return False
+        source_section = (
+            item.get("layer") == "project"
+            and item.get("sourceType") == "project_context_section"
+            and bool(item.get("source_path") and item.get("source_section"))
+        )
+        item_scope = (item.get("project_id"), item.get("project_root_hash"))
+        source_scope_matches = source_section and item_scope == project_context_scope
+        if not source_scope_matches:
+            if project_context_scope is not None and project_id is None and project_root_hash is None:
+                return False
+            if project_id is not None and item_scope[0] != project_id:
+                return False
+            if project_root_hash is not None and item_scope[1] != project_root_hash:
+                return False
+
+        shared_section = source_scope_matches or (
+            source_section and bool(project_id and project_root_hash) and item_scope == (project_id, project_root_hash)
+        )
         if semantic_statuses is not None and item.get("semantic_status") not in semantic_statuses:
             return False
-        if task_shape is not None and item.get("task_shape") != task_shape:
+        if task_shape is not None and item.get("task_shape") != task_shape and not (
+            shared_section and item.get("task_shape") is None
+        ):
             return False
-        if agent_role is not None and item.get("agent_role") != agent_role:
+        if agent_role is not None and item.get("agent_role") != agent_role and not (
+            shared_section and item.get("agent_role") is None
+        ):
             return False
 
         stored_active_files = {str(path) for path in item.get("active_files") or []}
@@ -1587,7 +1678,7 @@ class MemoryGateway:
         self._fts.index_item(
             item_id=item_id,
             content=content,
-            metadata={"layer": item.get("layer", "")},
+            metadata={"layer": item.get("layer", ""), "tags": item.get("tags", [])},
         )
         self._logger.append("update", item_id, item.get("layer", "unknown"))
         self._enqueue_qmd_refresh("update")
@@ -1615,6 +1706,9 @@ class MemoryGateway:
                     f"Layer '{current_layer}' has no higher layer to promote to."
                 )
 
+        if (current_layer == "project" and target_layer == "global"
+                and item.get("sourceType") == "project_context_section"):
+            raise PolicyViolationError("A project-context section must remain in its project scope.")
         if not force:
             self._policy.validate_promote(item=item, target_layer=target_layer)
         # when force=True: skip validate_promote entirely (age/policy bypassed)
@@ -1708,7 +1802,7 @@ class MemoryGateway:
         self._fts.index_item(
             item_id=item_id,
             content=content,
-            metadata={"layer": target_layer},
+            metadata={"layer": target_layer, "tags": item.get("tags", [])},
         )
 
         self._logger.append(

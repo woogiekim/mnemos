@@ -221,6 +221,15 @@ def _normalize_recall_request(request: dict) -> dict[str, object]:
         raise ValueError("queries must contain at least one non-empty text")
 
     scope = request.get("scope") if isinstance(request.get("scope"), dict) else {}
+    project_context_scope = None
+    if "project_context" in scope:
+        source_scope = scope["project_context"]
+        source_id = source_scope.get("project_id") if isinstance(source_scope, dict) else None
+        source_hash = source_scope.get("project_root_hash") if isinstance(source_scope, dict) else None
+        if not (isinstance(source_id, str) and source_id.strip()
+                and isinstance(source_hash, str) and source_hash.strip()):
+            raise ValueError("scope.project_context requires project_id and project_root_hash")
+        project_context_scope = (source_id, source_hash)
     filters = request.get("filters") if isinstance(request.get("filters"), dict) else {}
     budget = request.get("budget") if isinstance(request.get("budget"), dict) else {}
 
@@ -232,6 +241,7 @@ def _normalize_recall_request(request: dict) -> dict[str, object]:
         "tags_any": _empty_list_as_none(filters.get("tags_any")),
         "project_id": scope.get("project_id"),
         "project_root_hash": scope.get("project_root_hash"),
+        "project_context_scope": project_context_scope,
         "semantic_statuses": _empty_list_as_none(filters.get("semantic_statuses")),
         "task_shape": scope.get("task_shape"),
         "agent_role": scope.get("agent_role"),
@@ -1005,6 +1015,7 @@ def recall_cmd(as_json: bool, request_file: str) -> None:
             tags_any=normalized["tags_any"],  # type: ignore[arg-type]
             project_id=normalized["project_id"] if isinstance(normalized["project_id"], str) else None,
             project_root_hash=normalized["project_root_hash"] if isinstance(normalized["project_root_hash"], str) else None,
+            project_context_scope=normalized["project_context_scope"],
             semantic_statuses=normalized["semantic_statuses"],  # type: ignore[arg-type]
             task_shape=normalized["task_shape"] if isinstance(normalized["task_shape"], str) else None,
             agent_role=normalized["agent_role"] if isinstance(normalized["agent_role"], str) else None,
@@ -1043,7 +1054,7 @@ def feedback_cmd(as_json: bool, request_file: str) -> None:
     if not as_json:
         raise click.UsageError("mnemos feedback currently requires --json.")
 
-    from core.feedback import FeedbackStore, FeedbackValidationError, normalize_feedback_request
+    from core.feedback import FeedbackStore, FeedbackValidationError, InactiveMemoryFeedbackError, normalize_feedback_request
     from core.provider import feedback_error_payload, feedback_response_payload, provider_error_from_exception
 
     started = time.perf_counter()
@@ -1092,6 +1103,7 @@ def feedback_cmd(as_json: bool, request_file: str) -> None:
         result = store.record(
             request,
             legacy_access_count=int(item.get("access_count") or 0),
+            current_item=item,
         )
         if normalized["event"] in {"applied", "validated"}:
             promoted = gw.evaluate_feedback_promotion(str(normalized["memory_id"]))
@@ -1100,6 +1112,8 @@ def feedback_cmd(as_json: bool, request_file: str) -> None:
         else:
             result["promotion_evaluated"] = False
             result["promoted"] = False
+    except InactiveMemoryFeedbackError as exc:
+        _exit_json(feedback_error_payload(code="memory_inactive", message=str(exc), duration_ms=_duration_ms(started)), 1)
     except FeedbackValidationError as exc:
         _exit_json(
             feedback_error_payload(
@@ -1214,16 +1228,33 @@ def capture_transcript_cmd(
 
 
 @cli.command("read")
-@click.argument("item_id")
+@click.argument("item_ids", nargs=-1, required=True)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Output provider-contract JSON.")
-def memory_read(item_id: str, as_json: bool) -> None:
+@click.option("--read-only", is_flag=True, help="Do not update access history. Include current use eligibility in JSON.")
+@click.option("--eligibility-only", is_flag=True, help="Return current use eligibility for one or more IDs.")
+def memory_read(item_ids: tuple[str, ...], as_json: bool, read_only: bool, eligibility_only: bool) -> None:
     """Read a specific memory item by ID or path."""
+    if eligibility_only:
+        if not (as_json and read_only):
+            raise click.UsageError("--eligibility-only requires --read-only and --json.")
+        _read_memory_eligibility(item_ids)
+        return
+    if len(item_ids) != 1:
+        raise click.UsageError("Reading multiple IDs requires --eligibility-only.")
+
+    item_id = item_ids[0]
     gw = _get_gateway()
     try:
-        item = gw.read(item_id=item_id)
+        item = gw.peek(item_id) if read_only else gw.read(item_id=item_id)
         if as_json:
             from core.provider import memory_item_payload
-            _echo_json(memory_item_payload(item))
+            payload = memory_item_payload(item)
+            if read_only:
+                from core.feedback import FeedbackStore, inactive_for_use, ledger_retired
+
+                events = FeedbackStore(os.environ.get("MNEMOS_REPO_ROOT", ".")).read_events()
+                payload["eligible_for_use"] = not (inactive_for_use(item) or ledger_retired(events, str(item.get("id") or item_id)))
+            _echo_json(payload)
         else:
             _echo_json(item)
     except FileNotFoundError:
@@ -1237,6 +1268,28 @@ def memory_read(item_id: str, as_json: bool) -> None:
             sys.exit(1)
         click.echo(f"error: item '{item_id}' not found", err=True)
         sys.exit(1)
+
+
+def _read_memory_eligibility(item_ids: tuple[str, ...]) -> None:
+    from core.feedback import FeedbackStore, inactive_for_use
+
+    gw = _get_gateway()
+    requested = dict.fromkeys(item_ids)
+    events = FeedbackStore(os.environ.get("MNEMOS_REPO_ROOT", ".")).read_events()
+    retired = {row["memory_id"] for row in events if isinstance(row.get("memory_id"), str)
+               and row.get("event") in {"invalidated", "superseded"}}
+    items = []
+    for memory_id in requested:
+        try:
+            item = gw.peek(memory_id)
+        except FileNotFoundError:
+            item = {}
+        eligibility = None
+        if item.get("id") == memory_id:
+            eligibility = memory_id not in retired and not inactive_for_use(item)
+        items.append({"id": memory_id, "eligible_for_use": eligibility})
+
+    _echo_json({"schema_version": "mnemos.read-eligibility.response.v1", "items": items})
 
 
 @cli.command("use")
@@ -3303,6 +3356,7 @@ def project_context_group() -> None:
     type=click.Path(file_okay=False, dir_okay=True, exists=True),
     help="Project root used for root-hash identity and relative source paths.",
 )
+@click.option("--section", help="Capture one exact heading from a Markdown file inside the project root.")
 @click.option("--kind", default="context", help="Default section kind when file name has no known kind.")
 @click.option("--layer", default="project", help="Target memory layer (default: project).")
 @click.option("--run-id", default="project-context", help="Run ID for layer scoping.")
@@ -3321,6 +3375,7 @@ def project_context_capture(
     source: str,
     project_id: str,
     project_root: str,
+    section: str | None,
     kind: str,
     layer: str,
     run_id: str,
@@ -3333,6 +3388,13 @@ def project_context_capture(
     """Capture or update markdown project-context sections."""
     from agents.source_adapters import ProjectContextIngestor, ProjectContextScanner
 
+    if section is not None:
+        path = Path(source).resolve()
+        if not path.is_file() or path.suffix.lower() not in {".md", ".markdown"}:
+            raise click.UsageError("--section requires one Markdown file as SOURCE.")
+        if not path.is_relative_to(Path(project_root).resolve()):
+            raise click.UsageError("SOURCE must be inside --project-root when using --section.")
+
     scanner = ProjectContextScanner(
         source,
         project_id=project_id,
@@ -3343,6 +3405,11 @@ def project_context_capture(
         source_revision=source_revision,
     )
     sections = scanner.discover()
+    if section is not None:
+        sections = [item for item in sections if item.heading == section]
+        if len(sections) != 1:
+            raise click.UsageError(f"--section expected exactly one section titled {section!r}, found {len(sections)}.")
+
     if not sections:
         payload = {"status": "ok", "created": [], "updated": [], "skipped": [], "section_count": 0}
         if as_json:
@@ -3352,12 +3419,22 @@ def project_context_capture(
         return
 
     try:
-        report = ProjectContextIngestor(_get_gateway()).ingest(
-            sections,
-            layer=layer,
-            run_id=run_id,
-            dry_run=dry_run,
-        )
+        if dry_run:
+            from core.config import get_backend_config
+            from core.obsidian import ObsidianBackend
+            from core.store import MemoryStore
+
+            repo_root = os.environ.get("MNEMOS_REPO_ROOT", ".")
+            config = get_backend_config(repo_root)
+            if config.backend == "obsidian":
+                if not config.vault_path:
+                    raise ValueError("Obsidian storage requires storage.vault_path in mnemos.yml")
+                store = ObsidianBackend(config.vault_path, initialize_storage=False)
+            else:
+                store = MemoryStore(repo_root)
+            report = ProjectContextIngestor.preview(sections, store.read, layer=layer)
+        else:
+            report = ProjectContextIngestor(_get_gateway()).ingest(sections, layer=layer, run_id=run_id)
     except Exception as exc:
         payload = {
             "status": "degraded",

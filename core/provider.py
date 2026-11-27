@@ -447,6 +447,9 @@ def _recall_result_payload(
         "task_shape": getattr(item, "task_shape", None),
         "project_id": getattr(item, "project_id", None),
         "project_root_hash": getattr(item, "project_root_hash", None),
+        "source_path": getattr(item, "source_path", None),
+        "source_section": getattr(item, "source_section", None),
+        "source_content_hash": getattr(item, "source_content_hash", None),
         "provenance": getattr(item, "provenance", None) or {},
         "created_at": getattr(item, "created_at", None),
         "updated_at": getattr(item, "updated_at", None),
@@ -518,6 +521,7 @@ def _recall_diagnostics(
         "fallback_used": fallback_used,
         "duration_ms": duration_ms,
         "degraded_reasons": degraded_reasons,
+        "korean_candidate_count": diagnostics.get("korean_candidate_count", 0),
     }
 
 

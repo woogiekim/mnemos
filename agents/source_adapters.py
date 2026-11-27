@@ -8,7 +8,9 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
+
+from core.contracts import project_evidence_tags
 
 if TYPE_CHECKING:
     from core.gateway import MemoryGateway
@@ -536,6 +538,44 @@ class ProjectContextIngestor:
     def __init__(self, gateway: "MemoryGateway") -> None:
         self._gw = gateway
 
+    @classmethod
+    def preview(
+        cls,
+        sections: Iterable[ProjectContextSection],
+        read_item: Callable[[str], dict[str, Any]],
+        *,
+        layer: str = "project",
+    ) -> SourceIngestReport:
+        report = SourceIngestReport()
+        for section in sections:
+            existing = cls._read_existing(read_item, section.memory_id)
+            if existing is None:
+                report.created.append(section.memory_id)
+            elif any(cls._update_flags(section, existing, layer)):
+                report.updated.append(section.memory_id)
+            else:
+                report.skipped.append(str(existing.get("id") or section.memory_id))
+        return report
+
+    @staticmethod
+    def _update_flags(
+        section: ProjectContextSection, existing: dict[str, Any], layer: str,
+    ) -> tuple[bool, bool, bool]:
+        activation = (
+            layer == "project"
+            and existing.get("layer") == "project"
+            and existing.get("semantic_status") is None
+            and existing.get("stage") != "archived"
+            and not existing.get("superseded_by")
+        )
+        content_changed = (
+            existing.get("source_content_hash") != section.content_hash
+            or str(existing.get("content") or "").strip() != section.content
+        )
+        pinned = project_evidence_tags(existing.get("tags") or [])
+        incoming = project_evidence_tags(section.tags)
+        return activation, content_changed, bool(incoming and incoming != pinned)
+
     def ingest(
         self,
         sections: Iterable[ProjectContextSection],
@@ -544,32 +584,45 @@ class ProjectContextIngestor:
         run_id: str = "project-context",
         dry_run: bool = False,
     ) -> SourceIngestReport:
+        if dry_run:
+            return self.preview(sections, self._gw._store.read, layer=layer)
+
         report = SourceIngestReport()
 
         for section in sections:
             memory_id = section.memory_id
             metadata = self._metadata(section, layer=layer)
-            existing = self._read_existing(memory_id)
+            existing = self._read_existing(self._gw._store.read, memory_id)
 
-            if existing is not None and existing.get("source_content_hash") == section.content_hash:
-                report.skipped.append(str(existing.get("id") or memory_id))
-                continue
+            if layer == "project" and existing is None:
+                metadata["semantic_status"] = "active"
 
             if existing is not None:
-                if dry_run:
-                    report.updated.append(memory_id)
+                activation, content_changed, evidence_changed = self._update_flags(section, existing, layer)
+                if not (activation or content_changed or evidence_changed):
+                    report.skipped.append(str(existing.get("id") or memory_id))
                     continue
-                self._gw.update(item_id=memory_id, content=section.content)
-                refreshed = self._gw._store.read(memory_id)
-                self._gw._store.update(refreshed["_path"], metadata_updates=metadata)
-                self._reindex(memory_id, section.content, layer, section.tags)
+
+                stored_tags = set(existing.get("tags") or [])
+                pinned = project_evidence_tags(stored_tags)
+                incoming = project_evidence_tags(section.tags)
+                if activation:
+                    metadata["semantic_status"] = "active"
+                if content_changed:
+                    metadata["tags"] = sorted(set(section.tags).union(incoming or pinned))
+                    self._gw.update(item_id=memory_id, content=section.content)
+                else:
+                    metadata = {"semantic_status": "active"} if activation else {}
+                    if evidence_changed:
+                        metadata["tags"] = sorted(stored_tags.difference(pinned).union(incoming))
+                self._gw._store.update(existing["_path"], metadata_updates=metadata)
+                if content_changed or evidence_changed:
+                    self._reindex(memory_id, section.content, layer, metadata["tags"])
+
                 report.updated.append(memory_id)
                 continue
 
-            if dry_run:
-                report.created.append(memory_id)
-                continue
-
+            # Identical prose can belong to multiple roots or source sections.
             captured_id = self._gw.capture(
                 layer=layer,
                 item_id=memory_id,
@@ -578,6 +631,7 @@ class ProjectContextIngestor:
                 run_id=run_id,
                 extra_metadata=metadata,
                 no_classify=True,
+                skip_dedup=True,
             )
             if captured_id is not None:
                 report.created.append(captured_id)
@@ -602,9 +656,10 @@ class ProjectContextIngestor:
             "tags": section.tags,
         }
 
-    def _read_existing(self, memory_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _read_existing(read_item: Callable[[str], dict[str, Any]], memory_id: str) -> dict[str, Any] | None:
         try:
-            return self._gw._store.read(memory_id)
+            return read_item(memory_id)
         except Exception:
             return None
 
@@ -744,6 +799,8 @@ class ProjectContextAuditor:
                 continue
 
             stale_reasons = _stale_reasons(item, section)
+            if item.get("layer") != layer:
+                stale_reasons.append("storage_layer_mismatch")
             row = _audit_row(memory_id, section, "stale" if stale_reasons else "fresh")
             row["reasons"] = stale_reasons
             if stale_reasons:
@@ -878,6 +935,8 @@ def _stale_reasons(item: dict[str, Any], section: ProjectContextSection) -> list
     reasons: list[str] = []
     if item.get("source_content_hash") != section.content_hash:
         reasons.append("content_hash_changed")
+    elif str(item.get("content") or "").strip() != section.content:
+        reasons.append("content_body_changed")
     if item.get("source_path") != section.relative_path:
         reasons.append("source_path_changed")
     if item.get("source_section") != section.heading:

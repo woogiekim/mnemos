@@ -196,7 +196,6 @@ class GitSyncEngine:
     def _pull_cache_path(self) -> Path:
         """Return the path to the per-root last-pull timestamp cache file."""
         cache_dir = Path.home() / ".mnemos" / ".cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir / f"sync-last-pull-{self._cache_key}.ts"
 
     def _load_last_pull_ts(self) -> float:
@@ -209,7 +208,9 @@ class GitSyncEngine:
     def _save_last_pull_ts(self, ts: float) -> None:
         """Persist the last-pull timestamp to disk (best-effort)."""
         try:
-            self._pull_cache_path().write_text(str(ts), encoding="utf-8")
+            path = self._pull_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(ts), encoding="utf-8")
         except Exception:
             pass  # non-fatal — the in-memory value is still correct
 

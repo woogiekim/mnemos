@@ -204,6 +204,89 @@ def test_capabilities_include_source_adapters() -> None:
     assert payload["capability_status"]["project_context_freshness_audit"] == "supported"
 
 
+@pytest.mark.parametrize("backend", ["default", "obsidian"])
+def test_project_context_dry_run_leaves_store_and_caches_unchanged(repo_root: Path, monkeypatch, backend) -> None:
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("MNEMOS_BACKEND", backend)
+    cache = repo_root / "hash-cache"
+    monkeypatch.setenv("MNEMOS_HASH_INDEX_CACHE_DIR", str(cache))
+    vault = repo_root / "vault"
+    (repo_root / "mnemos.yml").write_text(f"storage:\n  vault_path: {vault}\n", encoding="utf-8")
+    source = repo_root / "checks.md"
+    source.write_text("# First verification\n\nKeep this check.\n", encoding="utf-8")
+    args = ["project-context", "capture", str(source), "--project-id", "mnemos", "--project-root",
+            str(repo_root), "--section", "First verification", "--json"]
+    files_before = set(repo_root.rglob("*"))
+    home_cache = Path.home() / ".mnemos/.cache"
+    home_before = set(home_cache.glob("*")) if home_cache.exists() else None
+
+    preview = CliRunner().invoke(cli, [*args, "--dry-run"])
+
+    assert preview.exit_code == 0, preview.output
+    report = json.loads(preview.output)
+    assert report["section_count"] == 1 and len(report["created"]) == 1
+    assert set(repo_root.rglob("*")) == files_before
+    assert (set(home_cache.glob("*")) if home_cache.exists() else None) == home_before
+
+
+def test_project_context_capture_selects_only_one_exact_heading(repo_root: Path, monkeypatch) -> None:
+    from core.gateway import MemoryGateway
+
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    source = repo_root / "checks.md"
+    source.write_text("# First verification\n\nKeep this check.\n\n# Other verification\n\nOther scope.\n",
+                      encoding="utf-8")
+    runner = CliRunner()
+    flags = ["project-context", "capture", str(source), "--project-id", "mnemos", "--project-root",
+             str(repo_root), "--section", "First verification", "--json"]
+
+    preview = runner.invoke(cli, [*flags, "--dry-run"])
+    assert preview.exit_code == 0, preview.output
+    assert not list((repo_root / "wiki/projects").glob("*.md"))
+
+    capture = runner.invoke(cli, flags)
+    assert capture.exit_code == 0, capture.output
+    report = json.loads(capture.output)
+    assert report["section_count"] == 1 and json.loads(preview.output) == report
+    memory_id, = report["created"]
+    item = MemoryGateway(repo_root=str(repo_root)).peek(memory_id)
+    assert item["source_path"] == "checks.md"
+    assert item["source_section"] == "First verification"
+    assert "Other scope" not in item["content"]
+    assert json.loads(runner.invoke(cli, flags).output)["skipped"] == [memory_id]
+    assert len(list((repo_root / "wiki/projects").glob("*.md"))) == 1
+
+
+@pytest.mark.parametrize(("case", "message"), [
+    ("wrong-heading", "expected exactly one section"),
+    ("duplicate", "expected exactly one section"),
+    ("directory", "one Markdown file"),
+    ("outside", "inside --project-root"),
+])
+def test_project_context_capture_rejects_invalid_section_scope_before_writing(
+    repo_root: Path, monkeypatch, case, message,
+) -> None:
+    monkeypatch.setenv("MNEMOS_REPO_ROOT", str(repo_root))
+    root = repo_root / "project"
+    root.mkdir()
+    heading = "Requested"
+    path = (repo_root if case == "outside" else root) / "checks.md"
+    text = "# Other\nSome context." if case == "wrong-heading" else "# Requested\nSome context."
+    if case == "duplicate":
+        text += "\n\n## Requested\nAnother scope."
+    path.write_text(text, encoding="utf-8")
+    if case == "directory":
+        path = root
+
+    result = CliRunner().invoke(cli, ["project-context", "capture", str(path), "--project-id", "mnemos",
+                                     "--project-root", str(root), "--section", heading])
+
+    assert result.exit_code == 2, result.output
+    assert message in result.output
+    assert not list((repo_root / "wiki/projects").glob("*.md"))
+    assert not (repo_root / ".agent/state/fts.db").exists()
+
+
 def test_project_context_capture_update_stable_id_and_metadata(
     repo_root: Path,
     tmp_path: Path,
@@ -250,6 +333,122 @@ def test_project_context_capture_update_stable_id_and_metadata(
     updated = gateway._store.read(memory_id)
     assert "structured recall" in updated["content"]
     assert updated["source_revision"] == "rev2"
+
+
+@pytest.mark.parametrize("reopen_gateway", [False, True])
+def test_project_context_capture_keeps_identical_sections_owned_by_each_root(
+    repo_root: Path, tmp_path: Path, reopen_gateway: bool,
+) -> None:
+    from agents.source_adapters import ProjectContextIngestor, ProjectContextRecaller, ProjectContextScanner
+    from core.gateway import MemoryGateway
+
+    common_text = "Project recall uses section metadata."
+    updated_text = "Project recall uses immutable source metadata."
+
+    def discover(root: Path):
+        return ProjectContextScanner(root, project_id="mnemos", project_root=root).discover()
+
+    roots = [tmp_path / name / "mnemos" for name in ("original", "checkout")]
+    for root in roots:
+        root.mkdir(parents=True)
+        (root / "decisions.md").write_text(f"# Retrieval\n{common_text}\n", encoding="utf-8")
+
+    gateway = MemoryGateway(repo_root=str(repo_root))
+    ingestor = ProjectContextIngestor(gateway)
+    first, second = [discover(root)[0] for root in roots]
+    assert ingestor.ingest([first]).created == [first.memory_id]
+
+    if reopen_gateway:
+        gateway = MemoryGateway(repo_root=str(repo_root))
+        ingestor = ProjectContextIngestor(gateway)
+    assert first.memory_id != second.memory_id
+    assert ingestor.ingest([second]).created == [second.memory_id]
+
+    (roots[0] / "decisions.md").write_text(f"# Retrieval\n{updated_text}\n", encoding="utf-8")
+    assert ingestor.ingest(discover(roots[0])).updated == [first.memory_id]
+    assert ingestor.ingest(discover(roots[0])).skipped == [first.memory_id]
+
+    for section, expected in ((first, updated_text), (second, common_text)):
+        item = gateway.peek(section.memory_id)
+        assert item["content"].strip() == f"# Retrieval\n{expected}"
+        assert item["project_root_hash"] == section.project_root_hash
+        recalled = ProjectContextRecaller(gateway).recall(
+            "metadata", project_id="mnemos", project_root_hash_value=section.project_root_hash,
+        )
+        assert [record["memory_id"] for record in recalled.to_dict()["results"]] == [section.memory_id]
+
+
+@pytest.mark.parametrize(
+    ("status", "stage", "superseded_by", "expected_status"),
+    [
+        (None, "stored", None, "active"),
+        ("invalidated", "stored", None, "invalidated"),
+        ("verified", "stored", None, "verified"),
+        (None, "archived", None, None),
+        (None, "stored", "replacement", None),
+    ],
+)
+def test_project_context_recapture_preserves_explicit_status_and_retirement(
+    repo_root: Path,
+    tmp_path: Path,
+    status: str | None,
+    stage: str,
+    superseded_by: str | None,
+    expected_status: str | None,
+) -> None:
+    from agents.source_adapters import ProjectContextIngestor, ProjectContextScanner
+    from core.gateway import MemoryGateway
+
+    source = tmp_path / "decisions.md"
+    source.write_text("# Boundary\nUse scoped recall.\n", encoding="utf-8")
+    scanner = ProjectContextScanner(source, project_id="mnemos", project_root=tmp_path)
+    gateway = MemoryGateway(repo_root=str(repo_root))
+    ingestor = ProjectContextIngestor(gateway)
+    sections = scanner.discover()
+    memory_id = ingestor.ingest(sections).created[0]
+    item = gateway.peek(memory_id)
+    gateway._store.update(
+        item["_path"],
+        metadata_updates={"semantic_status": status, "stage": stage, "superseded_by": superseded_by},
+    )
+
+    preview = ingestor.ingest(sections, dry_run=True)
+    assert gateway.peek(memory_id).get("semantic_status") == status
+    report = ingestor.ingest(sections)
+
+    assert report.updated == preview.updated == ([memory_id] if status != expected_status else [])
+    assert gateway.peek(memory_id).get("semantic_status") == expected_status
+    assert ingestor.ingest(sections).skipped == [memory_id]
+
+    source.write_text("# Boundary\nUse scoped recall after revisions.\n", encoding="utf-8")
+    assert ingestor.ingest(scanner.discover()).updated == [memory_id]
+    updated = gateway.peek(memory_id)
+    assert updated.get("semantic_status") == expected_status
+    assert updated["stage"] == stage
+    assert updated.get("superseded_by") == superseded_by
+
+
+def test_project_context_recapture_restores_edited_body_at_same_source_hash(repo_root: Path, tmp_path: Path) -> None:
+    from agents.source_adapters import ProjectContextIngestor, ProjectContextScanner, _stale_reasons
+    from core.gateway import MemoryGateway
+
+    source = tmp_path / "decisions.md"
+    original = "# Boundary\nUse scoped recall."
+    source.write_text(original + "\n", encoding="utf-8")
+    section, = ProjectContextScanner(source, project_id="mnemos", project_root=tmp_path).discover()
+    gateway = MemoryGateway(repo_root=str(repo_root))
+    ingestor = ProjectContextIngestor(gateway)
+    memory_id, = ingestor.ingest([section]).created
+    gateway.update(memory_id, "# Boundary\nDisable scoped recall.")
+    edited = gateway.peek(memory_id)
+    assert edited["source_content_hash"] == section.content_hash
+
+    assert ingestor.ingest([section]).updated == [memory_id]
+    assert _stale_reasons(edited, section) == ["content_body_changed"]
+    current = gateway.peek(memory_id)
+    assert current["content"].strip() == original
+    assert current["source_content_hash"] == section.content_hash
+    assert ingestor.ingest([section]).skipped == [memory_id]
 
 
 def test_project_context_recall_filters_and_trace_json(repo_root: Path, tmp_path: Path) -> None:

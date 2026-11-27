@@ -193,6 +193,16 @@ class TestExpandQuery:
 class TestFTSKoreanIntegration:
     """FTSIndex.search preprocesses Korean queries before hitting FTS5."""
 
+    def test_particle_stripping_preserves_literal_matches_and_normalized_priority(self, tmp_path):
+        from core.fts import FTSIndex
+
+        fts = FTSIndex(db_path=str(tmp_path / "fts.db"))
+        fts.index_item("literal", "장비를 반납한 다음, 원장의 수량을 확인한다.", {"layer": "project"})
+        fts.index_item("normalized", "장비 반납한 다음 기록을 확인한다.", {"layer": "project"})
+
+        assert [row["item_id"] for row in fts.search("장비를 반납한 다음")] == ["normalized", "literal"]
+        assert [row["item_id"] for row in fts.search("장비를 반납한 다음", limit=1)] == ["normalized"]
+
     def test_particle_attached_query_finds_indexed_content(self, tmp_path):
         from core.fts import FTSIndex
         db_path = str(tmp_path / "fts.db")
