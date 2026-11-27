@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,20 @@ class FeedbackValidationError(ValueError):
     """Raised when a feedback request violates the provider contract."""
 
 
+class InactiveMemoryFeedbackError(FeedbackValidationError):
+    """Raised when new use feedback targets a retired memory."""
+
+
+def inactive_for_use(item: dict[str, Any] | None) -> bool:
+    return bool(item and (item.get("stage") == "archived"
+                or item.get("semantic_status") in {"deprecated", "invalidated", "superseded"}
+                or item.get("superseded_by")))
+
+
+def ledger_retired(events: list[dict[str, Any]], memory_id: str) -> bool:
+    return any(row.get("memory_id") == memory_id and row.get("event") in {"invalidated", "superseded"} for row in events)
+
+
 class FeedbackStore:
     """Persist feedback events separately from memory item files."""
 
@@ -33,13 +49,25 @@ class FeedbackStore:
         self.ledger_path = self._feedback_dir / "events.jsonl"
         self.projection_path = self._feedback_dir / "usage_projection.json"
 
-    def record(self, request: dict[str, Any], *, legacy_access_count: int = 0) -> dict[str, Any]:
+    def record(self, request: dict[str, Any], *, legacy_access_count: int = 0,
+               current_item: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = normalize_feedback_request(request)
-        self._ensure_files()
+        self._feedback_dir.mkdir(parents=True, exist_ok=True)
+        # The transaction serializes the retirement check and append across CLI processes.
+        with closing(sqlite3.connect(self._feedback_dir / "write-lock.sqlite3")) as lock:
+            lock.execute("BEGIN IMMEDIATE")
+            return self._record(normalized, legacy_access_count=legacy_access_count, current_item=current_item)
 
+    def _record(self, normalized: dict[str, Any], *, legacy_access_count: int,
+                current_item: dict[str, Any] | None) -> dict[str, Any]:
         existing_events = self.read_events()
         duplicate = _find_duplicate(existing_events, normalized)
+        memory_id = normalized["memory_id"]
         if duplicate is None:
+            if normalized["event"] in {"applied", "validated"} and (
+                inactive_for_use(current_item) or ledger_retired(existing_events, memory_id)
+            ):
+                raise InactiveMemoryFeedbackError(f"memory '{memory_id}' is no longer eligible for use")
             entry = {
                 **normalized,
                 "recorded_at": _now_iso(),
@@ -56,7 +84,6 @@ class FeedbackStore:
         projection = build_usage_projection(events)
         self._write_projection(projection)
 
-        memory_id = normalized["memory_id"]
         return {
             "event": {
                 "event_id": normalized["event_id"],
@@ -100,18 +127,18 @@ class FeedbackStore:
         if not isinstance(payload, dict):
             return {}
 
-        return {
+        projection = {
             str(memory_id): dict(value)
             for memory_id, value in payload.items()
             if isinstance(value, dict)
         }
+        if self.ledger_path.is_file() and any(
+            value.get("applied_count") and "candidate_applied_count" not in value
+            for value in projection.values()
+        ):
+            return build_usage_projection(self.read_events())
 
-    def _ensure_files(self) -> None:
-        self._feedback_dir.mkdir(parents=True, exist_ok=True)
-        if not self.ledger_path.exists():
-            self.ledger_path.touch()
-        if not self.projection_path.exists():
-            self._write_projection({})
+        return projection
 
     def _write_projection(self, projection: dict[str, dict[str, Any]]) -> None:
         self._feedback_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +221,8 @@ def build_usage_projection(events: list[dict[str, Any]]) -> dict[str, dict[str, 
             usage["selected_count"] += 1
         elif event == "applied":
             usage["applied_count"] += 1
+            if entry.get("reason_code") == "source_reviewed_candidate":
+                usage["candidate_applied_count"] += 1
             usage["last_applied_at"] = _latest_ts(usage["last_applied_at"], ts)
             if task_id:
                 applied_tasks.setdefault(memory_id, set()).add(task_id)
@@ -202,6 +231,13 @@ def build_usage_projection(events: list[dict[str, Any]]) -> dict[str, dict[str, 
         elif event == "validated":
             usage["validated_use_count"] += 1
             usage["last_validated_at"] = _latest_ts(usage["last_validated_at"], ts)
+            metadata = entry.get("metadata")
+            binding = metadata.get("reviewed_source_binding") if isinstance(metadata, dict) else None
+            if (entry.get("reason_code") == "source_reviewed_candidate" and isinstance(binding, str)
+                    and len(binding) == 64 and all(char in "0123456789abcdef" for char in binding)):
+                bindings = usage.setdefault("reviewed_source_bindings", [])
+                if binding not in bindings:
+                    bindings.append(binding)
             if task_id:
                 validated_tasks.setdefault(memory_id, set()).add(task_id)
             if project_id:
@@ -226,6 +262,7 @@ def empty_usage_projection(memory_id: str, legacy_access_count: int = 0) -> dict
         "retrieval_count": 0,
         "selected_count": 0,
         "applied_count": 0,
+        "candidate_applied_count": 0,
         "validated_use_count": 0,
         "distinct_applied_task_count": 0,
         "distinct_validated_task_count": 0,
@@ -240,12 +277,13 @@ def empty_usage_projection(memory_id: str, legacy_access_count: int = 0) -> dict
     }
 
 
-def validated_usage_score(usage: dict[str, Any] | None) -> float:
+def validated_usage_score(usage: dict[str, Any] | None, *, include_applied: bool = True) -> float:
     """Return Recall-only usage score from applied and validated feedback."""
     if not usage:
         return 0.0
 
-    applied = min(1.0, _int_value(usage.get("applied_count"), 0) / 4)
+    ranked_applications = _int_value(usage.get("applied_count"), 0) - _int_value(usage.get("candidate_applied_count"), 0)
+    applied = min(1.0, max(0.0, ranked_applications / 4)) if include_applied else 0.0
     validated = min(1.0, _int_value(usage.get("validated_use_count"), 0) / 3)
     distinct_validated = min(1.0, _int_value(usage.get("distinct_validated_task_count"), 0) / 2)
     return round((applied * 0.2) + (validated * 0.3) + (distinct_validated * 0.5), 6)

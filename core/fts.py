@@ -92,6 +92,34 @@ def _sanitise_fts_variant(variant: str) -> str:
     return " ".join(sanitised)
 
 
+def _indexed_project_scope_rank(raw_metadata: str, scope: tuple[str, str]) -> int:
+    """Rank exact indexed scopes before legacy rows and exclude indexed mismatches."""
+    try:
+        metadata = json.loads(raw_metadata)
+    except (TypeError, ValueError):
+        return 1
+    if not isinstance(metadata, dict):
+        return 1
+    if metadata.get("layer") and metadata["layer"] != "project":
+        return 0
+
+    tags = metadata.get("tags")
+    tags = [tag for tag in tags if isinstance(tag, str)] if isinstance(tags, list) else []
+    known = 0
+    for field, prefix, expected in (("project_id", "project:", scope[0]),
+                                    ("project_root_hash", "project_root:", scope[1])):
+        indexed = metadata.get(field)
+        if indexed:
+            if indexed != expected:
+                return 0
+            known += 1
+        elif any(tag.startswith(prefix) for tag in tags):
+            if prefix + expected not in tags:
+                return 0
+            known += 1
+    return 2 if known == 2 else 1
+
+
 class FTSIndex:
     """Manages a SQLite FTS5 full-text search index."""
 
@@ -141,14 +169,13 @@ class FTSIndex:
             )
             conn.commit()
 
-    def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+    def search(self, query: str, limit: int = 20, *, project_scope: tuple[str, str] | None = None) -> list[dict[str, Any]]:
         """Search the FTS5 index and return ranked matches.
 
         Korean queries are preprocessed (particle stripping + alias expansion)
-        before being submitted to FTS5.  When alias expansion produces a
-        different query form, both variants are searched and results are merged
-        (deduped by item_id) so that ``니모스를`` matches the same documents
-        as ``mnemos``.
+        before being submitted to FTS5. The original Korean terms are also
+        searched after the preprocessed variants because indexed text retains
+        particles. Results are merged and deduped by item_id.
 
         Compound technical terms containing colons or hyphens (e.g. ``crew:run``,
         ``agent-crew``) are also normalised by replacing those separators with
@@ -160,8 +187,10 @@ class FTSIndex:
         if not query.strip():
             return []
 
-        # Expand Korean query into one or two variants (deduped).
         query_variants = expand_query(query)
+        original = " ".join(query.split())
+        if re.search(r"[가-힣]", original) and original not in query_variants:
+            query_variants.append(original)
 
         # For each variant, also add a compound-normalised form (colon / hyphen
         # replaced with spaces).  This widens recall for queries like "crew:run"
@@ -184,6 +213,14 @@ class FTSIndex:
         results: list[dict[str, Any]] = []
 
         with self._connect() as conn:
+            where = "items_fts MATCH ?"
+            order = "rank"
+            if project_scope is not None:
+                conn.create_function("indexed_scope_rank", 1,
+                                     lambda metadata: _indexed_project_scope_rank(metadata, project_scope),
+                                     deterministic=True)
+                where += " AND indexed_scope_rank(metadata) > 0"
+                order = "indexed_scope_rank(metadata) DESC, rank"
             for variant in expanded_variants:
                 if not variant.strip():
                     continue
@@ -192,11 +229,11 @@ class FTSIndex:
                 safe_variant = _sanitise_fts_variant(variant)
                 try:
                     rows = conn.execute(
-                        """
+                        f"""
                         SELECT item_id, content, metadata, rank
                         FROM items_fts
-                        WHERE items_fts MATCH ?
-                        ORDER BY rank
+                        WHERE {where}
+                        ORDER BY {order}
                         LIMIT ?
                         """,
                         (safe_variant, limit),

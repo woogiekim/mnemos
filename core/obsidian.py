@@ -193,9 +193,10 @@ class ObsidianBackend:
         vault_path: str,
         fts: FTSIndex | None = None,
         sync_config: "SyncConfig | None" = None,  # type: ignore[name-defined]
+        *,
+        initialize_storage: bool = True,
     ) -> None:
         self._vault = Path(vault_path)
-        self._vault.mkdir(parents=True, exist_ok=True)
         self._fts: FTSIndex | None = fts
         # mtime cache: maps str(path) → float (mtime at last sync)
         self._mtime_cache: dict[str, float] = {}
@@ -203,7 +204,9 @@ class ObsidianBackend:
         # Markdown frontmatter block for hot reads in prompt-context paths.
         self._id_path_cache: dict[str, Path] = {}
         self._hash_index_path = self._default_hash_index_path()
-        self._init_hash_index()
+        if initialize_storage:
+            self._vault.mkdir(parents=True, exist_ok=True)
+            self._init_hash_index()
 
         # ── Sync wiring (issue #24, refactored onto core.sync for #69) ──────
         from core.config import SyncConfig as _SyncConfig

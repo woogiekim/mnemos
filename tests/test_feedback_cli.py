@@ -228,6 +228,49 @@ def test_feedback_applied_and_validated_are_counted_separately(
     assert projection["last_validated_at"]
 
 
+@pytest.mark.parametrize("retirement", ["invalidated", "superseded"])
+def test_retired_memory_rejects_new_applied_and_validated_feedback(runner: CliRunner, tmp_path: Path, retirement: str) -> None:
+    from core.feedback import FeedbackStore
+
+    _capture_memory("mem-123")
+
+    def send(**values):
+        return _invoke_feedback(runner, "-", json.dumps(_feedback_request(**values)))
+
+    original = send()
+    assert original.exit_code == 0, original.output
+    assert send(event=retirement, event_id="retire").exit_code == 0
+
+    for event in ("applied", "validated"):
+        result = send(event=event, event_id=f"late-{event}", task_id="later-task")
+        assert result.exit_code != 0
+        assert json.loads(result.output)["error"]["code"] == "memory_inactive"
+
+    repeated = send()
+    assert repeated.exit_code == 0 and json.loads(repeated.output)["event"]["duplicate"]
+    assert [row["event"] for row in FeedbackStore(tmp_path).read_events()] == ["applied", retirement]
+
+
+def test_read_only_eligibility_returns_each_id_without_touching_memories(runner: CliRunner, repo_root: Path) -> None:
+    _capture_memory("active", "active note")
+    _capture_memory("retired", "retired note")
+    _capture_memory("deprecated", "deprecated note", metadata={"semantic_status": "deprecated"})
+    retired = _feedback_request(memory_id="retired", event="invalidated")
+    assert _invoke_feedback(runner, "-", json.dumps(retired)).exit_code == 0
+    before = _hash_memory_files(repo_root)
+
+    result = runner.invoke(cli, ["read", "--json", "--read-only", "--eligibility-only",
+                                 "active", "retired", "missing", "deprecated", "active"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["schema_version"] == "mnemos.read-eligibility.response.v1"
+    assert data["items"] == [{"id": name, "eligible_for_use": state} for name, state in (
+        ("active", True), ("retired", False), ("missing", None), ("deprecated", False),
+    )]
+    assert _hash_memory_files(repo_root) == before
+
+
 def test_feedback_ignored_does_not_increment_applied_count(
     runner: CliRunner,
     tmp_path: Path,

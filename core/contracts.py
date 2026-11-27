@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Iterable, Protocol, runtime_checkable
+
+
+def project_evidence_tags(tags: Iterable[Any]) -> list[str]:
+    return sorted(tag for tag in tags if isinstance(tag, str) and tag.startswith("evidence-sha256:"))
 
 
 class TrustLevel(str, Enum):
@@ -157,6 +161,7 @@ class RecallMemory:
     provenance: dict[str, Any] = field(default_factory=dict)
     record_type: str | None = None
     score_components: dict[str, Any] = field(default_factory=dict)
+    source_content_hash: str | None = None
 
 
 @dataclass(frozen=True)
